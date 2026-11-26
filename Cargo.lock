@@ -2100,6 +2100,7 @@ dependencies = [
  "faer",
  "nalgebra",
  "rayon",
+ "serde",
 ]
 
 [[package]]
@@ -2111,6 +2112,7 @@ dependencies = [
  "breakit-core",
  "breakit-lab",
  "breakit-render",
+ "breakit-scenario",
 ]
 
 [[package]]
@@ -2130,12 +2132,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "breakit-parts"
+version = "0.1.0"
+dependencies = [
+ "breakit-core",
+ "breakit-mesh",
+ "ron",
+ "serde",
+]
+
+[[package]]
 name = "breakit-render"
 version = "0.1.0"
 dependencies = [
  "bevy",
  "breakit-core",
  "breakit-mesh",
+]
+
+[[package]]
+name = "breakit-scenario"
+version = "0.1.0"
+dependencies = [
+ "breakit-core",
+ "ron",
+ "serde",
 ]
 
 [[package]]
@@ -4142,6 +4163,7 @@ dependencies = [
  "num-complex",
  "num-rational",
  "num-traits",
+ "serde",
  "simba",
  "typenum",
 ]
@@ -4344,6 +4366,7 @@ dependencies = [
  "bytemuck",
  "num-traits",
  "rand 0.8.8",
+ "serde",
 ]
 
 [[package]]
