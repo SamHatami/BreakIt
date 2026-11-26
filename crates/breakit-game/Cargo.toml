@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 breakit-core = { path = "../breakit-core" }
 breakit-render = { path = "../breakit-render" }
+breakit-scenario = { path = "../breakit-scenario" }
 # Pinned on purpose: Bevy breaks its API every release. Upgrade deliberately,
 # following that release's migration guide.
 bevy = { version = "=0.20.1", default-features = false, features = ["3d", "ui"] }

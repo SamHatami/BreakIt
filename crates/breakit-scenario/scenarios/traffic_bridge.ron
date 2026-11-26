@@ -1,0 +1,73 @@
+// Test sheet B-01: a short road bridge over a culvert.
+//
+// Units: metres, newtons, kilograms, seconds. World is Y up; the lane runs
+// along X at y = 0.
+(
+    id: "traffic_bridge",
+    sheet: "B-01",
+    group: "Bridges",
+    title: "Culvert road bridge",
+    brief: "Carry a road 6 m across a culvert. Two delivery trucks cross first, then a loaded tipper. The bearings on each bank are pins: they hold the bridge in place but cannot stop it rotating. The deck needs a node at least every 1.5 m for the wheels.",
+    limits: (
+        volume: (min: (-3.5, -2.0, -1.5), max: (3.5, 3.0, 1.5)),
+        budget: Some(2700.0),
+        max_mass: Some(1200.0),
+        materials: Some([Steel, Timber]),
+    ),
+    anchors: [
+        (name: "W1", position: (-3.0, 0.0, -1.0), kind: Pinned),
+        (name: "W2", position: (-3.0, 0.0, 0.0), kind: Pinned),
+        (name: "W3", position: (-3.0, 0.0, 1.0), kind: Pinned),
+        (name: "E1", position: (3.0, 0.0, -1.0), kind: Pinned),
+        (name: "E2", position: (3.0, 0.0, 0.0), kind: Pinned),
+        (name: "E3", position: (3.0, 0.0, 1.0), kind: Pinned),
+    ],
+    deck: Some((
+        from: (-3.0, 0.0, 0.0),
+        to: (3.0, 0.0, 0.0),
+        width: 1.2,
+        height: 0.25,
+        max_gap: 1.5,
+    )),
+    events: [
+        Convoy(
+            name: "Two delivery trucks",
+            start: 0.5,
+            speed: 4.0,
+            count: 2,
+            spacing: 9.0,
+            // 7.5 t: 30 kN front, 44 kN rear.
+            axles: [(offset: 0.0, load: 30000.0), (offset: 3.2, load: 44000.0)],
+        ),
+        Convoy(
+            name: "Loaded tipper",
+            start: 6.5,
+            speed: 2.5,
+            count: 1,
+            spacing: 0.0,
+            // 18 t: 60 kN front, two 60 kN rear axles.
+            axles: [
+                (offset: 0.0, load: 60000.0),
+                (offset: 3.4, load: 60000.0),
+                (offset: 4.7, load: 60000.0),
+            ],
+        ),
+    ],
+    duration: 12.5,
+    settle: 1.0,
+    collapse: (displacement: 0.4, max_broken_fraction: 0.2),
+    overload: Some((rate: 0.5, max_factor: 5.0, deck_per_metre: Some(20000.0))),
+    objectives: [
+        // Span / 300.
+        DeckDeflection(limit: 0.02),
+        NoBreaks,
+        GracefulFailure(warning: 1.0),
+    ],
+    scoring: (
+        target_cost: 2100.0,
+        target_mass: 150.0,
+        margin_band: (1.25, 2.0),
+        weights: (cost: 0.35, mass: 0.15, margin: 0.25, objectives: 0.25),
+        stars: (0.6, 0.85),
+    ),
+)
