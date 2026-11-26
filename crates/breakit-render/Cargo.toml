@@ -1,0 +1,12 @@
+[package]
+name = "breakit-render"
+version = "0.1.0"
+description = "Bevy rendering for BreakIt structures: GPU-bent instanced members, damage shading, fracture debris and particles."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+breakit-core = { path = "../breakit-core" }
+breakit-mesh = { path = "../breakit-mesh" }
+bevy = { version = "=0.20.1", default-features = false, features = ["3d", "png", "tonemapping_luts", "multi_threaded"] }
