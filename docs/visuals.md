@@ -29,7 +29,7 @@ Per frame the CPU writes one record per member and nothing else. Intact members 
 
 A break costs about 0.2 ms once (halves, rebar, chunks, particles).
 
-Not measured yet: GPU frame time on real hardware. The container only has a software rasteriser, which runs the 473-member collapse at about 4 fps and says nothing about a GPU. Run `cargo run --release -p breakit-render --example stress -- 320` (about 5,100 members) on a real machine; it prints fps and the CPU split once a second. Add `--no-sim` to time rendering without the solver.
+Not measured yet: GPU frame time on real hardware. The game shows fps, frame time and the visual update cost top right and logs them every five seconds (`perf [...]` lines), so any run on a real machine records it. The container only has a software rasteriser, which runs the 473-member collapse at about 4 fps and says nothing about a GPU. Run `cargo run --release -p breakit-render --example stress -- 320` (about 5,100 members) on a real machine; it prints fps and the CPU split once a second. Add `--no-sim` to time rendering without the solver.
 
 ## Using it from the game
 
