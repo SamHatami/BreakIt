@@ -3,6 +3,7 @@
 
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::prelude::*;
+use breakit_lab::{LabCamera, LabSettings};
 
 pub struct OrbitCameraPlugin;
 
@@ -44,7 +45,14 @@ impl OrbitCamera {
 
 fn spawn_camera(mut commands: Commands) {
     let orbit = OrbitCamera::default();
-    commands.spawn((Camera3d::default(), orbit.transform(), orbit));
+    commands.spawn((
+        Camera3d::default(),
+        orbit.transform(),
+        LabCamera {
+            focus_distance: orbit.distance,
+        },
+        orbit,
+    ));
 }
 
 fn orbit_camera(
@@ -52,9 +60,10 @@ fn orbit_camera(
     keys: Res<ButtonInput<KeyCode>>,
     motion: Res<AccumulatedMouseMotion>,
     scroll: Res<AccumulatedMouseScroll>,
-    mut cam: Single<(&mut OrbitCamera, &mut Transform)>,
+    lab: Res<LabSettings>,
+    mut cam: Single<(&mut OrbitCamera, &mut Transform, &mut LabCamera)>,
 ) {
-    let (orbit, transform) = &mut *cam;
+    let (orbit, transform, lens) = &mut *cam;
     let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
     let d = motion.delta;
 
@@ -75,10 +84,18 @@ fn orbit_camera(
         MouseScrollUnit::Pixel => scroll.delta.y / 40.0,
     };
     if lines != 0.0 {
-        orbit.distance = (orbit.distance * 0.9_f32.powf(lines)).clamp(1.0, 200.0);
+        orbit.distance = (orbit.distance * 0.9_f32.powf(lines)).clamp(1.0, 400.0);
     }
 
+    // Stay above the hall floor.
+    let floor = lab.floor_y() + 1.0;
+    let min_pitch = ((floor - orbit.focus.y) / orbit.distance)
+        .clamp(-1.0, 1.0)
+        .asin();
+    orbit.pitch = orbit.pitch.max(min_pitch);
+
     **transform = orbit.transform();
+    lens.focus_distance = orbit.distance;
 }
 
 #[cfg(test)]
