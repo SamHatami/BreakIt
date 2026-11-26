@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/breakit-core"]
+members = ["crates/breakit-core", "crates/breakit-mesh", "crates/breakit-render"]
 
 [workspace.package]
 edition = "2021"
