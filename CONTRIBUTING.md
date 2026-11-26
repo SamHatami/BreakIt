@@ -9,7 +9,7 @@ to people too.
 ```
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --release --no-default-features -p breakit-core -p breakit-mesh -p breakit-parts -p breakit-scenario -p breakit-audio
+cargo test --release --no-default-features -p breakit-core -p breakit-mesh -p breakit-parts -p breakit-scenario -p breakit-audio -p breakit-playground
 cargo test -p breakit-game -p breakit-render -p breakit-lab
 cargo run --release --no-default-features -p breakit-core --example gate   # after solver changes
 ```
@@ -37,6 +37,7 @@ breakit-core       solver, materials, damage, joints, loads    no engine
   ^
   +-- breakit-scenario   briefs, test runs, scoring            no engine
   +-- breakit-audio      synthesised sound                     no engine (cpal behind `device`)
+  +-- breakit-playground free load bench, reactions, probes     no engine
   +-- breakit-mesh       member geometry, fracture, debris     no engine (glam)
         ^
         +-- breakit-parts    part catalog, sections, costs     no engine
@@ -47,7 +48,7 @@ breakit-game       the app: modes, UI, input, wiring            Bevy, everything
 ```
 
 - Arrows only point up. The engine-free crates (core, mesh, parts, scenario,
-  audio) never depend on Bevy or on a crate below them; `breakit-lab` stays independent of the solver.
+  audio, playground) never depend on Bevy or on a crate below them; `breakit-lab` stays independent of the solver.
 - Logic that can be tested without a window goes in an engine-free crate.
   Game-side code that holds pure data and maths still belongs there if it
   imports `bevy` only for `Vec3` or `Resource`.
@@ -76,6 +77,7 @@ minimal and say so in the PR description, or ask that area's owner to do it.
 | Building parts | `crates/breakit-parts/` | `docs/parts.md` |
 | Ground contact | `breakit-core/src/contact.rs` | `docs/contact.md` |
 | Sound | `crates/breakit-audio/`, `breakit-game/src/sound.rs` | `docs/audio.md` |
+| Playground | `crates/breakit-playground/`, `breakit-game/src/playground/` | `docs/playground.md` |
 | Lab and play tables | `crates/breakit-lab/` | `docs/lab.md` |
 | Water | `crates/breakit-water/`, `crates/breakit-water-render/`, `breakit-game/src/water.rs` | `docs/water.md` |
 | Game UI and flow | `breakit-game/src/ui/`, `flow.rs`, `history.rs` | `docs/game-ui.md` |

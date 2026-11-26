@@ -43,11 +43,13 @@ jobs:
           shared-key: core
       - run: >-
           cargo clippy --locked --all-targets --no-default-features
-          -p breakit-core -p breakit-mesh -p breakit-parts -p breakit-scenario -p breakit-audio -p breakit-water
+          -p breakit-core -p breakit-mesh -p breakit-parts -p breakit-scenario -p breakit-audio
+          -p breakit-playground -p breakit-water
           -- -D warnings
       - run: >-
           cargo test --locked --release --no-default-features
-          -p breakit-core -p breakit-mesh -p breakit-parts -p breakit-scenario -p breakit-audio -p breakit-water
+          -p breakit-core -p breakit-mesh -p breakit-parts -p breakit-scenario -p breakit-audio
+          -p breakit-playground -p breakit-water
       # Hot-path gate (CONTRIBUTING.md, "Hot paths"): SIMD is dispatched and
       # faster than the scalar reference, threads keep the answer and do not
       # lose where they are on, solver work stays within budget.

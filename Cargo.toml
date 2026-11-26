@@ -7,6 +7,7 @@ members = [
     "crates/breakit-lab",
     "crates/breakit-mesh",
     "crates/breakit-parts",
+    "crates/breakit-playground",
     "crates/breakit-render",
     "crates/breakit-scenario",
     "crates/breakit-water",

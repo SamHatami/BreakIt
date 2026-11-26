@@ -2113,6 +2113,7 @@ dependencies = [
  "breakit-core",
  "breakit-lab",
  "breakit-parts",
+ "breakit-playground",
  "breakit-render",
  "breakit-scenario",
  "breakit-water",
@@ -2141,6 +2142,16 @@ version = "0.1.0"
 dependencies = [
  "breakit-core",
  "breakit-mesh",
+ "ron",
+ "serde",
+]
+
+[[package]]
+name = "breakit-playground"
+version = "0.1.0"
+dependencies = [
+ "breakit-core",
+ "breakit-parts",
  "ron",
  "serde",
 ]

@@ -118,8 +118,8 @@ fn sync_water(
     };
     let dx = cell_size(lab.quality);
     // A test has just started: set the water up for its water case.
-    if let Some(sim) = sim.as_ref().filter(|s| s.is_added() || link.is_none()) {
-        let run = sim.run();
+    let starting = sim.as_ref().filter(|s| s.is_added() || link.is_none());
+    if let Some(run) = starting.and_then(|s| s.run()) {
         let case = run.loads().cases.iter().enumerate().find_map(|(i, c)| {
             if let LoadKind::Water(w) = &c.kind {
                 Some((i, w))

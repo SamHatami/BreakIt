@@ -96,6 +96,9 @@ pub struct Scenario {
     pub allowed: Vec<BeamKind>,
     /// Free play: the player places supports and loads, no limits.
     pub sandbox: bool,
+    /// The playground: a sandbox whose run is the free load bench
+    /// instead of the sheet's test.
+    pub playground: bool,
 }
 
 fn v3(p: [f64; 3]) -> Vec3 {
@@ -235,6 +238,7 @@ impl Scenario {
             sag_limit,
             allowed,
             sandbox,
+            playground: false,
             mode,
             def,
         }
@@ -243,6 +247,9 @@ impl Scenario {
     /// What the sheet loads, for the register: payloads, else the
     /// heaviest event.
     pub fn load_summary(&self) -> String {
+        if self.playground {
+            return "anything, live".into();
+        }
         if self.sandbox {
             return "your own".into();
         }
@@ -555,8 +562,8 @@ impl Sheets {
     }
 }
 
-/// The built-in scenarios as sheets, then a sandbox bench on the first
-/// bridge.
+/// The built-in scenarios as sheets, then the playground and a sandbox
+/// bench on the first bridge.
 pub fn catalogue() -> Vec<Scenario> {
     let defs = bs::builtin();
     let mut out: Vec<Scenario> = defs
@@ -565,6 +572,11 @@ pub fn catalogue() -> Vec<Scenario> {
         .map(|d| Scenario::new(d, PlayMode::Challenge))
         .collect();
     if let Some(first) = defs.into_iter().next() {
+        let mut playground = Scenario::new(first.clone(), PlayMode::Sandbox);
+        playground.id = "PG";
+        playground.title = "Playground".into();
+        playground.playground = true;
+        out.push(playground);
         out.push(Scenario::new(first, PlayMode::Sandbox));
     }
     out
@@ -585,6 +597,8 @@ mod tests {
         assert!(all.iter().any(|s| s.rig == Rig::Bridges));
         assert!(all.iter().any(|s| s.rig == Rig::Towers));
         assert!(all.last().unwrap().sandbox);
+        let pg = all.iter().find(|s| s.playground).unwrap();
+        assert!(pg.sandbox && pg.budget.is_none() && pg.rig == Rig::Sandbox);
     }
 
     #[test]

@@ -18,6 +18,7 @@ mod flow;
 mod guides;
 mod history;
 mod perf;
+mod playground;
 mod release;
 mod render;
 mod scenario;
@@ -68,6 +69,7 @@ fn main() {
             capture::CapturePlugin,
             guides::GuidesPlugin,
             perf::PerfPlugin,
+            playground::PlaygroundPlugin,
             sound::SoundPlugin,
             water::WaterPlugin,
         ))
