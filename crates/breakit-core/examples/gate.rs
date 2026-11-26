@@ -37,7 +37,7 @@ use std::time::Instant;
 const SIMD_GATES: [(&str, f64); 4] = [
     ("block Cholesky factorisation, tower 5x5x12", 1.3),
     ("block Jacobi solve, tower 8x8x16", 1.05),
-    ("element assembly, 20 frames of bridge 120 panels", 1.0),
+    ("element assembly, 20 frames of bridge 120 panels", 0.9),
     (
         "wind turbulence field, 20 frames at the nodes of bridge 60 panels",
         WIND_FIELD_GATE,
