@@ -17,6 +17,34 @@ pub struct Case {
     pub push_dir: Vec3,
 }
 
+/// Two copies of `case` side by side in one structure, sharing nothing.
+pub fn twice(case: &Case) -> Case {
+    let mut s = case.s.clone();
+    let first = s.nodes.len();
+    let apart = Vec3::new(0.0, 0.0, 500.0);
+    s.nodes.extend(case.s.nodes.iter().map(|p| p + apart));
+    s.members
+        .extend(case.s.members.iter().cloned().map(|mut m| {
+            m.a += first;
+            m.b += first;
+            m
+        }));
+    s.supports
+        .extend(case.s.supports.iter().cloned().map(|mut sup| {
+            sup.node += first;
+            sup
+        }));
+    let mut pushed = case.pushed.clone();
+    pushed.extend(case.pushed.iter().map(|n| n + first));
+    Case {
+        name: format!("2 x {}", case.name),
+        s,
+        probe: case.probe + first,
+        pushed,
+        push_dir: case.push_dir,
+    }
+}
+
 pub fn link(s: &mut Structure, a: usize, b: usize, sub: usize, mat: &Material, sec: &Section) {
     let (pa, pb) = (s.nodes[a], s.nodes[b]);
     let mut prev = a;

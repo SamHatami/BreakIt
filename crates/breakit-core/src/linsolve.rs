@@ -111,6 +111,19 @@ pub struct Stats {
     pub auto_refactor_cost: usize,
 }
 
+impl Stats {
+    /// Add the counters of `other` (not the constants of its system).
+    pub fn add_counters(&mut self, other: &Stats) {
+        self.solves += other.solves;
+        self.factorizations += other.factorizations;
+        self.cg_iterations += other.cg_iterations;
+        self.fallbacks += other.fallbacks;
+        self.factor_seconds += other.factor_seconds;
+        self.solve_seconds += other.solve_seconds;
+        self.assembly_seconds += other.assembly_seconds;
+    }
+}
+
 /// The matrix and the method behind a [`LinSolver`].
 enum Engine {
     Block(BlockChol),
@@ -224,8 +237,10 @@ impl LinSolver {
     /// nodes up; `usize::MAX` keeps them on the calling thread. The result
     /// is the same either way.
     pub fn set_parallel_min_nodes(&mut self, nodes: usize) {
-        if let Engine::Jacobi(j) = &mut self.engine {
-            j.set_par_min_nodes(nodes);
+        match &mut self.engine {
+            Engine::Jacobi(j) => j.set_par_min_nodes(nodes),
+            Engine::Block(c) => c.set_par_min_nodes(nodes),
+            Engine::Scalar(_) => {}
         }
     }
 
@@ -234,7 +249,18 @@ impl LinSolver {
     pub fn runs_parallel(&self) -> bool {
         match &self.engine {
             Engine::Jacobi(j) => j.runs_parallel(),
-            _ => false,
+            Engine::Block(c) => c.runs_parallel(),
+            Engine::Scalar(_) => false,
+        }
+    }
+
+    /// Parts the block Cholesky factorisation splits the matrix into, each
+    /// factorised and solved on its own thread: more than one on long
+    /// structures such as bridges. One for the other engines.
+    pub fn parts(&self) -> usize {
+        match &self.engine {
+            Engine::Block(c) => c.parts(),
+            _ => 1,
         }
     }
 
@@ -305,7 +331,13 @@ impl LinSolver {
                 c.finish();
                 let (mut bw, mut xw) = (std::mem::take(&mut self.bw), std::mem::take(&mut self.xw));
                 c.load(b, &mut bw);
-                let ok = self.solve_inner(&bw, &mut xw, policy);
+                let ok = if c.runs_parallel() && rayon::current_thread_index().is_none() {
+                    // Enter the thread pool once for the whole solve (see
+                    // `BlockJacobi::solve`).
+                    rayon::join(|| self.solve_inner(&bw, &mut xw, policy), || ()).0
+                } else {
+                    self.solve_inner(&bw, &mut xw, policy)
+                };
                 if let Engine::Block(c) = &self.engine {
                     c.store(&xw, x);
                 }
@@ -418,8 +450,8 @@ impl LinSolver {
     }
 
     /// y <- A v
-    fn matvec(&self, v: &[f64], y: &mut [f64]) {
-        match &self.engine {
+    fn matvec(&mut self, v: &[f64], y: &mut [f64]) {
+        match &mut self.engine {
             Engine::Block(c) => c.matvec(v, y),
             Engine::Scalar(s) => s.matvec(v, y),
             Engine::Jacobi(_) => unreachable!("block Jacobi has its own iteration"),

@@ -42,7 +42,7 @@ mod beam;
 mod direct;
 mod ground;
 mod plastic;
-mod pool;
+pub(crate) mod pool;
 mod xpbd;
 
 use direct::DirectSystem;
@@ -83,6 +83,14 @@ pub struct SimConfig {
     /// threads: 7 to 10% from 3,900, nothing at 2,200) and nothing at
     /// 1,300; a single-thread pool costs nothing either way.
     pub parallel_min_members: usize,
+    /// Direct solver only: a piece of at least this many nodes that no live
+    /// member ties to the rest (a second structure, or a part that has
+    /// broken off) gets a linear system of its own. Such pieces are solved
+    /// side by side, and a piece whose step fails the step check repeats it
+    /// alone. Smaller pieces stay in the system they were in: a new system
+    /// costs its symbolic analysis, about a millisecond per thousand nodes.
+    /// `usize::MAX` keeps everything in one system. The default is 256.
+    pub island_min_nodes: usize,
     /// Direct solver only: instruction set of the assembly and linear-solver
     /// kernels. The default is [`SimdLevel::from_env`];
     /// [`SimdLevel::Scalar`] runs the whole simulation on the scalar
@@ -139,6 +147,7 @@ impl Default for SimConfig {
             refactor_every: 0,
             parallel_min_members: 2048,
             simd: SimdLevel::from_env(),
+            island_min_nodes: 256,
             linear_backend: Backend::Auto,
             linear_tolerance: 1e-4,
             refactor_cost: 0,
@@ -418,11 +427,7 @@ impl DynamicSim {
 
     pub fn solver_stats(&self) -> SolverStats {
         SolverStats {
-            linear: self
-                .direct
-                .as_ref()
-                .map(|d| d.lin.stats)
-                .unwrap_or_default(),
+            linear: self.direct.as_ref().map(|d| d.stats()).unwrap_or_default(),
             ..self.stats
         }
     }

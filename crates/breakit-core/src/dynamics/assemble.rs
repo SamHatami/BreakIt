@@ -7,6 +7,7 @@
 //! `beam.rs` and `plastic.rs`, called as they are: only the products that
 //! follow them (K = Σ k g gᵀ and f = Σ f g) are vectorised.
 
+use super::direct::Slots;
 use super::*;
 use crate::simd::madd;
 use pulp::{Simd, WithSimd};
@@ -111,11 +112,11 @@ impl DynamicSim {
     }
 }
 
-/// Fills `out[k]` with the terms of beam `first + k`.
+/// Fills `out[k]` with the terms of beam `beams[k]`.
 pub(super) struct ComputeChunk<'a> {
     pub(super) sim: &'a DynamicSim,
     pub(super) r: Option<f64>,
-    pub(super) first: usize,
+    pub(super) beams: &'a [u32],
     pub(super) out: &'a mut [BeamTerms],
 }
 
@@ -123,18 +124,22 @@ impl WithSimd for ComputeChunk<'_> {
     type Output = ();
     #[inline(always)]
     fn with_simd<S: Simd>(self, _: S) {
-        for (k, out) in self.out.iter_mut().enumerate() {
-            self.sim.beam_terms::<S>(self.first + k, self.r, out);
+        for (&i, out) in self.beams.iter().zip(self.out) {
+            self.sim.beam_terms::<S>(i as usize, self.r, out);
         }
     }
 }
 
-/// The single-thread path: every beam computed and added to the system
-/// straight away, in beam order. Returns the sum of the beam energies.
+/// The single-thread path: every beam of a group computed and added to its
+/// system straight away, in beam order. Returns the sum of the beam
+/// energies.
 pub(super) struct AssembleSerial<'a> {
     pub(super) sim: &'a DynamicSim,
     pub(super) r: Option<f64>,
-    pub(super) sys: &'a mut DirectSystem,
+    pub(super) slots: Slots<'a>,
+    pub(super) beams: &'a [u32],
+    pub(super) lin: &'a mut LinSolver,
+    pub(super) rhs: &'a mut [f64],
 }
 
 impl WithSimd for AssembleSerial<'_> {
@@ -143,12 +148,15 @@ impl WithSimd for AssembleSerial<'_> {
     fn with_simd<S: Simd>(self, _: S) -> f64 {
         let mut phi = 0.0;
         let mut terms = BeamTerms::EMPTY;
-        for i in 0..self.sim.beams.len() {
+        for &i in self.beams {
+            let i = i as usize;
             self.sim.beam_terms::<S>(i, self.r, &mut terms);
             if terms.live {
                 phi += terms.energy;
-                self.sys.add_force(&self.sim.beams[i], &terms.force);
-                self.sys.lin.add_block(i, &terms.block);
+                self.slots
+                    .add_force(self.rhs, &self.sim.beams[i], &terms.force);
+                self.lin
+                    .add_block(self.slots.block[i] as usize, &terms.block);
             }
         }
         phi
