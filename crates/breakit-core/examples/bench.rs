@@ -317,6 +317,25 @@ fn main() {
                     frame_stats.push((before, sim.solver_stats()));
                 }
                 if worst {
+                    let st = sim.solver_stats();
+                    let hist = |lo: usize, hi: usize| {
+                        frame_stats
+                            .iter()
+                            .filter(|(a, b)| {
+                                (lo..hi).contains(&(b.extra_iterations - a.extra_iterations))
+                            })
+                            .count()
+                    };
+                    eprintln!(
+                        "  collapse totals: {} substeps, {} extra iterations, {} backtracks; frames with 0 / 1-2 / 3-4 / 5+ extra iterations: {} / {} / {} / {}",
+                        st.substeps,
+                        st.extra_iterations,
+                        st.backtracks,
+                        hist(0, 1),
+                        hist(1, 3),
+                        hist(3, 5),
+                        hist(5, 99),
+                    );
                     // The slowest collapse frames and what they spent.
                     let mut order: Vec<usize> = (0..t.len()).collect();
                     order.sort_by(|&a, &b| t[b].partial_cmp(&t[a]).unwrap());
