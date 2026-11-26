@@ -392,3 +392,30 @@ fn taut_slender_tie_sways_like_a_string() {
         );
     }
 }
+
+#[test]
+fn both_linear_backends_match_the_static_solve() {
+    use breakit_core::linsolve::Backend;
+    let (s, ids) = cantilever(2.0, 10, Material::steel());
+    let tip = *ids.last().unwrap();
+    let f = Vec3::new(0.0, -1000.0, 300.0);
+    let e = solve_static(&s, &[NodeLoad::force(tip, f)])
+        .unwrap()
+        .displacements[tip];
+    for backend in [Backend::Cholesky, Backend::BlockJacobi] {
+        let mut sim = DynamicSim::new(
+            &s,
+            SimConfig {
+                linear_backend: backend,
+                ..quiet(false)
+            },
+        );
+        sim.set_force(tip, f);
+        assert!(sim.settle(10.0, 1e-6), "{backend:?} did not settle");
+        let d = sim.displacement(tip);
+        assert!(
+            (d - e).norm() < 0.01 * e.norm(),
+            "{backend:?}: {d:?} vs static {e:?}"
+        );
+    }
+}
