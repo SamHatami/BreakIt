@@ -2092,6 +2092,7 @@ dependencies = [
  "faer",
  "nalgebra",
  "rayon",
+ "serde",
 ]
 
 [[package]]
@@ -4133,6 +4134,7 @@ dependencies = [
  "num-complex",
  "num-rational",
  "num-traits",
+ "serde",
  "simba",
  "typenum",
 ]
@@ -4335,6 +4337,7 @@ dependencies = [
  "bytemuck",
  "num-traits",
  "rand 0.8.8",
+ "serde",
 ]
 
 [[package]]
