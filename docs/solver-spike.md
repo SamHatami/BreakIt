@@ -89,7 +89,44 @@ The settled displacement does not depend on the substep count (it is where the f
 
 Not verified: transient accuracy at 4 substeps beyond these numbers. Implicit Euler damps vibration and rotation more as the substep grows, and that has not been measured against a reference.
 
+## Linear solver rewrite (`src/linsolve.rs`) and current numbers
+
+`cargo run --release --example bench -- --sizes s,m,l,xl --static` (the bench was replaced: a braced tower frame and a truss bridge, each run elastic and to collapse; the older `-- 120` bridge quoted above no longer exists).
+
+What changed in the linear algebra:
+
+- faer's default global parallelism made these factorisations 2.5 to 4 times slower (thread hand-off costs more than the work at a few thousand unknowns). The solver now calls the low-level faer API with `Par::Seq` and preallocated workspace.
+- The sparsity pattern and symbolic factorisation are built once and survive breaks: a broken member contributes zeros.
+- An old Cholesky factorisation is only a preconditioner for conjugate gradients on the current matrix, so every solve is exact for the current matrix to `linear_tolerance` (default 1e-6). This replaces "reuse the factorisation as if it were current", which needed the step check to catch divergence. A break is a rank 6 change, which CG absorbs in a few iterations.
+- When to refactorise is a cost decision: the factorisation cost in CG iterations is estimated from the fill, and a new one is computed once the old one has wasted that many iterations. When even a one-solve-old factorisation needs that many (violent collapse, many members changing yield state), the solver factorises every solve for a while and then probes again.
+
+Single thread, 60 Hz frames, 4 substeps, shared 4-core cloud machine with other jobs running (timings noisy, roughly ±20%):
+
+| Structure | Members | Unknowns | Elastic ms/frame (mean / p99) | Collapse ms/frame (mean / p99 / max) | Settled probe vs static FEM |
+| --- | --- | --- | --- | --- | --- |
+| tower 2x2x4 | 100 | 270 | 0.33 / 0.82 | 0.46 / 0.75 / 1.2 | +0.11% |
+| bridge 8 panels | 100 | 216 | 0.30 / 0.64 | 0.36 / 0.59 / 1.0 | +0.08% |
+| tower 3x3x8 | 368 | 864 | 1.5 / 3.0 | 2.0 / 4.7 / 6.3 | +0.29% |
+| bridge 20 panels | 488 | 1,968 | 1.7 / 2.5 | 2.7 / 6.3 / 7.8 | +1.7% |
+| tower 5x5x12 | 1,272 | 2,808 | 5.8 / 14 | 9.6 / 17 / 19 | +0.56% |
+| bridge 60 panels | 2,172 | 10,152 | 9.4 / 16 | 15 / 33 / 39 | not run |
+| tower 8x8x16 | 3,856 | 8,262 | 29 / 69 | 55 / 156 / 211 | not run |
+| bridge 120 panels | 5,776 | 28,896 | 25 / 47 | 46 / 114 / 118 | not run |
+
+The gap to static FEM is real geometric nonlinearity (the bridge sags 94 mm under the push), not solver error: it is identical at 16 substeps and with a fresh factorisation every solve.
+
+Same benchmark, tower 5x5x12 and bridge 60 panels, elastic mean ms/frame, by stage:
+
+| Stage | Tower (1,272) | Bridge (2,172) |
+| --- | --- | --- |
+| First spike commit, 8 substeps, refactor every substep | 251 | 64 |
+| Pattern reuse, stale factor for 4 substeps, 16 substeps (785c6c7) | 70 | not measured |
+| + sequential faer, fixed pattern, CG on stale factor, 16 substeps | 20 | 35 |
+| + 4 substeps (step check, implicit plasticity, tension stiffness) | 5.8 | 9.4 |
+
+Where the time goes now (tower 5x5x12, elastic, per frame): assembly 2.1 ms, solves 2.9 ms, factorisation 0.2 ms, everything else (integration, step-check objective, material update) about 0.6 ms.
+
 ## Next
 
-1. Headroom below 16 ms/frame (solver-speed thread): parallel assembly, fewer scheduled refactorisations (`refactor_every` 16 passes every test now that the step check catches the bad substeps).
+1. Speed: assembly is now as expensive as the solve and is a per-member loop with no shared state, so it is the obvious thing to run in parallel (rayon), together with the step-check objective and the material update. Large 3D grids (tower 8x8x16) are limited by fill in the factorisation; a nested-dissection ordering or a looser `linear_tolerance` (1e-4 gave the same displacements and break counts in the bench) are the next levers there.
 2. Done: sparse static solve; axial-bending interaction Mp,N = Mp (1 - n²). Open: biaxial interaction, plastic torsion.
