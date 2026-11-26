@@ -159,20 +159,19 @@ impl Plugin for LabPlugin {
             .init_resource::<GlobalAmbientLight>()
             .add_systems(Startup, spawn_hall);
         surface::build(app);
-        app
-            .add_systems(
-                Update,
+        app.add_systems(
+            Update,
+            (
+                rebuild_table,
                 (
-                    rebuild_table,
-                    (
-                        look::quality_key,
-                        look::light_hall,
-                        look::bake_environment,
-                        look::lab_lens,
-                    )
-                        .chain(),
-                ),
-            );
+                    look::quality_key,
+                    look::light_hall,
+                    look::bake_environment,
+                    look::lab_lens,
+                )
+                    .chain(),
+            ),
+        );
     }
 }
 

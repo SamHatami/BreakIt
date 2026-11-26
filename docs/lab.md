@@ -54,6 +54,30 @@ commands.insert_resource(PlayTable::new(Ravine { gap: 5.0, depth: 3.2 }));
 - **Ambient occlusion** reaches further the further away the camera is focused (`ao_radius`): 0.8 m in the joints of the structure up close, 0.6 m of hall when pulled back, where it grounds the machinery.
 - **Camera**: exposure fixed at EV 9.2, TonyMcMapface tonemapping, a light grade (a touch of contrast, cooler shadows, warmer highlights), bloom only above a threshold so nothing glows that would not in a real hall, a soft vignette, distance haze, and the depth of field from the scaled sensor.
 
+### Surfaces
+
+`surface.rs` and `surface.wesl` give the scenery its materials: `StandardMaterial` lighting with the surface worked out per pixel from noise laid out in metres, so there are no textures and the generated meshes need no UVs. Each `Mat` maps to a `SurfaceKind` (`kind_of`); glowing things and rubber stay plain.
+
+| kind | what it does |
+|---|---|
+| concrete | pour-to-pour clouds, stains, pores, and a power-floated floor that is burnished in patches, so it takes a dull reflection of the lamps |
+| paint | tone drift, grime running down vertical faces, dust on anything facing up, a few chips to primer and rust |
+| galvanised | zinc spangle in colour and roughness |
+| stainless | brushed streaks, which stretch the lamp highlights on the tanks |
+| sheeting | sheet-to-sheet shade, dirt runs |
+| plate | mill scale, scuffed bright in drag marks (the strong floor) |
+| timber | veneer figure |
+| foam | fine cells and the drag lines of the hot wire on cut faces |
+| table top | a worn dark mat with fine scratches |
+| glass | reflection grows towards glancing angles, a film of dust |
+| water | moving wave trains and ripple in the normal, reflection grows towards glancing angles |
+
+Detail fades out before it gets smaller than a pixel (`resolved` in the shader), so nothing shimmers at a distance. Things that are real-size are patterned in real metres wherever they stand, including the table's frame; foam, the table top and the water in the basin are part of the model and patterned in its metres.
+
+`LabWater { amplitude, wavelength, speed, heading }` sets the waves on the table's water (world units). It is the hook for the wave and flood rigs: today it only moves the shading, the water surface itself is still a flat quad.
+
+`Look::surface_detail` turns all of it off (the Low preset does), leaving the same materials plain.
+
 ### Quality presets
 
 `LabSettings::set_quality(LabQuality::..)` picks a `Look`; F4 steps through them at run time (`LabSettings::quality_key`, `None` to take the key back). Every knob is also a field of `LabSettings::look`.
@@ -67,6 +91,7 @@ commands.insert_resource(PlayTable::new(Ravine { gap: 5.0, depth: 3.2 }));
 | shadow maps | 1024, 2 cascades | 2048, 3 | 2048, 3 | 4096, 4 |
 | lamps lighting / shadowed | 6 / 0 | 12 / 0 | 20 / 4 | 20 / 8 |
 | reflection map | 32 | 64 | 128 | 256 |
+| procedural surfaces | off | on | on | on |
 
 TAA is only on Ultra on purpose: the member shader does not write motion vectors for its own bending, so a member that moves fast can leave a faint trail. SMAA has nothing temporal in it.
 
@@ -102,4 +127,6 @@ The game's frame-time read-out (top right, F3 toggles) shows the average and wor
 - The reflection map is taken from the middle of the table and has no parallax: reflections are right in direction, not in position. Good enough for curved steel and rippled water; a large flat mirror would give it away.
 - Ambient occlusion can speckle faintly on far walls when the camera is focused close and the background is sharp (depth of field off). With depth of field on, the blur hides it.
 - No LOD or culling groups for the hall: it is merged per material, so it is all drawn or none. Fine at 60 k triangles.
-- Water is static.
+- Water moves in its shading only: the surface is a flat quad, so a wave does not rise up a pier. A tessellated surface driven by the same `LabWater` (and by the loads crate's wave model) is the next step for the wave and flood scenarios.
+- The grid on the table is still geometry, which aliases at a distance; drawing it in the table-top shader would fix that.
+- Hero props (crane, actuators, model trucks) are still procedural stand-ins; they are to be replaced by glTF models.
