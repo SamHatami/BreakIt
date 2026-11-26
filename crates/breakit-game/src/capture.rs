@@ -13,7 +13,8 @@
 //! frame of that rate per rendered frame, however slowly the machine draws,
 //! and every frame of the test is saved to `<dir>/film/NNNNN.png` (join them
 //! with ffmpeg). `BREAKIT_FILM_CAM=distance,yaw,pitch[,focus_y]` places the
-//! camera for it.
+//! camera for it. `BREAKIT_FILM_SKIP=<seconds>` runs the test fast and
+//! unfilmed up to that time, to get to a late break quickly.
 
 use std::path::PathBuf;
 
@@ -21,7 +22,7 @@ use bevy::app::AppExit;
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 
-use crate::analysis::Simulation;
+use crate::analysis::{SimClock, Simulation};
 use crate::build::BuildTool;
 use crate::camera::OrbitCamera;
 use crate::design::{BeamKind, Design};
@@ -109,6 +110,7 @@ fn capture_script(
     mut actions: MessageWriter<UiAction>,
     mut exit: MessageWriter<AppExit>,
     mut orbit: Single<&mut OrbitCamera>,
+    mut clock: ResMut<SimClock>,
 ) {
     s.frame += 1;
     let waited = s.frame - s.since;
@@ -179,6 +181,18 @@ fn capture_script(
             advance(&mut s);
         }
         7 if film_fps().is_some() => {
+            let skip: f64 = std::env::var("BREAKIT_FILM_SKIP")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.0);
+            let t = sim.map(|s| s.run().time()).unwrap_or(0.0);
+            if t < skip && rec.first_break.is_none() {
+                clock.speed = 8.0;
+                return;
+            }
+            if clock.speed == 8.0 {
+                clock.speed = 1.0;
+            }
             // Every frame of the test, then a few seconds of the wreck.
             let name = format!("film/{:05}.png", s.filmed);
             shot(&mut commands, &name);
