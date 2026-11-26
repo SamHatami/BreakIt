@@ -3,7 +3,7 @@
 //!
 //! A member is drawn from its node to its node, but a real one stops short:
 //! there is a node (a cast steel ball, a block of concrete) and something
-//! that fixes the member to it. With joints set on a [`VisualStructure`],
+//! that fixes the member to it. With joints set on a [`VisualStructure`](crate::VisualStructure),
 //! each member is trimmed back by its node's radius and the gap is filled
 //! with that hardware:
 //!
