@@ -205,7 +205,31 @@ Threads: a parallel call from outside rayon's pool hands the job over and blocks
 
 `examples/gate.rs` runs in CI: the native level must dispatch to SIMD, each kernel must beat the scalar reference by a set factor, threaded solves must be bit-identical and not slower where threads are on by default, and short fixed runs must stay within budgets of solves, CG iterations and factorisations. Timings on shared runners are too noisy for absolute limits, which is why the gate uses same-run ratios and work counters.
 
-Not done yet: AVX-512 (`pulp` 0.21 needs nightly for it), SIMD and default-on threads for element assembly (in progress), per-island solves for debris, and contact and load models (not yet measured as hot).
+### Element assembly (`src/dynamics/assemble.rs`, `src/dynamics/pool.rs`)
+
+Where a beam's assembly time went before (ns per beam, one thread): geometry and strains 30 to 55, material response about 50, the six gradients about 55, building the 12x12 block and forces about 125, scattering it into the matrix 60 to 140. So the block build and the scatter were the targets, not the geometry; a structure-of-arrays batch of the geometry was not worth writing.
+
+- The block K = Σ k g gᵀ and the forces are a `pulp` kernel, dispatched once per chunk of 64 beams. The scalar level gives the old sums bit for bit.
+- On one thread each beam is added to the matrix as soon as it is computed, instead of storing every block first.
+- `add_block` of both engines has a fast path for members whose 12 DOFs are all unknowns.
+- `SimConfig.simd` runs the whole simulation on one level; the default is `SimdLevel::from_env()`.
+- Threads: `DynamicSim::step` enters the pool once per frame. Inside, `ordered_chunks` lets the calling thread work through the chunks itself while pool workers take chunks off the same counter as they wake, and the calling thread scatters finished chunks in beam order. It never waits for a sleeping worker, and the result is the single-thread result bit for bit (a test runs a 2,300-member collapse on 1, 2 and 4 threads). The old parallel step check summed in a different order than the serial one; both now sum the same fixed chunks.
+- Threads are on from 2,048 members (`parallel_min_members`), one helper per 1,024 members for assembly and per 2,048 for the step check. `usize::MAX` keeps everything, the linear solver included, on the calling thread.
+
+Assembly per frame, ms, same session (before is the previous section's code): 
+
+| Structure (members) | before, 1 thread | after, 1 thread | after, 2 threads | after, 4 threads |
+| --- | --- | --- | --- | --- |
+| tower 5x5x12 (1,272) | 1.5 to 1.6 | 1.1 | 1.1 (threads off) | 1.1 (threads off) |
+| bridge 60 (2,172) | 3.0 to 3.3 | 2.5 | 1.9 | 1.5 |
+| tower 8x8x16 (3,856) | 5.2 | 3.5 to 3.7 | 2.3 to 2.7 | 1.8 to 2.1 |
+| bridge 120 (5,776) | 8.7 to 9.5 | 6.6 to 7.2 | 4.0 to 4.5 | 3.5 to 4.1 |
+
+Whole frames on 1 / 4 threads: bridge 60 6.1 / 5.6 ms elastic, tower 8x8x16 11.9 / 10.4, bridge 120 16.1 / 12.6 to 15.0 (elastic) and 20.2 / 16.2 (collapse). Against the scalar reference the native assembly is 1.15 to 1.2 times faster; the material response is scalar and the scatter is memory traffic.
+
+What caps the thread gain now: waking a worker still costs the calling thread tens of microseconds per loop, and `update_material` and the linear solve of bridges are serial. Tried and dropped: an algebraic `eigen2` (no faster than `atan2`), a parallel gather scatter, computing a wave of beams ahead of the scatter (slowed the factorisation by a quarter), plain `par_chunks_mut`.
+
+Not done yet: AVX-512 (`pulp` 0.21 needs nightly for it), threads for `update_material` and for the block Cholesky factorisation, per-island solves for debris, and contact and load models (not yet measured as hot). NEON is compiled from the same source but has only been run on x86-64 so far.
 
 ## Next
 
