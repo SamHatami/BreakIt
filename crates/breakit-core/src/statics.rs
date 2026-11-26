@@ -25,8 +25,9 @@ pub struct MemberForces {
     /// Shear forces along local y and z, N.
     pub vy: f64,
     pub vz: f64,
-    /// Utilisation (N/Ny)² + |My|/Mpy + |Mz|/Mpz, matching the dynamic
-    /// solver's yield rule (1.0 = yield).
+    /// Utilisation of the intact member, 1.0 = at capacity, using the same
+    /// material rules as the dynamic solver (for steel
+    /// (N/Ny)² + |My|/Mpy + |Mz|/Mpz).
     pub utilization: f64,
 }
 
@@ -190,6 +191,7 @@ pub fn solve_static(s: &Structure, loads: &[NodeLoad]) -> Result<StaticResult, S
     let rotations = (0..s.nodes.len())
         .map(|i| Vec3::new(u[i * 6 + 3], u[i * 6 + 4], u[i * 6 + 5]))
         .collect();
+    let mut laws = crate::damage::LawCache::default();
     let member_forces = s
         .members
         .iter()
@@ -208,7 +210,8 @@ pub fn solve_static(s: &Structure, loads: &[NodeLoad]) -> Result<StaticResult, S
                 vz: fl[8],
                 utilization: 0.0,
             };
-            mf.utilization = utilization(mem, &mf);
+            let law = laws.get(&mem.material, &mem.section);
+            mf.utilization = law.intact_utilization(mf.axial, [mf.my, mf.mz], [mf.vz, mf.vy]);
             mf
         })
         .collect();
@@ -227,13 +230,4 @@ fn element_dofs(a: usize, b: usize) -> [usize; 12] {
         d[6 + i] = b * 6 + i;
     }
     d
-}
-
-fn utilization(mem: &crate::Member, f: &MemberForces) -> f64 {
-    let fy = mem.material.yield_strength;
-    let sec = &mem.section;
-    let my = f.my[0].abs().max(f.my[1].abs());
-    let mz = f.mz[0].abs().max(f.mz[1].abs());
-    let n = f.axial.abs() / (fy * sec.area);
-    n * n + my / (fy * sec.zy) + mz / (fy * sec.zz)
 }

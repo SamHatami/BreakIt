@@ -9,9 +9,17 @@
 //! * [`dynamics::DynamicSim`]: a real-time, substepped XPBD solver with
 //!   corotational beams, plastic hinges, axial yield and fracture.
 //!
+//! Members fail by material: steel yields and tears, timber splinters, splits
+//! and crushes, concrete cracks and crushes (rebar holds it together after
+//! cracking), composites break suddenly or delaminate. [`damage`] has the
+//! rules and the per-member [`MemberDamage`] state renderers draw from;
+//! [`concrete`] the sectional analysis behind reinforced concrete.
+//!
 //! Units are SI throughout (m, kg, s, N, Pa). The world is Y-up, matching Bevy.
 //! The crate has no game-engine dependency on purpose.
 
+pub mod concrete;
+pub mod damage;
 pub mod dynamics;
 pub mod frame;
 pub mod material;
@@ -19,10 +27,11 @@ pub mod model;
 pub mod section;
 pub mod statics;
 
+pub use damage::{DamageState, MemberDamage};
 pub use dynamics::{BreakCause, BreakEvent, DynamicSim, SimConfig, Solver};
-pub use material::Material;
+pub use material::{Material, MaterialKind};
 pub use model::{Member, NodeLoad, Structure, Support};
-pub use section::Section;
+pub use section::{Section, Shape};
 pub use statics::{solve_static, MemberForces, StaticResult};
 
 /// nalgebra vector type used across the crate.

@@ -166,6 +166,10 @@ fn plastic_hinge_forms_at_collapse_load_and_then_snaps() {
     assert!(!ev.is_empty(), "130% load should snap the root");
     assert_eq!(ev[0].member, 0, "the root member fails first");
     assert_eq!(ev[0].cause, BreakCause::Hinge);
+    assert_eq!(ev[0].position, 0.0, "the hinge is at the clamped end");
+    let d = over.damage(0);
+    assert!(d.hinge[1][0].abs() > 0.0, "hinge about local z at end a");
+    assert_eq!(d.state, breakit_core::DamageState::Broken);
 }
 
 #[test]
@@ -210,7 +214,8 @@ fn timber_snaps_without_yielding() {
     }
     let ev = sim.break_events();
     assert!(!ev.is_empty());
-    assert_eq!(ev[0].cause, BreakCause::Brittle);
+    assert_eq!(ev[0].cause, BreakCause::Splinter);
+    assert_eq!(ev[0].position, 0.0, "fails at the clamped end");
     assert_eq!(sim.hinge_rotation(ev[0].member), 0.0);
 }
 
