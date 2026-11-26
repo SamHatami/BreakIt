@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 faer = "0.22"
 nalgebra.workspace = true
+rayon = "1"
 serde = { version = "1", features = ["derive"], optional = true }
 
 [features]

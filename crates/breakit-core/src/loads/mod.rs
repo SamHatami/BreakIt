@@ -406,7 +406,7 @@ impl LoadSet {
             self.scratch.iter_mut().for_each(|f| *f = Vec3::zeros());
             let tl = t - c.window.start;
             match &mut c.kind {
-                LoadKind::Wind(w) => w.apply(&view, tl, ramp * scale, &mut self.scratch),
+                LoadKind::Wind(w) => w.apply(&view, tl, ramp, scale, &mut self.scratch),
                 LoadKind::Quake(q) => q.apply(&view, tl, ramp * scale, &mut self.scratch),
                 LoadKind::Water(w) => w.apply(&view, tl, ramp, scale, dt, &mut self.scratch),
                 LoadKind::Traffic(tr) => tr.apply(&view, tl, ramp, scale, &mut self.scratch),
@@ -448,9 +448,10 @@ impl LoadSet {
         self.cases
             .iter()
             .filter_map(|c| match &c.kind {
-                LoadKind::Quake(q) => {
-                    Some(q.table(t - c.window.start, c.factor * self.factor).displacement)
-                }
+                LoadKind::Quake(q) => Some(
+                    q.table(t - c.window.start, c.factor * self.factor)
+                        .displacement,
+                ),
                 _ => None,
             })
             .sum()

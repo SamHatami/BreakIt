@@ -35,8 +35,8 @@ pub mod statics;
 
 pub use damage::{DamageState, MemberDamage};
 pub use dynamics::{BreakCause, BreakEvent, DynamicSim, SimConfig, Solver, SolverStats};
-pub use material::{Material, MaterialKind};
 pub use loads::{LoadCase, LoadKind, LoadSet, RigState, Window};
+pub use material::{Material, MaterialKind};
 pub use model::{Member, NodeLoad, Structure, Support};
 pub use section::{Section, Shape};
 pub use statics::{solve_static, MemberForces, StaticResult};
