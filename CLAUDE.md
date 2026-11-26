@@ -14,5 +14,6 @@
 - Building parts (catalog, standard sections, grades, costs, sandbox limits): `docs/parts.md`, data in `crates/breakit-parts/data/parts.ron`.
 - Member visuals (GPU deformation, damage looks, breaking, joints and node hubs): `docs/visuals.md`. `GpuMember` in `breakit-mesh` and `Member` in `breakit-render/src/member.wesl` must stay field-for-field identical.
 - Scenario loads (wind, quake, water, vehicles, impacts) and their rig hooks: `docs/loads.md`.
+- Simulated water (solver, forces from it, rendering, cost): `docs/water.md`. Engine-free solver in `breakit-water`, drawing in `breakit-water-render`.
 - The hall and play table: `docs/lab.md`. The structure is full size; the hall is drawn `model_scale` (20) times larger so the table reads as a 1:20 model.
 - Sound: `docs/audio.md`. Synthesised in `breakit-audio` (no sample files); the game only sends commands from `breakit-game/src/sound.rs`.

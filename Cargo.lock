@@ -2115,6 +2115,8 @@ dependencies = [
  "breakit-parts",
  "breakit-render",
  "breakit-scenario",
+ "breakit-water",
+ "breakit-water-render",
 ]
 
 [[package]]

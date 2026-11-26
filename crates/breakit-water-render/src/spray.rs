@@ -36,7 +36,7 @@ pub(crate) fn spawn(
         .spawn((
             Mesh3d(meshes.add(mesh)),
             MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: Color::srgba(0.92, 0.96, 0.98, 0.75),
+                base_color: Color::srgba(0.92, 0.96, 0.98, 0.6),
                 perceptual_roughness: 0.25,
                 reflectance: 0.4,
                 alpha_mode: AlphaMode::Blend,
@@ -63,7 +63,7 @@ pub(crate) fn fill(mesh: &mut Mesh, droplets: &[Droplet], limit: usize) {
         let axis = if speed > 1e-3 { v / speed } else { Vec3::Y };
         // Shrinks as it ages, streaks with speed.
         let size = d.size * (1.0 - 0.6 * (d.age / d.life).clamp(0.0, 1.0));
-        let stretch = 1.0 + (speed * 0.012 / size.max(1e-4)).min(4.0);
+        let stretch = 1.0 + (speed * 0.006 / size.max(1e-4)).min(2.5);
         let side = axis.any_orthonormal_vector();
         let up = axis.cross(side);
         let base = positions.len() as u32;

@@ -12,6 +12,8 @@ engineering models of the real thing. All of it is Bevy-free and lives in
 | Model vehicles | `traffic.rs` | Lanes resolved from a line in the scenario to the player's deck nodes, axle loads split between nodes, quarter-car suspension per axle (bounce, lift-off), braking force and load transfer, vehicles fall through gaps |
 | Crash / dropped object | `impact.rs` | Rigid impactor with a padded contact against member surfaces (capsules of half the section depth), split to the end nodes, integrated inside the frame and applied as the frame-averaged force (impulse conserved), contact events for sound and visuals |
 
+A water case can take its kinematics from the simulated water instead of the analytic waves: set `Water::field` (trait `WaterField`); see `docs/water.md`.
+
 ## Using it
 
 ```rust

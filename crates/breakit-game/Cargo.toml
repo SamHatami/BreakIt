@@ -15,6 +15,8 @@ breakit-lab = { path = "../breakit-lab" }
 breakit-render = { path = "../breakit-render" }
 breakit-parts = { path = "../breakit-parts" }
 breakit-scenario = { path = "../breakit-scenario" }
+breakit-water = { path = "../breakit-water" }
+breakit-water-render = { path = "../breakit-water-render" }
 # Pinned on purpose: Bevy breaks its API every release. Upgrade deliberately,
 # following that release's migration guide.
 bevy = { version = "=0.20.1", default-features = false, features = ["3d", "ui"] }

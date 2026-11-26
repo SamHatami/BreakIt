@@ -43,11 +43,11 @@ jobs:
           shared-key: core
       - run: >-
           cargo clippy --locked --all-targets --no-default-features
-          -p breakit-core -p breakit-mesh -p breakit-parts -p breakit-scenario -p breakit-audio
+          -p breakit-core -p breakit-mesh -p breakit-parts -p breakit-scenario -p breakit-audio -p breakit-water
           -- -D warnings
       - run: >-
           cargo test --locked --release --no-default-features
-          -p breakit-core -p breakit-mesh -p breakit-parts -p breakit-scenario -p breakit-audio
+          -p breakit-core -p breakit-mesh -p breakit-parts -p breakit-scenario -p breakit-audio -p breakit-water
       # Hot-path gate (CONTRIBUTING.md, "Hot paths"): SIMD is dispatched and
       # faster than the scalar reference, threads keep the answer and do not
       # lose where they are on, solver work stays within budget.
@@ -109,6 +109,6 @@ jobs:
           shared-key: game
       # One full build of every target, reused by the tests. The engine-free
       # crates already ran in release above; debug here keeps the Bevy build small.
-      - run: cargo build --locked --all-targets -p breakit-game -p breakit-render -p breakit-lab
-      - run: cargo test --locked -p breakit-game -p breakit-render -p breakit-lab
+      - run: cargo build --locked --all-targets -p breakit-game -p breakit-render -p breakit-lab -p breakit-water-render
+      - run: cargo test --locked -p breakit-game -p breakit-render -p breakit-lab -p breakit-water-render
       - run: df -h /

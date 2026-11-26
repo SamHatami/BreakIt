@@ -127,6 +127,6 @@ The game's frame-time read-out (top right, F3 toggles) shows the average and wor
 - The reflection map is taken from the middle of the table and has no parallax: reflections are right in direction, not in position. Good enough for curved steel and rippled water; a large flat mirror would give it away.
 - Ambient occlusion can speckle faintly on far walls when the camera is focused close and the background is sharp (depth of field off). With depth of field on, the blur hides it.
 - No LOD or culling groups for the hall: it is merged per material, so it is all drawn or none. Fine at 60 k triangles.
-- Water moves in its shading only: the surface is a flat quad, so a wave does not rise up a pier. A tessellated surface driven by the same `LabWater` (and by the loads crate's wave model) is the next step for the wave and flood scenarios.
+- The lab's own water is a flat quad that moves in its shading only. A flume's water is simulated and drawn by `breakit-water-render` instead (`docs/water.md`): `PlayTable::water()` describes the basin, and `PlayTable::without_still_water()` leaves the quad out.
 - The grid on the table is still geometry, which aliases at a distance; drawing it in the table-top shader would fix that.
 - Hero props (crane, actuators, model trucks) are still procedural stand-ins; they are to be replaced by glTF models.

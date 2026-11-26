@@ -53,14 +53,10 @@ const FRICTION_DEPTH: f64 = 0.75;
 #[inline]
 fn dot(a: &[f64], b: &[f64]) -> f64 {
     let mut acc = [0.0; 4];
-    let (ca, cb) = (a.chunks_exact(4), b.chunks_exact(4));
-    let tail: f64 = ca
-        .remainder()
-        .iter()
-        .zip(cb.remainder())
-        .map(|(x, y)| x * y)
-        .sum();
-    for (x, y) in ca.zip(cb) {
+    let (ca, ra) = a.as_chunks::<4>();
+    let (cb, rb) = b.as_chunks::<4>();
+    let tail: f64 = ra.iter().zip(rb).map(|(x, y)| x * y).sum();
+    for (x, y) in ca.iter().zip(cb) {
         for k in 0..4 {
             acc[k] += x[k] * y[k];
         }
@@ -944,9 +940,9 @@ impl Solver {
         let (fx, fz, bx, bz) = (&self.fx[..m], &self.lz[..m], &self.bx[..m], &self.bz[..m]);
         let pre = &self.precon[..m];
         let (r, z) = (&self.cg_r[..n], &mut self.cg_z[..m]);
-        for c in 0..n {
+        for (c, rc) in r.iter().enumerate() {
             let k = c + nx;
-            z[k] = (r[c] - fz[k - nx] * z[k - nx]) * pre[k] - fx[k] * z[k - 1];
+            z[k] = (rc - fz[k - nx] * z[k - nx]) * pre[k] - fx[k] * z[k - 1];
         }
         for c in (0..n).rev() {
             let k = c + nx;

@@ -117,7 +117,7 @@ impl Default for Whitewater {
             foam_from_wakes: 0.5,
             foam_life: 3.5,
             spray_rate: 1500.0,
-            splash_rate: 400.0,
+            splash_rate: 200.0,
             max_droplets: 4000,
         }
     }
@@ -317,7 +317,10 @@ impl WaterSim {
                 f *= decay;
                 let speed2 = u * u + v * v;
                 f += dt * ww.foam_from_breaking * strength[c].min(2.0);
-                f += dt * ww.foam_from_wakes * (block[c] / h[c].max(0.05)).min(4.0) * (speed2 - 0.1).max(0.0);
+                f += dt
+                    * ww.foam_from_wakes
+                    * (block[c] / h[c].max(0.05)).min(4.0)
+                    * (speed2 - 0.1).max(0.0);
                 // The thin fast edge of a run-up or a bore over a dry bed.
                 if h[c] < 0.08 && speed2 > 0.25 {
                     f += dt * 2.0;
@@ -398,7 +401,7 @@ impl WaterSim {
                             ],
                             age: 0.0,
                             life: (0.5 + 0.9 * self.rng.uniform()) as f32,
-                            size: (0.012 + 0.03 * self.rng.uniform().powi(2)) as f32,
+                            size: (0.008 + 0.014 * self.rng.uniform().powi(2)) as f32,
                         });
                     }
                 }
