@@ -9,7 +9,8 @@ use std::sync::OnceLock;
 use bevy::math::Vec3;
 use bevy::prelude::Resource;
 use breakit_core::{Material, NodeLoad, Section, Structure, Support};
-use breakit_parts::{auto_joint, Catalog, JointSpec, MemberChoice};
+use breakit_parts::node::{detail_node, EndDetail, NodeDetail, NodeEnd};
+use breakit_parts::{Catalog, JointSpec, MemberChoice};
 use breakit_render::breakit_mesh::{MaterialKind, MemberStyle, Profile};
 use breakit_scenario::{Bill, CostModel, JointClass};
 
@@ -332,33 +333,60 @@ impl Design {
         }
     }
 
-    /// The joints a beam actually has, automatic ends filled in from its
-    /// material and the other members at each node.
-    pub fn joints(&self, beam: usize) -> [JointSpec; 2] {
-        let m = &self.beams[beam];
-        let allowed = catalog().joints_for(&m.kind.0);
-        let auto = |node: usize| {
-            let others: Vec<_> = self
-                .beams
-                .iter()
-                .enumerate()
-                .filter(|(j, o)| *j != beam && (o.a == node || o.b == node))
-                .map(|(_, o)| o.kind.material_kind())
-                .collect();
-            auto_joint(&m.kind.0, &others, &allowed)
-        };
-        [
-            m.joints[0].unwrap_or_else(|| auto(m.a)),
-            m.joints[1].unwrap_or_else(|| auto(m.b)),
-        ]
+    /// The member ends meeting at a node, as (beam, end) with end 0 = a.
+    pub fn ends_at(&self, node: usize) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        for (i, m) in self.beams.iter().enumerate() {
+            if m.a == node {
+                out.push((i, 0));
+            }
+            if m.b == node {
+                out.push((i, 1));
+            }
+        }
+        out
     }
 
-    /// The full member choice of a beam, with its actual joints.
-    pub fn member(&self, beam: usize) -> MemberChoice {
-        MemberChoice {
-            joints: self.joints(beam),
-            ..self.beams[beam].kind.0
-        }
+    /// The connection detail at a node: which joint, plate and capacity
+    /// each member end gets, from how many members meet, their angles and
+    /// sizes ([`breakit_parts::node::detail_node`]). `ends` lines up with
+    /// [`Design::ends_at`].
+    pub fn node_detail(&self, node: usize) -> NodeDetail {
+        let ends: Vec<NodeEnd> = self
+            .ends_at(node)
+            .into_iter()
+            .map(|(i, end)| {
+                let m = &self.beams[i];
+                let far = if end == 0 { m.b } else { m.a };
+                let d = (self.nodes[far] - self.nodes[node]).normalize_or_zero();
+                NodeEnd {
+                    dir: [d.x as f64, d.y as f64, d.z as f64],
+                    choice: m.kind.0,
+                    fixed: m.joints[end],
+                    allowed: catalog().joints_for(&m.kind.0),
+                }
+            })
+            .collect();
+        detail_node(&ends)
+    }
+
+    /// The details at both ends of a beam.
+    pub fn end_details(&self, beam: usize) -> [EndDetail; 2] {
+        let m = &self.beams[beam];
+        [(m.a, 0), (m.b, 1)].map(|(node, end)| {
+            let at = self.ends_at(node);
+            let k = at
+                .iter()
+                .position(|&e| e == (beam, end))
+                .expect("a beam's end is at its node");
+            self.node_detail(node).ends[k]
+        })
+    }
+
+    /// The joints a beam actually has, automatic ends filled in from the
+    /// node: materials, member count, angles.
+    pub fn joints(&self, beam: usize) -> [JointSpec; 2] {
+        self.end_details(beam).map(|d| d.joint)
     }
 
     /// Bill of materials and joints under a scenario cost model.
@@ -390,9 +418,24 @@ impl Design {
         }
         for i in 0..self.beams.len() {
             let m = &self.beams[i];
-            let r = self.member(i).resolve(self.beam_length(i) as f64);
+            let details = self.end_details(i);
+            let choice = MemberChoice {
+                joints: details.map(|d| d.joint),
+                ..m.kind.0
+            };
+            let r = choice.resolve(self.beam_length(i) as f64);
+            // The node's geometry scales what the joint type gives.
+            let [ja, jb] = [0, 1].map(|e| {
+                let (mut j, d) = (r.joints[e], details[e]);
+                j.force_capacity *= d.capacity;
+                j.moment_capacity = j.moment_capacity.map(|c| c * d.capacity);
+                j.stiffness = j
+                    .stiffness
+                    .map(|k| if k.is_finite() { k * d.stiffness } else { k });
+                j
+            });
             let id = s.add_member(m.a, m.b, r.material, r.section);
-            s.set_ends(id, r.joints[0], r.joints[1]);
+            s.set_ends(id, ja, jb);
         }
         for (i, sup) in self.supports.iter().enumerate() {
             match sup {
@@ -544,5 +587,21 @@ mod tests {
         let costs = CostModel::default();
         let bill = d.bill(&s, &costs);
         assert_eq!(bill.joints, costs.joints.pinned + costs.joints.bolted);
+    }
+
+    #[test]
+    fn truss_nodes_get_gussets_and_supports_base_plates() {
+        use breakit_parts::node::Detail;
+        let d = Design::starter_bridge();
+        // Bottom node 1: two chords and two diagonals.
+        let n = d.node_detail(1);
+        assert_eq!(n.ends.len(), 4);
+        assert!(n.gusset.is_some());
+        assert!(n.ends.iter().all(|e| e.detail == Detail::Gusset));
+        // The end node has a chord and a diagonal at 63 degrees: end plates.
+        let e = d.node_detail(0);
+        assert_eq!(e.ends.len(), 2);
+        assert!(e.gusset.is_none());
+        assert!(e.ends.iter().all(|e| e.detail == Detail::EndPlate));
     }
 }

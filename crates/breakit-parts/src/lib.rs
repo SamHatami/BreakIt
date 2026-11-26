@@ -18,6 +18,8 @@
 //!
 //! Dimensions in the data are millimetres; everything returned is SI.
 
+pub mod node;
+
 use std::collections::BTreeMap;
 
 use breakit_core::{

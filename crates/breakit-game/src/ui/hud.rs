@@ -16,6 +16,7 @@ use crate::camera::OrbitCamera;
 use crate::design::{catalog, joint_class, Design};
 use crate::flow::{Screen, UiAction};
 use crate::scenario::{money, Sheets, TestEvent, TestRecord, CHART_COLUMNS};
+use breakit_parts::node::EndDetail;
 use breakit_parts::JointSpec;
 
 fn view(kind: View, node: Node) -> impl Bundle {
@@ -579,12 +580,12 @@ fn step_arrow(p: &mut ChildSpawnerCommands, glyph: &str, action: UiAction, enabl
 }
 
 /// The value and utilisation of one end joint.
-fn joint_value(p: &mut ChildSpawnerCommands, j: JointSpec, auto: bool, util: f32) {
-    let name = if auto {
-        format!("{} (auto)", j.label())
-    } else {
-        j.label().to_string()
-    };
+fn joint_value(p: &mut ChildSpawnerCommands, d: EndDetail, auto: bool, util: f32) {
+    let j = d.joint;
+    let mut name = format!("{} {}", j.label(), d.detail.label());
+    if auto {
+        name.push_str(" (auto)");
+    }
     p.spawn(text(name, TextRole::Body, Swatch::Ink));
     if matches!(j, JointSpec::Monolithic | JointSpec::Rigid) {
         // Full-strength joints have no capacity of their own.
@@ -600,7 +601,8 @@ pub fn build_inspector(p: &mut ChildSpawnerCommands, v: &GameView) {
     };
     let beam = v.design.beams[i];
     let kind = beam.kind;
-    let joints = v.design.joints(i);
+    let details = v.design.end_details(i);
+    let joints = details.map(|d| d.joint);
     let len = v.design.beam_length(i);
     let m = v.state.members.get(i).copied().unwrap_or_default();
     let family = catalog().family_of(&kind.0);
@@ -672,7 +674,7 @@ pub fn build_inspector(p: &mut ChildSpawnerCommands, v: &GameView) {
             kv_action(
                 b,
                 name,
-                |v| joint_value(v, joints[end], beam.joints[end].is_none(), m.joints[end]),
+                |v| joint_value(v, details[end], beam.joints[end].is_none(), m.joints[end]),
                 "",
                 UiAction::CycleJoint(end as u8),
             );

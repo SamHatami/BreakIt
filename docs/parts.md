@@ -59,13 +59,36 @@ than welded because joints are priced per member end: an all-welded starter
 truss costs about 90 000 kr against the bridge sheet's 54 000 kr budget.
 Welding is stiffer and the player can choose it.
 
+## Node detailing
+
+`node::detail_node` looks at every member end at a node and gives each one a
+joint type (unless the player set it), a physical detail, plate sizes and
+factors on the joint's numbers:
+
+- 3+ steel members share a **gusset** in their plane (normal, reach from the
+  node, standard thickness). Reach grows with the deepest member and the
+  shallowest angle; thickness with the thickest wall and the member count.
+- A steel member square (75 degrees or more) to a continuous run gets a
+  pinned **fin plate**, unless the player picked another joint.
+- Two steel members in line: bolted **splice**, twice the knee stiffness.
+  At an angle: **end plates**. Alone (a support): **base plate**.
+- Timber: dowelled **slotted-in plate**. Concrete: **cast** with concrete,
+  else a **bearing**. Round bars and two-member pins: **clevis**.
+- Under 30 degrees to the nearest member the bolt group sits off the axis:
+  capacity falls linearly to half at 0 degrees. Five or more members: 0.9.
+
+The game multiplies the resolved joint's force and moment capacity by
+`capacity` and its finite stiffness by `stiffness`, so the solver sees the
+node.
+
 ## In the game (breakit-game)
 
 - `design::BeamKind(MemberChoice)` is what each `Beam` is built from;
   `Beam.joints: [Option<JointSpec>; 2]` holds the player's override per end,
-  `None` = automatic. `Design::joints(i)` gives the actual joints,
-  `Design::member(i)` the full choice, and `to_structure` resolves it at the
-  member's length and calls `set_ends`. `Design::bill` prices joints by kind.
+  `None` = automatic. `Design::node_detail(node)` and `Design::end_details(i)` give the
+  node detailing, `Design::joints(i)` the actual joints, and `to_structure`
+  resolves the choice at the member's length, scales by the detail and calls
+  `set_ends`. `Design::bill` prices joints by kind.
 - Palette (`build_drawer`): material tabs (keys 1 to 4) and the catalog parts
   of that material. A scenario's material limits filter the parts.
 - Inspector (`build_inspector`): standard size (`[` `]` or the arrows), grade
