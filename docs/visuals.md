@@ -58,7 +58,7 @@ How it works:
 
 ![All joints](images/joints/all.jpg)
 ![Pin and bolted end plate, loaded and failed](images/joints/steel.jpg)
-![Concrete, dowelled timber, timber pin and a composite collar](images/joints/others.jpg)
+![Timber pin and a composite collar](images/joints/others.jpg)
 
 ## Using it from the game
 
