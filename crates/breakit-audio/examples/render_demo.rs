@@ -4,8 +4,10 @@
 //! cargo run --release -p breakit-audio --example render_demo -- <out_dir> [scene...]
 //! ```
 //!
-//! Scenes: stress, breaks, impacts, ambience, rigs, ui, collapse (all by
-//! default). Each scene is a scripted sequence of the same commands the game
+//! Scenes: stress, breaks, impacts, ambience, rigs, ui, collapse, and one
+//! story per material: steel, timber, concrete, composite (all by default).
+//! `BREAKIT_STYLE=synth` renders pure synthesis instead of the default
+//! recordings-plus-synthesis. Each scene is a scripted sequence of the same commands the game
 //! sends, so what you hear is what the game plays.
 
 use std::path::{Path, PathBuf};
@@ -54,6 +56,10 @@ impl Script {
 
     fn render(mut self) -> Vec<f32> {
         let mut m = Mixer::new(SR);
+        // BREAKIT_STYLE=synth renders the pure synthesis path.
+        if std::env::var("BREAKIT_STYLE").is_ok_and(|s| s == "synth") {
+            m.handle(Command::Style(breakit_audio::SoundStyle::Synth));
+        }
         m.handle(Command::Listener {
             position: [0.0, 1.5, 6.0],
             right: [1.0, 0.0, 0.0],
@@ -457,12 +463,136 @@ fn collapse() -> Script {
     s
 }
 
+/// One material from loaded to broken: stress builds, damage starts, two
+/// members break in that material's typical ways, the pieces land.
+fn material_story(m: MaterialKind) -> Script {
+    let (size, onset, first, second, piece) = match m {
+        MaterialKind::Steel => (
+            40.0,
+            DamageState::Yielded,
+            BreakCause::Hinge,
+            BreakCause::Rupture,
+            8.0,
+        ),
+        MaterialKind::Timber => (
+            30.0,
+            DamageState::Cracked,
+            BreakCause::Splinter,
+            BreakCause::TimberSplit,
+            3.0,
+        ),
+        MaterialKind::Concrete => (
+            300.0,
+            DamageState::Cracked,
+            BreakCause::ConcreteShear,
+            BreakCause::Crushing,
+            30.0,
+        ),
+        MaterialKind::Composite => (
+            10.0,
+            DamageState::Delaminated,
+            BreakCause::FibreRupture,
+            BreakCause::Delamination,
+            1.0,
+        ),
+    };
+    let mut s = Script::new(9.0);
+    s.at(
+        0.0,
+        Command::Ambient {
+            id: 0,
+            kind: AmbientKind::Room,
+            level: 1.0,
+            place: None,
+        },
+    );
+    s.ramp(0.0, 5.0, move |t| Command::Stress {
+        material: m,
+        load: 0.3 + 0.85 * (t / 3.5).min(1.0),
+        rate: 0.25,
+        members: 6.0,
+        place: place(-0.3),
+    });
+    s.at(
+        2.3,
+        Command::Damage {
+            material: m,
+            state: onset,
+            size,
+            place: place(-0.3),
+        },
+    );
+    if m == MaterialKind::Concrete {
+        s.at(
+            3.2,
+            Command::Damage {
+                material: m,
+                state: DamageState::Crushed,
+                size,
+                place: place(0.4),
+            },
+        );
+    }
+    s.at(
+        3.8,
+        Command::Break {
+            material: m,
+            cause: first,
+            size,
+            place: place(-0.3),
+        },
+    );
+    s.at(
+        4.6,
+        Command::Break {
+            material: m,
+            cause: second,
+            size,
+            place: place(0.6),
+        },
+    );
+    s.at(5.0, Command::ResetStructure);
+    let hits = [
+        (5.3, 6.0, 1.0),
+        (5.45, 4.0, 0.3),
+        (5.7, 2.5, 1.0),
+        (5.8, 3.5, 0.2),
+        (6.1, 1.5, 0.3),
+        (6.4, 1.0, 0.1),
+    ];
+    for (i, &(t, v, frac)) in hits.iter().enumerate() {
+        s.at(
+            t,
+            Command::Impact {
+                material: m,
+                speed: v,
+                size: piece * frac,
+                place: place(-1.0 + 0.4 * i as f32),
+            },
+        );
+    }
+    s
+}
+
+fn steel() -> Script {
+    material_story(MaterialKind::Steel)
+}
+fn timber() -> Script {
+    material_story(MaterialKind::Timber)
+}
+fn concrete() -> Script {
+    material_story(MaterialKind::Concrete)
+}
+fn composite() -> Script {
+    material_story(MaterialKind::Composite)
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let dir = PathBuf::from(args.next().unwrap_or_else(|| "audio-demo".into()));
     let wanted: Vec<String> = args.collect();
     std::fs::create_dir_all(&dir).expect("create output dir");
-    let scenes: [(&str, fn() -> Script); 7] = [
+    let scenes: [(&str, fn() -> Script); 11] = [
         ("stress", stress),
         ("breaks", breaks),
         ("impacts", impacts),
@@ -470,6 +600,10 @@ fn main() {
         ("rigs", rigs),
         ("ui", ui),
         ("collapse", collapse),
+        ("steel", steel),
+        ("timber", timber),
+        ("concrete", concrete),
+        ("composite", composite),
     ];
     for (name, make) in scenes {
         if !wanted.is_empty() && !wanted.iter().any(|w| w == name) {
