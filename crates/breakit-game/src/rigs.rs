@@ -161,9 +161,13 @@ fn drive_rigs(
         }
         return;
     };
-    let run = sim.run();
-    let state = run.rig_state();
-    *clock = run.time() as f32;
+    // A graded test or the playground's free bench: both report their rigs.
+    let state = match (sim.run(), sim.live()) {
+        (Some(run), _) => run.rig_state(),
+        (None, Some(live)) => live.rig_state(),
+        (None, None) => RigState::default(),
+    };
+    *clock = sim.time() as f32;
     let setup = setup_from(&state, RigSetup::default());
     if rigs.setup != setup {
         rigs.setup = setup;
