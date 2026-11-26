@@ -514,6 +514,16 @@ impl DynamicSim {
         self.bodies[node].force = force;
     }
 
+    /// Adds a lumped mass (kg) to a free node, such as a tank or a machine
+    /// the structure carries. It has weight under gravity and inertia in
+    /// the solve. Does nothing at a node whose translation is fixed.
+    pub fn add_point_mass(&mut self, node: usize, kg: f64) {
+        let b = &mut self.bodies[node];
+        if b.inv_mass > 0.0 && kg > 0.0 {
+            b.inv_mass = 1.0 / (1.0 / b.inv_mass + kg);
+        }
+    }
+
     pub fn time(&self) -> f64 {
         self.time
     }

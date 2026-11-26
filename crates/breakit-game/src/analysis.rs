@@ -8,8 +8,10 @@
 
 use bevy::prelude::*;
 use breakit_core::{solve_static, BreakCause, DynamicSim, SimConfig};
+use breakit_scenario::TestRun;
 
 use crate::design::{from_core, to_core, Design};
+use crate::test_scenario::{ActiveScenario, LastReport};
 use crate::Mode;
 
 pub struct AnalysisPlugin;
@@ -93,11 +95,41 @@ impl Default for DeflectionScale {
 /// Gravity used everywhere, m/s^2.
 pub const GRAVITY: f32 = 9.81;
 
-/// Live real-time simulation, present only in simulate mode.
+/// Live real-time simulation, present only in simulate mode. With a
+/// scenario active it is a graded [`TestRun`] that applies the scenario's
+/// loads; in free play a bare sim under the player's loads.
 #[derive(Resource)]
 pub struct Simulation {
-    pub sim: DynamicSim,
+    kind: SimKind,
     seen_breaks: usize,
+}
+
+enum SimKind {
+    Free(Box<DynamicSim>),
+    Test(Box<TestRun>),
+}
+
+impl Simulation {
+    pub fn sim(&self) -> &DynamicSim {
+        match &self.kind {
+            SimKind::Free(s) => s,
+            SimKind::Test(r) => r.sim(),
+        }
+    }
+
+    pub fn run(&self) -> Option<&TestRun> {
+        match &self.kind {
+            SimKind::Test(r) => Some(r),
+            SimKind::Free(_) => None,
+        }
+    }
+
+    fn step(&mut self, dt: f64) {
+        match &mut self.kind {
+            SimKind::Free(s) => s.step(dt),
+            SimKind::Test(r) => r.step(dt),
+        }
+    }
 }
 
 /// Computes the static response of the design when it, or the deflection
@@ -144,18 +176,45 @@ pub fn compute_static(design: &Design, scale: f32) -> FrameState {
     state
 }
 
-fn start_simulation(mut commands: Commands, design: Res<Design>, mut state: ResMut<FrameState>) {
+fn start_simulation(
+    mut commands: Commands,
+    design: Res<Design>,
+    active: Res<ActiveScenario>,
+    mut report: ResMut<LastReport>,
+    mut state: ResMut<FrameState>,
+) {
     let structure = design.to_structure();
-    let mut sim = DynamicSim::new(
-        &structure,
-        SimConfig {
-            gravity: to_core(Vec3::new(0.0, -GRAVITY, 0.0)),
-            ..Default::default()
-        },
-    );
-    for l in design.node_loads() {
-        sim.set_force(l.node, l.force);
-    }
+    let config = SimConfig {
+        gravity: to_core(Vec3::new(0.0, -GRAVITY, 0.0)),
+        ..Default::default()
+    };
+    report.0 = None;
+    let kind = match active.get() {
+        Some(scenario) => {
+            let bill = active.costs.estimate(&structure);
+            match TestRun::new(
+                scenario,
+                &structure,
+                &design.node_loads(),
+                bill,
+                active.mode,
+                config.clone(),
+            ) {
+                Ok(run) => Some(SimKind::Test(Box::new(run))),
+                // Build mode blocks the test while limits fail; if one
+                // slips through, fall back to free play.
+                Err(_) => None,
+            }
+        }
+        None => None,
+    };
+    let kind = kind.unwrap_or_else(|| {
+        let mut sim = DynamicSim::new(&structure, config);
+        for l in design.node_loads() {
+            sim.set_force(l.node, l.force);
+        }
+        SimKind::Free(Box::new(sim))
+    });
     *state = FrameState {
         positions: design.nodes.clone(),
         members: vec![MemberState::default(); design.beams.len()],
@@ -163,7 +222,7 @@ fn start_simulation(mut commands: Commands, design: Res<Design>, mut state: ResM
         ..Default::default()
     };
     commands.insert_resource(Simulation {
-        sim,
+        kind,
         seen_breaks: 0,
     });
 }
@@ -183,16 +242,24 @@ fn step_simulation(
     mut acc: Local<f64>,
     sim: Option<ResMut<Simulation>>,
     design: Res<Design>,
+    mut report: ResMut<LastReport>,
     mut state: ResMut<FrameState>,
 ) {
     let Some(mut sim) = sim else { return };
     *acc = (*acc + time.delta_secs_f64()).min(4.0 * SIM_DT);
     while *acc >= SIM_DT {
-        sim.sim.step(SIM_DT);
+        sim.step(SIM_DT);
         *acc -= SIM_DT;
     }
+    if let Some(run) = sim.run() {
+        if run.is_decided() && report.0.is_none() {
+            let r = run.report();
+            info!("test report\n{}", r.summary());
+            report.0 = Some(r);
+        }
+    }
 
-    let s = &sim.sim;
+    let s = sim.sim();
     for (i, p) in state.positions.iter_mut().enumerate() {
         *p = from_core(s.position(i));
     }

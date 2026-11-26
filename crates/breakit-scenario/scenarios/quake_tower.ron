@@ -1,0 +1,49 @@
+// Test sheet Q-01: a water tower on the shake table.
+(
+    id: "quake_tower",
+    sheet: "Q-01",
+    group: "Towers",
+    title: "Water tower on the shake table",
+    brief: "Hold a 4 t water tank 6 m up while the table shakes at 0.4 g. Four fixed footings sit at the corners of a 2 m square. The tank should not sway more than 10 cm.",
+    limits: (
+        volume: (min: (-1.5, 0.0, -1.5), max: (1.5, 6.5, 1.5)),
+        budget: Some(44000.0),
+        max_mass: Some(600.0),
+        materials: None,
+    ),
+    anchors: [
+        (name: "A", position: (-1.0, 0.0, -1.0), kind: Fixed),
+        (name: "B", position: (1.0, 0.0, -1.0), kind: Fixed),
+        (name: "C", position: (1.0, 0.0, 1.0), kind: Fixed),
+        (name: "D", position: (-1.0, 0.0, 1.0), kind: Fixed),
+    ],
+    payloads: [
+        (name: "tank", at: (0.0, 6.0, 0.0), tolerance: 0.3, mass: 4000.0),
+    ],
+    events: [
+        GroundShake(
+            name: "Shake 0.4 g",
+            start: 0.5,
+            duration: 8.0,
+            peak: 3.92,
+            frequency: 1.5,
+            direction: (1.0, 0.0, 0.3),
+            fade: 1.5,
+        ),
+    ],
+    duration: 10.0,
+    settle: 1.0,
+    collapse: (displacement: 1.0, max_broken_fraction: 0.25),
+    overload: None,
+    objectives: [
+        PayloadDrift(payload: "tank", limit: 0.10),
+        NoBreaks,
+    ],
+    scoring: (
+        target_cost: 30000.0,
+        target_mass: 120.0,
+        margin_band: (1.25, 2.0),
+        weights: (cost: 0.35, mass: 0.15, margin: 0.25, objectives: 0.25),
+        stars: (0.6, 0.85),
+    ),
+)
