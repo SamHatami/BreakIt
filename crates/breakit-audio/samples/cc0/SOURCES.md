@@ -1,6 +1,6 @@
 # Recorded samples
 
-All files here are derived from CC0 (public domain) recordings on OpenGameArt: converted to mono 32 kHz, trimmed and normalised by `tools/cc0_samples.py`. No attribution is required; it is given anyway.
+All files here are derived from CC0 (public domain) recordings on OpenGameArt: converted to mono 32 kHz, trimmed and normalised. They stand in for timbres that have no recording of their own yet; the brightest small-metal clips were left out because they read as clinks. No attribution is required; it is given anyway.
 
 ## https://opengameart.org/content/35-wooden-crackshitsdestructions
 
@@ -28,17 +28,12 @@ By rubberduck, CC0.
 - `wood_hit/00.wav <- bfh1_wood_hit_01.ogg`
 - `wood_hit/01.wav <- bfh1_wood_hit_02.ogg`
 - `wood_hit/02.wav <- bfh1_wood_hit_03.ogg`
-- `metal_hit/00.wav <- bfh1_metal_hit_01.ogg`
 - `metal_hit/01.wav <- bfh1_metal_hit_02.ogg`
-- `metal_hit/02.wav <- bfh1_metal_hit_03.ogg`
 - `metal_hit/03.wav <- bfh1_metal_hit_04.ogg`
 - `metal_hit/04.wav <- bfh1_metal_hit_05.ogg`
 - `metal_hit/05.wav <- bfh1_metal_hit_06.ogg`
 - `metal_fall/00.wav <- bfh1_metal_falling_01.ogg`
 - `metal_fall/01.wav <- bfh1_metal_falling_02.ogg`
-- `metal_fall/02.wav <- bfh1_metal_falling_03.ogg`
-- `metal_fall/03.wav <- bfh1_metal_falling_04.ogg`
-- `metal_fall/04.wav <- bfh1_metal_falling_05.ogg`
 - `rock_break/00.wav <- bfh1_rock_breaking_01.ogg`
 - `rock_break/01.wav <- bfh1_rock_breaking_02.ogg`
 - `rock_break/02.wav <- bfh1_rock_breaking_03.ogg`
@@ -57,9 +52,6 @@ By rubberduck, CC0.
 
 By BMacZero, CC0.
 
-- `metal_small/00.wav <- clink1_0.wav`
-- `metal_small/01.wav <- clink2.wav`
-- `metal_small/02.wav <- clink3.wav`
 - `metal_heavy/00.wav <- bong1.wav`
 - `metal_heavy/01.wav <- thud2.wav`
 - `metal_heavy/02.wav <- thud3.wav`

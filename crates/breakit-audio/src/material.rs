@@ -140,13 +140,20 @@ fn seated(body: &Body, drive: Drive, budget: usize, seed: u32) -> Vec<ModeSpec> 
     let mut modes = body.modes(drive, budget, seed);
     for m in &mut modes {
         m.decay += std::f32::consts::PI * m.freq * eta;
+        // A joint passes less of a mode the shorter its wavelength gets
+        // against the joint itself; above a kilohertz or two a member in a
+        // frame hardly rings at all. (An estimate, not a calculation.)
+        m.gain *= (RING_CORNER / m.freq.max(RING_CORNER)).powf(1.5);
     }
     modes
 }
 
+/// Above this (Hz) a seated member's modes fall away.
+const RING_CORNER: f32 = 1200.0;
+
 /// How hard a recorded event rings the member it happens in, against how
 /// loud the recording itself is heard.
-const BODY: f32 = 0.5;
+const BODY: f32 = 0.35;
 
 /// Longest a single recorded micro-event plays, s.
 const MICRO_LIMIT: f32 = 0.09;
@@ -1456,7 +1463,7 @@ mod tests {
         let t = hit(MaterialKind::Timber, 4.0, 6.0);
         let c = hit(MaterialKind::Concrete, 4.0, 40.0);
         assert!(
-            brightness(&s, 1500.0) > 1.5 * brightness(&t, 1500.0),
+            brightness(&s, 1500.0) > 1.2 * brightness(&t, 1500.0),
             "steel {} timber {}",
             brightness(&s, 1500.0),
             brightness(&t, 1500.0)
