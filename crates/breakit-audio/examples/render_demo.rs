@@ -4,17 +4,20 @@
 //! cargo run --release -p breakit-audio --example render_demo -- <out_dir> [scene...]
 //! ```
 //!
-//! Scenes: stress, breaks, impacts, ambience, rigs, ui, collapse, and one
+//! Scenes: stress, breaks, impacts, geometry, ambience, rigs, ui, collapse, and one
 //! story per material: steel, timber, concrete, composite (all by default).
 //! Each scene is a scripted sequence of the same commands the game
 //! sends, so what you hear is what the game plays.
 
 use std::path::{Path, PathBuf};
 
+use breakit_audio::material::capacity_energy;
 use breakit_audio::wav::write_wav;
 use breakit_audio::{
-    AmbientKind, BreakCause, Command, DamageState, MaterialKind, Mixer, Place, RigKind, UiSound,
+    AmbientKind, Body, BreakCause, BreakInfo, Command, DamageState, MaterialKind, Mixer, Place,
+    RigKind, UiSound,
 };
+use breakit_core::{Material, Section};
 
 const SR: f32 = 48_000.0;
 
@@ -86,78 +89,155 @@ fn place(x: f32) -> Place {
     Place::at([x, 1.0, 0.0])
 }
 
-fn stress() -> Script {
-    // Each material in turn: load ramps from nothing past capacity.
-    let mut s = Script::new(4.0 * 7.0);
-    for (i, &m) in MATERIALS.iter().enumerate() {
-        let t0 = i as f32 * 7.0;
-        s.ramp(t0, t0 + 6.0, move |t| {
-            let u = ((t - t0) / 5.0).min(1.2);
-            Command::Stress {
-                material: m,
-                load: u,
-                rate: 0.2,
-                members: 6.0,
-                place: place(-1.0 + i as f32 * 0.7),
-            }
-        });
-        s.at(t0 + 6.0, Command::ResetStructure);
-        // Damage onsets along the way.
-        let state = match m {
-            MaterialKind::Steel => DamageState::Yielded,
-            MaterialKind::Timber | MaterialKind::Concrete => DamageState::Cracked,
-            MaterialKind::Composite => DamageState::Delaminated,
-        };
-        s.at(
-            t0 + 3.5,
-            Command::Damage {
-                material: m,
-                state,
-                size: 60.0,
-                place: place(0.0),
-            },
-        );
-        if m == MaterialKind::Concrete {
-            s.at(
-                t0 + 4.8,
-                Command::Damage {
-                    material: m,
-                    state: DamageState::Crushed,
-                    size: 300.0,
-                    place: place(0.0),
-                },
-            );
+/// A typical member of a material, `length` metres long.
+fn member(m: MaterialKind, length: f32) -> Body {
+    Body::typical(m, length)
+}
+
+/// A break that releases `load`² of the member's capacity energy.
+fn snap(body: Body, cause: BreakCause, at: f32, axial: f32, load: f32, x: f32) -> Command {
+    Command::Break {
+        info: BreakInfo {
+            body,
+            cause,
+            at,
+            energy: capacity_energy(&body) * load * load,
+            axial,
+        },
+        place: place(x),
+    }
+}
+
+fn onset(body: Body, state: DamageState, load: f32, x: f32) -> Command {
+    Command::Damage {
+        body,
+        state,
+        energy: capacity_energy(&body) * load * load,
+        place: place(x),
+    }
+}
+
+/// A piece of bounding radius `radius` landing at `speed`.
+fn land(m: MaterialKind, radius: f32, speed: f32, x: f32) -> Command {
+    let body = Body::fragment(m, radius);
+    Command::Impact {
+        body,
+        speed,
+        mass: body.mass(),
+        place: place(x),
+    }
+}
+
+/// Loads member `id` from `load.0` to `load.1` over `span`; damage follows
+/// the highest load so far, as the solver reports it.
+fn load_ramp(s: &mut Script, id: u32, body: Body, span: (f32, f32), load: (f32, f32), x: f32) {
+    let ((t0, t1), (u0, u1)) = (span, load);
+    s.ramp(t0, t1, move |t| {
+        let u = u0 + (u1 - u0) * (t - t0) / (t1 - t0);
+        Command::Strain {
+            id,
+            body,
+            utilization: u,
+            damage: u.max(u0).min(1.0),
+            place: place(x),
         }
+    });
+}
+
+fn stress() -> Script {
+    // Each material in turn: one member loaded from nothing to capacity in
+    // five seconds, eased off, and loaded again (quieter: nothing new
+    // cracks until the old peak is passed).
+    let mut s = Script::new(4.0 * 10.0);
+    for (i, &m) in MATERIALS.iter().enumerate() {
+        let t0 = i as f32 * 10.0;
+        let body = member(m, 3.0);
+        let x = -1.0 + i as f32 * 0.7;
+        load_ramp(&mut s, i as u32, body, (t0, t0 + 5.0), (0.0, 1.0), x);
+        s.ramp(t0 + 5.0, t0 + 6.5, move |t| Command::Strain {
+            id: i as u32,
+            body,
+            utilization: 1.0 - 0.4 * (t - t0 - 5.0),
+            damage: 1.0,
+            place: place(x),
+        });
+        s.ramp(t0 + 6.5, t0 + 8.0, move |t| Command::Strain {
+            id: i as u32,
+            body,
+            utilization: 0.4 + 0.4 * (t - t0 - 6.5),
+            damage: 1.0,
+            place: place(x),
+        });
+        s.at(t0 + 9.5, Command::ResetStructure);
     }
     s
 }
 
 fn breaks() -> Script {
-    let all: [(MaterialKind, BreakCause, f32); 12] = [
-        (MaterialKind::Steel, BreakCause::Rupture, 40.0),
-        (MaterialKind::Steel, BreakCause::Hinge, 40.0),
-        (MaterialKind::Steel, BreakCause::Hinge, 400.0),
-        (MaterialKind::Timber, BreakCause::Splinter, 30.0),
-        (MaterialKind::Timber, BreakCause::TimberSplit, 30.0),
-        (MaterialKind::Timber, BreakCause::Crushing, 30.0),
-        (MaterialKind::Concrete, BreakCause::Brittle, 300.0),
-        (MaterialKind::Concrete, BreakCause::ConcreteShear, 300.0),
-        (MaterialKind::Concrete, BreakCause::Crushing, 300.0),
-        (MaterialKind::Concrete, BreakCause::RebarRupture, 300.0),
-        (MaterialKind::Composite, BreakCause::FibreRupture, 10.0),
-        (MaterialKind::Composite, BreakCause::Delamination, 10.0),
+    // (material, cause, where along the member, axial share of the energy)
+    let all: [(MaterialKind, BreakCause, f32, f32); 13] = [
+        (MaterialKind::Steel, BreakCause::Rupture, 0.5, 0.95),
+        (MaterialKind::Steel, BreakCause::Hinge, 0.1, 0.1),
+        (MaterialKind::Steel, BreakCause::Connection, 0.0, 0.6),
+        (MaterialKind::Timber, BreakCause::Splinter, 0.5, 0.2),
+        (MaterialKind::Timber, BreakCause::TimberSplit, 0.5, 0.1),
+        (MaterialKind::Timber, BreakCause::Crushing, 0.5, 0.9),
+        (MaterialKind::Concrete, BreakCause::Brittle, 0.5, 0.2),
+        (MaterialKind::Concrete, BreakCause::ConcreteShear, 0.2, 0.1),
+        (MaterialKind::Concrete, BreakCause::Crushing, 0.5, 0.9),
+        (MaterialKind::Concrete, BreakCause::RebarRupture, 0.5, 0.2),
+        (MaterialKind::Composite, BreakCause::FibreRupture, 0.5, 0.9),
+        (MaterialKind::Composite, BreakCause::Delamination, 0.5, 0.1),
+        (MaterialKind::Composite, BreakCause::Connection, 1.0, 0.5),
     ];
     let mut s = Script::new(all.len() as f32 * 3.0 + 1.0);
-    for (i, &(m, c, size)) in all.iter().enumerate() {
+    for (i, &(m, c, at, axial)) in all.iter().enumerate() {
         s.at(
             0.3 + i as f32 * 3.0,
-            Command::Break {
-                material: m,
-                cause: c,
-                size,
-                place: place(((i % 3) as f32 - 1.0) * 1.5),
-            },
+            snap(
+                member(m, 3.0),
+                c,
+                at,
+                axial,
+                1.0,
+                ((i % 3) as f32 - 1.0) * 1.5,
+            ),
         );
+    }
+    s
+}
+
+/// The same events on members of different size: nothing changes but the
+/// numbers the solver already has. A steel tie snapping at 1, 3 and 8 m; a
+/// thin and a heavy steel tube; a timber post and a timber plank; pieces of
+/// 0.1, 0.4 and 1.5 m landing.
+fn geometry() -> Script {
+    let mut s = Script::new(34.0);
+    let mut t = 0.3;
+    for len in [1.0, 3.0, 8.0] {
+        let body = member(MaterialKind::Steel, len);
+        s.at(t, snap(body, BreakCause::Rupture, 0.5, 0.95, 1.0, 0.0));
+        t += 3.0;
+    }
+    for (ro, wall) in [(0.02, 0.002), (0.12, 0.012)] {
+        let body = Body::member(&Material::steel(), &Section::tube(ro, wall), 3.0);
+        s.at(t, snap(body, BreakCause::Hinge, 0.5, 0.1, 1.0, 0.0));
+        t += 3.0;
+    }
+    for (b, h) in [(0.2, 0.2), (0.2, 0.03)] {
+        let body = Body::member(&Material::timber(), &Section::rect(b, h), 3.0);
+        s.at(t, snap(body, BreakCause::Splinter, 0.5, 0.2, 1.0, 0.0));
+        t += 3.0;
+    }
+    for m in [
+        MaterialKind::Steel,
+        MaterialKind::Timber,
+        MaterialKind::Concrete,
+    ] {
+        for r in [0.05, 0.2, 0.75] {
+            s.at(t, land(m, r, 4.0, 0.0));
+            t += 1.4;
+        }
     }
     s
 }
@@ -166,35 +246,18 @@ fn impacts() -> Script {
     let mut s = Script::new(4.0 * 3.0 + 1.0);
     for (i, &m) in MATERIALS.iter().enumerate() {
         let t0 = 0.2 + i as f32 * 3.0;
-        // A big piece, a bounce, then small bits.
-        s.at(
-            t0,
-            Command::Impact {
-                material: m,
-                speed: 6.0,
-                size: 40.0,
-                place: place(0.0),
-            },
-        );
-        s.at(
-            t0 + 0.35,
-            Command::Impact {
-                material: m,
-                speed: 2.0,
-                size: 40.0,
-                place: place(0.1),
-            },
-        );
+        // A big piece, then small bits.
+        s.at(t0, land(m, 0.6, 6.0, 0.0));
         for k in 0..8 {
-            let tk = t0 + 0.5 + k as f32 * 0.13 + (k * k) as f32 * 0.01;
+            let tk = t0 + 0.6 + k as f32 * 0.13 + (k * k) as f32 * 0.01;
             s.at(
                 tk,
-                Command::Impact {
-                    material: m,
-                    speed: 4.0 - k as f32 * 0.4,
-                    size: 2.0,
-                    place: place(-1.0 + k as f32 * 0.3),
-                },
+                land(
+                    m,
+                    0.12 - 0.01 * k as f32,
+                    4.0 - k as f32 * 0.4,
+                    -1.0 + k as f32 * 0.3,
+                ),
             );
         }
     }
@@ -363,134 +426,81 @@ fn collapse() -> Script {
         },
     );
     s.at(0.0, Command::Ui(UiSound::TestStart));
-    s.ramp(1.0, 7.0, |t| {
-        let u = ((t - 1.0) / 4.0).min(1.3);
-        Command::Stress {
-            material: MaterialKind::Steel,
-            load: u,
-            rate: 0.25,
-            members: 8.0,
-            place: place(-0.5),
-        }
-    });
-    s.ramp(1.0, 5.3, |t| {
-        let u = ((t - 1.0) / 3.5).min(1.2);
-        Command::Stress {
-            material: MaterialKind::Timber,
-            load: u,
-            rate: 0.3,
-            members: 4.0,
-            place: place(0.8),
-        }
-    });
+    // A small mixed truss taken to failure: six members load up at
+    // different rates, a timber diagonal goes first, its load lands on the
+    // steel, a chord hinges and a tie snaps.
+    let steel = member(MaterialKind::Steel, 3.0);
+    let timber = member(MaterialKind::Timber, 2.5);
+    load_ramp(&mut s, 0, timber, (1.0, 5.3), (0.1, 1.0), 0.8);
+    load_ramp(&mut s, 1, timber, (1.0, 6.5), (0.1, 0.9), 0.2);
+    load_ramp(&mut s, 2, steel, (1.0, 5.3), (0.1, 0.6), -0.5);
+    load_ramp(&mut s, 2, steel, (5.3, 5.8), (0.6, 1.0), -0.5);
+    load_ramp(&mut s, 3, steel, (1.0, 5.8), (0.1, 0.5), 0.2);
+    load_ramp(&mut s, 3, steel, (5.8, 6.1), (0.5, 1.0), 0.2);
+    load_ramp(&mut s, 4, steel, (1.0, 6.5), (0.0, 0.7), -1.2);
+    s.at(3.8, onset(timber, DamageState::Cracked, 0.8, 0.8));
+    s.at(4.9, onset(steel, DamageState::Yielded, 0.9, -0.5));
+    s.at(5.3, snap(timber, BreakCause::Splinter, 0.45, 0.3, 1.0, 0.8));
+    s.at(5.8, snap(steel, BreakCause::Hinge, 0.1, 0.1, 1.0, -0.5));
+    s.at(6.1, snap(steel, BreakCause::Rupture, 0.6, 0.95, 1.0, 0.2));
     s.at(
-        3.8,
-        Command::Damage {
-            material: MaterialKind::Timber,
-            state: DamageState::Cracked,
-            size: 30.0,
-            place: place(0.8),
-        },
-    );
-    s.at(
-        4.2,
-        Command::Damage {
-            material: MaterialKind::Steel,
-            state: DamageState::Yielded,
-            size: 40.0,
-            place: place(-0.5),
-        },
-    );
-    s.at(
-        5.3,
-        Command::Break {
-            material: MaterialKind::Timber,
-            cause: BreakCause::Splinter,
-            size: 30.0,
-            place: place(0.8),
-        },
-    );
-    s.at(
-        5.8,
-        Command::Break {
-            material: MaterialKind::Steel,
-            cause: BreakCause::Hinge,
-            size: 40.0,
-            place: place(-0.5),
-        },
-    );
-    s.at(
-        6.1,
-        Command::Break {
-            material: MaterialKind::Steel,
-            cause: BreakCause::Rupture,
-            size: 40.0,
-            place: place(0.2),
-        },
+        6.4,
+        snap(timber, BreakCause::Connection, 1.0, 0.4, 0.8, 0.2),
     );
     s.at(7.0, Command::ResetStructure);
     let hits = [
-        (6.7, 7.0, 30.0),
-        (6.75, 5.0, 3.0),
-        (6.9, 3.0, 5.0),
-        (7.05, 2.0, 30.0),
-        (7.1, 4.0, 2.0),
-        (7.3, 1.5, 2.0),
-        (7.6, 1.0, 1.0),
+        (6.7, 7.0, 0.7),
+        (6.75, 5.0, 0.2),
+        (6.9, 3.0, 0.3),
+        (7.05, 5.0, 0.8),
+        (7.1, 4.0, 0.15),
+        (7.3, 2.5, 0.6),
+        (7.45, 3.0, 0.1),
+        (7.6, 2.0, 0.25),
+        (7.9, 1.5, 0.5),
     ];
-    for (i, &(t, v, m)) in hits.iter().enumerate() {
+    for (i, &(t, v, r)) in hits.iter().enumerate() {
         let mat = if i % 2 == 0 {
             MaterialKind::Steel
         } else {
             MaterialKind::Timber
         };
-        s.at(
-            t,
-            Command::Impact {
-                material: mat,
-                speed: v,
-                size: m,
-                place: place(-1.0 + i as f32 * 0.3),
-            },
-        );
+        s.at(t, land(mat, r, v, -1.0 + i as f32 * 0.3));
     }
     s.at(10.0, Command::Ui(UiSound::Fail));
     s
 }
 
-/// One material from loaded to broken: stress builds, damage starts, two
-/// members break in that material's typical ways, the pieces land.
+/// One material from loaded to broken: two members load up, damage starts,
+/// they break in that material's typical ways, the pieces land.
 fn material_story(m: MaterialKind) -> Script {
-    let (size, onset, first, second, piece) = match m {
+    let (onset_state, first, second, piece) = match m {
         MaterialKind::Steel => (
-            40.0,
             DamageState::Yielded,
-            BreakCause::Hinge,
-            BreakCause::Rupture,
-            8.0,
+            (BreakCause::Hinge, 0.1, 0.1),
+            (BreakCause::Rupture, 0.5, 0.95),
+            0.7,
         ),
         MaterialKind::Timber => (
-            30.0,
             DamageState::Cracked,
-            BreakCause::Splinter,
-            BreakCause::TimberSplit,
-            3.0,
+            (BreakCause::Splinter, 0.5, 0.2),
+            (BreakCause::TimberSplit, 0.4, 0.1),
+            0.6,
         ),
         MaterialKind::Concrete => (
-            300.0,
             DamageState::Cracked,
-            BreakCause::ConcreteShear,
-            BreakCause::Crushing,
-            30.0,
+            (BreakCause::ConcreteShear, 0.2, 0.1),
+            (BreakCause::Crushing, 0.5, 0.9),
+            0.4,
         ),
         MaterialKind::Composite => (
-            10.0,
             DamageState::Delaminated,
-            BreakCause::FibreRupture,
-            BreakCause::Delamination,
-            1.0,
+            (BreakCause::FibreRupture, 0.5, 0.9),
+            (BreakCause::Delamination, 0.5, 0.1),
+            0.5,
         ),
     };
+    let body = member(m, 3.0);
     let mut s = Script::new(9.0);
     s.at(
         0.0,
@@ -501,51 +511,15 @@ fn material_story(m: MaterialKind) -> Script {
             place: None,
         },
     );
-    s.ramp(0.0, 5.0, move |t| Command::Stress {
-        material: m,
-        load: 0.3 + 0.85 * (t / 3.5).min(1.0),
-        rate: 0.25,
-        members: 6.0,
-        place: place(-0.3),
-    });
-    s.at(
-        2.3,
-        Command::Damage {
-            material: m,
-            state: onset,
-            size,
-            place: place(-0.3),
-        },
-    );
+    load_ramp(&mut s, 0, body, (0.0, 3.8), (0.1, 1.0), -0.3);
+    load_ramp(&mut s, 1, body, (0.0, 3.8), (0.1, 0.7), 0.6);
+    load_ramp(&mut s, 1, body, (3.8, 4.6), (0.7, 1.0), 0.6);
+    s.at(2.3, onset(body, onset_state, 0.7, -0.3));
     if m == MaterialKind::Concrete {
-        s.at(
-            3.2,
-            Command::Damage {
-                material: m,
-                state: DamageState::Crushed,
-                size,
-                place: place(0.4),
-            },
-        );
+        s.at(3.2, onset(body, DamageState::Crushed, 0.9, 0.4));
     }
-    s.at(
-        3.8,
-        Command::Break {
-            material: m,
-            cause: first,
-            size,
-            place: place(-0.3),
-        },
-    );
-    s.at(
-        4.6,
-        Command::Break {
-            material: m,
-            cause: second,
-            size,
-            place: place(0.6),
-        },
-    );
+    s.at(3.8, snap(body, first.0, first.1, first.2, 1.0, -0.3));
+    s.at(4.6, snap(body, second.0, second.1, second.2, 1.0, 0.6));
     s.at(5.0, Command::ResetStructure);
     let hits = [
         (5.3, 6.0, 1.0),
@@ -553,18 +527,10 @@ fn material_story(m: MaterialKind) -> Script {
         (5.7, 2.5, 1.0),
         (5.8, 3.5, 0.2),
         (6.1, 1.5, 0.3),
-        (6.4, 1.0, 0.1),
+        (6.4, 1.0, 0.15),
     ];
     for (i, &(t, v, frac)) in hits.iter().enumerate() {
-        s.at(
-            t,
-            Command::Impact {
-                material: m,
-                speed: v,
-                size: piece * frac,
-                place: place(-1.0 + 0.4 * i as f32),
-            },
-        );
+        s.at(t, land(m, piece * frac, v, -1.0 + 0.4 * i as f32));
     }
     s
 }
@@ -587,10 +553,11 @@ fn main() {
     let dir = PathBuf::from(args.next().unwrap_or_else(|| "audio-demo".into()));
     let wanted: Vec<String> = args.collect();
     std::fs::create_dir_all(&dir).expect("create output dir");
-    let scenes: [(&str, fn() -> Script); 11] = [
+    let scenes: [(&str, fn() -> Script); 12] = [
         ("stress", stress),
         ("breaks", breaks),
         ("impacts", impacts),
+        ("geometry", geometry),
         ("ambience", ambience),
         ("rigs", rigs),
         ("ui", ui),

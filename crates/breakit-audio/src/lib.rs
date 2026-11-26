@@ -1,15 +1,20 @@
 //! Procedural audio for BreakIt.
 //!
-//! Every sound is synthesised while the game runs: there are no sample files
-//! to author, license or ship, and a sound can be regenerated or retuned by
-//! editing a patch. The game describes *what is happening* with
-//! [`Command`]s (members under load, a member yielding, a member breaking, a
-//! chunk hitting the floor, a fan spinning) and the [`Mixer`] turns that into
-//! sound on the audio thread.
+//! Every sound is synthesised while the game runs. The structure's sounds
+//! are physically based: the game hands over what the solver knows (a
+//! member's material, section and length, how hard it is working, the energy
+//! it released when it broke, how fast a piece hit the floor) and the sound
+//! is computed from that, as force events ringing the member's own
+//! vibration modes. The game describes *what is happening* with
+//! [`Command`]s and the [`Mixer`] turns that into sound on the audio thread.
 //!
 //! * [`dsp`]: noise, filters, resonators, envelopes.
-//! * [`material`]: stress creaks and groans, damage onsets, break sounds and
-//!   debris impacts for steel, timber, concrete and composites.
+//! * [`body`]: a member's vibration modes from its geometry and material.
+//! * [`modal`]: the modal bank and the voice that plays force events into
+//!   it.
+//! * [`material`]: the force events: stress release, micro-fracture,
+//!   stick-slip and contact, for members straining, damage, breaks and
+//!   debris impacts.
 //! * [`ambience`]: the test hall (mains hum, HVAC, distant machinery).
 //! * [`rigs`]: wind fan wall, shake table, wave paddle, carts, hydraulics.
 //! * [`ui`]: build-mode clicks and mode changes.
@@ -20,16 +25,20 @@
 //! Like `breakit-core`, this crate has no engine dependency.
 
 pub mod ambience;
+pub mod body;
 pub mod dsp;
 pub mod material;
 pub mod mixer;
+pub mod modal;
 pub mod output;
 pub mod reverb;
 pub mod rigs;
 pub mod ui;
 pub mod wav;
 
+pub use body::{Body, Ends};
 pub use breakit_core::{BreakCause, DamageState, MaterialKind};
+pub use material::BreakInfo;
 pub use mixer::Mixer;
 pub use output::{AudioHandle, AudioOutput};
 
@@ -150,40 +159,36 @@ pub enum UiSound {
 pub enum Command {
     /// The camera: its position and unit right and up vectors.
     Listener { position: Pos, right: Pos, up: Pos },
-    /// How hard the members of one material are working right now,
-    /// aggregated by the game. `load` is the utilisation of the hardest
-    /// working members (1 = at capacity, above 1 = past it; the bed is quiet
-    /// below about 0.3), `rate` how fast it is rising per second, `members`
-    /// how many members are above half capacity.
-    /// The engine keeps one bed per material and smooths it.
-    Stress {
-        material: MaterialKind,
-        load: f32,
-        rate: f32,
-        members: f32,
+    /// One member whose load or damage is changing. `id` is the member's
+    /// index, `utilization` its load over capacity (1 = at capacity) and
+    /// `damage` its fraction of the way to failure (0..1, never
+    /// decreasing). Send it every frame for the members that are changing
+    /// most; the engine keeps a voice per member, listens to the changes
+    /// (joints slipping as the load moves, micro-cracks as damage grows) and
+    /// drops voices that are no longer updated. A steady load is silent.
+    Strain {
+        id: u32,
+        body: Body,
+        utilization: f32,
+        damage: f32,
         place: Place,
     },
     /// A member reached a worse damage state (yielded, cracked, crushed,
-    /// delaminated). `size` is the member's mass in kg.
+    /// delaminated). `energy` is the elastic energy it holds, J.
     Damage {
-        material: MaterialKind,
+        body: Body,
         state: DamageState,
-        size: f32,
+        energy: f32,
         place: Place,
     },
     /// A member broke.
-    Break {
-        material: MaterialKind,
-        cause: BreakCause,
-        size: f32,
-        place: Place,
-    },
+    Break { info: BreakInfo, place: Place },
     /// A loose piece hit the floor or the structure. `speed` m/s normal to
-    /// the contact, `size` kg.
+    /// the contact, `mass` kg.
     Impact {
-        material: MaterialKind,
+        body: Body,
         speed: f32,
-        size: f32,
+        mass: f32,
         place: Place,
     },
     /// A test rig's state. `drive` 0..1 is how hard it works; `speed` is its
@@ -211,7 +216,7 @@ pub enum Command {
     Volume { bus: Bus, gain: f32 },
     /// Master volume, linear 0..1.
     Master(f32),
-    /// Stop all structure sounds (stress beds to zero, one-shots cut), e.g.
+    /// Stop all structure sounds (strain voices dropped, one-shots cut), e.g.
     /// when a test run is reset.
     ResetStructure,
 }
