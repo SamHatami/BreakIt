@@ -6,7 +6,7 @@
 //! factorisation are built once and never change: a broken beam simply
 //! contributes zeros. Each solve then
 //!
-//! 1. scatters the new values straight into the CSC value array, and
+//! 1. scatters the new values straight into the matrix storage, and
 //! 2. solves with conjugate gradients preconditioned by the most recent
 //!    Cholesky factorisation.
 //!
@@ -18,6 +18,7 @@
 //! factorisation is computed only when CG starts to need more iterations than
 //! a refactorisation is worth.
 
+use crate::blockchol::BlockChol;
 use faer::dyn_stack::{MemBuffer, MemStack, StackReq};
 use faer::linalg::cholesky::llt::factor::LltRegularization;
 use faer::sparse::linalg::cholesky::{
@@ -41,9 +42,13 @@ pub const fn tri(r: usize, c: usize) -> usize {
 const ABSENT: u32 = u32::MAX;
 const MIN_HOLD: usize = 4;
 const MAX_HOLD: usize = 64;
-/// `Backend::Auto` switches to block Jacobi when a factorisation costs more
-/// than this many times the flops of one triangular solve pair.
-const JACOBI_FILL_RATIO: f64 = 12.0;
+/// `Backend::Auto` switches to block Jacobi when a scalar factorisation
+/// would cost more than this many times the flops of one triangular solve
+/// pair. Measured with the node-block factorisation: at 17 (a 3x3x8 bay
+/// tower) Cholesky is 1.4 to 1.8 times faster per frame, at 43 (5x5x12) the
+/// two are level, at 112 (8x8x16) block Jacobi is twice as fast in a
+/// collapse.
+const JACOBI_FILL_RATIO: f64 = 30.0;
 const JACOBI_MAX_ITERS: usize = 500;
 /// Scalar type of the block-Jacobi iteration.
 type S = f32;
@@ -51,18 +56,21 @@ type S = f32;
 /// Which linear solver handles the substep systems.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Backend {
-    /// Pick by the fill of the Cholesky factorisation: 3D frames, whose
-    /// factors fill in heavily, get `BlockJacobi`; chain-like structures
-    /// such as truss bridges get `Cholesky`.
+    /// Pick by the fill of the Cholesky factorisation: large 3D frames,
+    /// whose factors fill in heavily, get `BlockJacobi`; small frames and
+    /// chain-like structures such as truss bridges get `Cholesky`.
     #[default]
     Auto,
     /// Conjugate gradients preconditioned by the most recent sparse Cholesky
-    /// factorisation.
+    /// factorisation, computed on 6x6 node blocks (`blockchol.rs`).
     Cholesky,
     /// Conjugate gradients preconditioned by the inverse of each node's 6x6
     /// block, warm-started from the previous solution. Never factorises, so
     /// its cost is linear in the member count and has no spikes.
     BlockJacobi,
+    /// `Cholesky` with faer's scalar sparse factorisation, the
+    /// implementation before the node-block one. Kept for comparison.
+    CholeskyScalar,
 }
 
 /// How hard the solver works per call.
@@ -96,17 +104,25 @@ pub struct Stats {
     pub factor_seconds: f64,
     pub solve_seconds: f64,
     pub assembly_seconds: f64,
+    /// Constants of the Cholesky backends (0 for block Jacobi): scalar
+    /// entries stored in the factor, the sum of squared column counts of
+    /// the equivalent scalar factorisation, and the factorisation cost in
+    /// CG iterations that `Policy::refactor_cost == 0` stands for.
+    pub factor_entries: usize,
+    pub factor_flops: f64,
+    pub auto_refactor_cost: usize,
+}
+
+/// The matrix and the method behind a [`LinSolver`].
+enum Engine {
+    Block(BlockChol),
+    Scalar(ScalarChol),
+    Jacobi(BlockJacobi),
 }
 
 pub struct LinSolver {
     n: usize,
-    /// Lower triangle of the system matrix; values are rewritten every solve.
-    mat: SparseColMat<usize, f64>,
-    diag_pos: Vec<u32>,
-    /// Per block, the CSC value slot of each packed lower-triangle entry.
-    block_pos: Vec<[u32; BLOCK_NNZ]>,
-    symbolic: SymbolicCholesky<usize>,
-    l_values: Vec<f64>,
+    engine: Engine,
     has_factor: bool,
     want_factor: bool,
     /// Estimated cost of a factorisation in CG iterations, from the fill.
@@ -121,10 +137,9 @@ pub struct LinSolver {
     /// then probe again; `direct_hold` is the length of the next such run.
     direct_left: usize,
     direct_hold: usize,
-    stack: MemBuffer,
-    /// Set when the block-Jacobi backend is in use; the fields above are
-    /// then idle.
-    jacobi: Option<BlockJacobi>,
+    /// Right-hand side and solution in the block engine's vector layout.
+    bw: Vec<f64>,
+    xw: Vec<f64>,
     r: Vec<f64>,
     z: Vec<f64>,
     p: Vec<f64>,
@@ -137,100 +152,42 @@ impl LinSolver {
     /// beam `i` (translation a, rotation a, translation b, rotation b);
     /// `None` marks a fixed slot.
     pub fn new(n: usize, blocks: &[[Option<usize>; 4]], backend: Backend) -> Option<Self> {
-        let dof = |slots: &[Option<usize>; 4], l: usize| slots[l / 3].map(|d| d + l % 3);
-        let mut trip = Vec::with_capacity(n + blocks.len() * BLOCK_NNZ);
-        for i in 0..n {
-            trip.push(Triplet::new(i, i, 0.0));
-        }
-        for slots in blocks {
-            for r in 0..12 {
-                for c in 0..=r {
-                    if let (Some(gr), Some(gc)) = (dof(slots, r), dof(slots, c)) {
-                        trip.push(Triplet::new(gr.max(gc), gr.min(gc), 0.0));
-                    }
+        let mut stats = Stats::default();
+        let mut auto_refactor_cost = 0;
+        let engine = match backend {
+            Backend::BlockJacobi => Engine::Jacobi(BlockJacobi::new(n, blocks)),
+            Backend::CholeskyScalar => {
+                let s = ScalarChol::new(n, blocks)?;
+                stats.factor_entries = s.l_values.len();
+                stats.factor_flops = s.factor_flops;
+                auto_refactor_cost = s.auto_refactor_cost;
+                Engine::Scalar(s)
+            }
+            Backend::Auto | Backend::Cholesky => {
+                let layout = NodeLayout::new(n, blocks);
+                let chol = BlockChol::new(&layout);
+                let fill = chol.scalar_factor_flops / chol.scalar_solve_flops;
+                if backend == Backend::Auto && fill > JACOBI_FILL_RATIO {
+                    Engine::Jacobi(BlockJacobi::from_layout(layout))
+                } else {
+                    stats.factor_entries = chol.factor_entries();
+                    stats.factor_flops = chol.scalar_factor_flops;
+                    auto_refactor_cost =
+                        chol.factor_cost_in_iterations().clamp(2.0, 40.0).round() as usize;
+                    Engine::Block(chol)
                 }
             }
-        }
-        let mat = SparseColMat::<usize, f64>::try_new_from_triplets(n, n, &trip).ok()?;
-        let sym = mat.symbolic();
-        let (cp, ri) = (sym.col_ptr(), sym.row_idx());
-        let find = |r: usize, c: usize| {
-            (cp[c]
-                + ri[cp[c]..cp[c + 1]]
-                    .binary_search(&r)
-                    .expect("entry in pattern")) as u32
         };
-        let diag_pos = (0..n).map(|i| find(i, i)).collect();
-        let block_pos = blocks
-            .iter()
-            .map(|slots| {
-                let mut pos = [ABSENT; BLOCK_NNZ];
-                for r in 0..12 {
-                    for c in 0..=r {
-                        if let (Some(gr), Some(gc)) = (dof(slots, r), dof(slots, c)) {
-                            pos[tri(r, c)] = find(gr.max(gc), gr.min(gc));
-                        }
-                    }
-                }
-                pos
-            })
-            .collect();
-        let symbolic = factorize_symbolic_cholesky(
-            sym,
-            Side::Lower,
-            SymmetricOrdering::Amd,
-            CholeskySymbolicParams::default(),
-        )
-        .ok()?;
-        let (mut f_factor, mut f_solve) = (0.0f64, 2.0 * mat.compute_nnz() as f64);
-        let mut count = |c: usize| {
-            f_factor += (c * c) as f64;
-            f_solve += 4.0 * c as f64;
+        stats.auto_refactor_cost = auto_refactor_cost;
+        // Length of the vectors CG works on.
+        let (m, mw) = match &engine {
+            Engine::Block(c) => (c.dim(), c.dim()),
+            Engine::Scalar(_) => (n, 0),
+            Engine::Jacobi(_) => (0, 0),
         };
-        match symbolic.raw() {
-            SymbolicCholeskyRaw::Simplicial(s) => {
-                for w in s.col_ptr().windows(2) {
-                    count(w[1] - w[0]);
-                }
-            }
-            SymbolicCholeskyRaw::Supernodal(s) => {
-                for i in 0..s.n_supernodes() {
-                    let width = s.supernode_end()[i] - s.supernode_begin()[i];
-                    let below = s.supernode(i).pattern().len();
-                    for j in 0..width {
-                        count(below + width - j);
-                    }
-                }
-            }
-        }
-        // Measured on frames of 100 to 5,000 members: per flop, a supernodal
-        // factorisation runs about three times faster than the triangular
-        // solves, a simplicial one slightly slower.
-        let speed = match symbolic.raw() {
-            SymbolicCholeskyRaw::Simplicial(_) => 1.2,
-            SymbolicCholeskyRaw::Supernodal(_) => 0.33,
-        };
-        let auto_refactor_cost = (speed * f_factor / f_solve).clamp(2.0, 40.0).round() as usize;
-        let jacobi = match backend {
-            Backend::Auto => f_factor / f_solve > JACOBI_FILL_RATIO,
-            Backend::Cholesky => false,
-            Backend::BlockJacobi => true,
-        };
-        let jacobi = jacobi.then(|| BlockJacobi::new(n, blocks));
-        let par = Par::Seq;
-        let req = StackReq::any_of(&[
-            symbolic.factorize_numeric_llt_scratch::<f64>(par, Default::default()),
-            symbolic.solve_in_place_scratch::<f64>(1, par),
-        ]);
         Some(Self {
             n,
-            l_values: vec![0.0; symbolic.len_val()],
-            stack: MemBuffer::try_new(req).ok()?,
-            jacobi,
-            mat,
-            diag_pos,
-            block_pos,
-            symbolic,
+            engine,
             has_factor: false,
             want_factor: true,
             auto_refactor_cost,
@@ -239,11 +196,13 @@ impl LinSolver {
             wasted_iters: 0,
             direct_left: 0,
             direct_hold: MIN_HOLD,
-            r: vec![0.0; n],
-            z: vec![0.0; n],
-            p: vec![0.0; n],
-            ap: vec![0.0; n],
-            stats: Stats::default(),
+            bw: vec![0.0; mw],
+            xw: vec![0.0; mw],
+            r: vec![0.0; m],
+            z: vec![0.0; m],
+            p: vec![0.0; m],
+            ap: vec![0.0; m],
+            stats,
         })
     }
 
@@ -253,32 +212,39 @@ impl LinSolver {
 
     /// Start a new matrix: everything zero.
     pub fn clear(&mut self) {
-        if let Some(j) = &mut self.jacobi {
-            return j.clear();
+        match &mut self.engine {
+            Engine::Block(c) => c.clear(),
+            Engine::Scalar(s) => s.mat.val_mut().fill(0.0),
+            Engine::Jacobi(j) => j.clear(),
         }
-        self.mat.val_mut().fill(0.0);
     }
 
     #[inline]
     pub fn add_diagonal(&mut self, dof: usize, v: f64) {
-        if let Some(j) = &mut self.jacobi {
-            return j.add_diagonal(dof, v);
+        match &mut self.engine {
+            Engine::Block(c) => c.add_diagonal(dof, v),
+            Engine::Scalar(s) => {
+                let p = s.diag_pos[dof] as usize;
+                s.mat.val_mut()[p] += v;
+            }
+            Engine::Jacobi(j) => j.add_diagonal(dof, v),
         }
-        let p = self.diag_pos[dof] as usize;
-        self.mat.val_mut()[p] += v;
     }
 
     /// Add a beam's block, given as its packed lower triangle (see [`tri`]).
     #[inline]
     pub fn add_block(&mut self, block: usize, lower: &[f64; BLOCK_NNZ]) {
-        if let Some(j) = &mut self.jacobi {
-            return j.add_block(block, lower);
-        }
-        let vals = self.mat.val_mut();
-        for (&p, &v) in self.block_pos[block].iter().zip(lower) {
-            if p != ABSENT {
-                vals[p as usize] += v;
+        match &mut self.engine {
+            Engine::Block(c) => c.add_block(block, lower),
+            Engine::Scalar(s) => {
+                let vals = s.mat.val_mut();
+                for (&p, &v) in s.block_pos[block].iter().zip(lower) {
+                    if p != ABSENT {
+                        vals[p as usize] += v;
+                    }
+                }
             }
+            Engine::Jacobi(j) => j.add_block(block, lower),
         }
     }
 
@@ -293,14 +259,26 @@ impl LinSolver {
     pub fn solve(&mut self, b: &[f64], x: &mut [f64], policy: &Policy) -> bool {
         let t0 = std::time::Instant::now();
         let f0 = self.stats.factor_seconds;
-        let ok = match &mut self.jacobi {
-            Some(j) => {
+        let ok = match &mut self.engine {
+            Engine::Jacobi(j) => {
                 self.stats.solves += 1;
                 let iters = j.solve(b, x, policy.tolerance);
                 self.stats.cg_iterations += iters.unwrap_or(0);
                 iters.is_some()
             }
-            None => self.solve_inner(b, x, policy),
+            Engine::Scalar(_) => self.solve_inner(b, x, policy),
+            Engine::Block(c) => {
+                // CG runs in the block engine's own vector layout.
+                c.finish();
+                let (mut bw, mut xw) = (std::mem::take(&mut self.bw), std::mem::take(&mut self.xw));
+                c.load(b, &mut bw);
+                let ok = self.solve_inner(&bw, &mut xw, policy);
+                if let Engine::Block(c) = &self.engine {
+                    c.store(&xw, x);
+                }
+                (self.bw, self.xw) = (bw, xw);
+                ok
+            }
         };
         self.stats.solve_seconds += t0.elapsed().as_secs_f64() - (self.stats.factor_seconds - f0);
         ok
@@ -385,19 +363,11 @@ impl LinSolver {
     fn factor(&mut self) -> bool {
         self.stats.factorizations += 1;
         let t0 = std::time::Instant::now();
-        let stack = MemStack::new(&mut self.stack);
-        let ok = self
-            .symbolic
-            .factorize_numeric_llt(
-                &mut self.l_values,
-                self.mat.as_ref(),
-                Side::Lower,
-                LltRegularization::default(),
-                Par::Seq,
-                stack,
-                Default::default(),
-            )
-            .is_ok();
+        let ok = match &mut self.engine {
+            Engine::Block(c) => c.factor(),
+            Engine::Scalar(s) => s.factor(),
+            Engine::Jacobi(_) => unreachable!("block Jacobi never factorises"),
+        };
         self.stats.factor_seconds += t0.elapsed().as_secs_f64();
         self.has_factor = ok;
         self.want_factor = !ok;
@@ -407,6 +377,202 @@ impl LinSolver {
 
     /// v <- (L Lᵀ)⁻¹ v with the stored factorisation.
     fn apply_factor(&mut self, v: &mut [f64]) {
+        match &mut self.engine {
+            Engine::Block(c) => c.apply(v),
+            Engine::Scalar(s) => s.apply(v),
+            Engine::Jacobi(_) => unreachable!("block Jacobi never factorises"),
+        }
+    }
+
+    /// y <- A v
+    fn matvec(&self, v: &[f64], y: &mut [f64]) {
+        match &self.engine {
+            Engine::Block(c) => c.matvec(v, y),
+            Engine::Scalar(s) => s.matvec(v, y),
+            Engine::Jacobi(_) => unreachable!("block Jacobi has its own iteration"),
+        }
+    }
+
+    /// Preconditioned CG from x = 0. Returns the iteration count, or None if
+    /// it did not converge within `max_iters`; `self.r` then holds the
+    /// residual of the returned x.
+    fn pcg(&mut self, b: &[f64], x: &mut [f64], tolerance: f64, max_iters: usize) -> Option<usize> {
+        let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f64>();
+        let (mut r, mut z, mut p, mut ap) = (
+            std::mem::take(&mut self.r),
+            std::mem::take(&mut self.z),
+            std::mem::take(&mut self.p),
+            std::mem::take(&mut self.ap),
+        );
+        let m = b.len();
+        x.fill(0.0);
+        r.copy_from_slice(b);
+        let target = dot(b, b) * tolerance * tolerance;
+        let mut result = if target > 0.0 { None } else { Some(0) };
+        let mut rz = 0.0;
+        if result.is_none() {
+            for k in 1..=max_iters {
+                z.copy_from_slice(&r);
+                self.apply_factor(&mut z);
+                let rz_new = dot(&r, &z);
+                if k == 1 {
+                    p.copy_from_slice(&z);
+                } else {
+                    let beta = rz_new / rz;
+                    for i in 0..m {
+                        p[i] = z[i] + beta * p[i];
+                    }
+                }
+                rz = rz_new;
+                self.matvec(&p, &mut ap);
+                let pap = dot(&p, &ap);
+                if pap <= 0.0 || !pap.is_finite() {
+                    break;
+                }
+                let alpha = rz / pap;
+                for i in 0..m {
+                    x[i] += alpha * p[i];
+                    r[i] -= alpha * ap[i];
+                }
+                if dot(&r, &r) <= target {
+                    result = Some(k);
+                    break;
+                }
+            }
+        }
+        (self.r, self.z, self.p, self.ap) = (r, z, p, ap);
+        result
+    }
+}
+
+/// faer's scalar sparse Cholesky on a CSC matrix: the pattern, the ordering
+/// and the symbolic factorisation are built once.
+struct ScalarChol {
+    n: usize,
+    /// Lower triangle of the system matrix; values are rewritten every solve.
+    mat: SparseColMat<usize, f64>,
+    diag_pos: Vec<u32>,
+    /// Per block, the CSC value slot of each packed lower-triangle entry.
+    block_pos: Vec<[u32; BLOCK_NNZ]>,
+    symbolic: SymbolicCholesky<usize>,
+    l_values: Vec<f64>,
+    stack: MemBuffer,
+    /// Sum of squared column counts of the factor.
+    factor_flops: f64,
+    auto_refactor_cost: usize,
+}
+
+impl ScalarChol {
+    fn new(n: usize, blocks: &[[Option<usize>; 4]]) -> Option<Self> {
+        let dof = |slots: &[Option<usize>; 4], l: usize| slots[l / 3].map(|d| d + l % 3);
+        let mut trip = Vec::with_capacity(n + blocks.len() * BLOCK_NNZ);
+        for i in 0..n {
+            trip.push(Triplet::new(i, i, 0.0));
+        }
+        for slots in blocks {
+            for r in 0..12 {
+                for c in 0..=r {
+                    if let (Some(gr), Some(gc)) = (dof(slots, r), dof(slots, c)) {
+                        trip.push(Triplet::new(gr.max(gc), gr.min(gc), 0.0));
+                    }
+                }
+            }
+        }
+        let mat = SparseColMat::<usize, f64>::try_new_from_triplets(n, n, &trip).ok()?;
+        let sym = mat.symbolic();
+        let (cp, ri) = (sym.col_ptr(), sym.row_idx());
+        let find = |r: usize, c: usize| {
+            (cp[c]
+                + ri[cp[c]..cp[c + 1]]
+                    .binary_search(&r)
+                    .expect("entry in pattern")) as u32
+        };
+        let diag_pos = (0..n).map(|i| find(i, i)).collect();
+        let block_pos = blocks
+            .iter()
+            .map(|slots| {
+                let mut pos = [ABSENT; BLOCK_NNZ];
+                for r in 0..12 {
+                    for c in 0..=r {
+                        if let (Some(gr), Some(gc)) = (dof(slots, r), dof(slots, c)) {
+                            pos[tri(r, c)] = find(gr.max(gc), gr.min(gc));
+                        }
+                    }
+                }
+                pos
+            })
+            .collect();
+        let symbolic = factorize_symbolic_cholesky(
+            sym,
+            Side::Lower,
+            SymmetricOrdering::Amd,
+            CholeskySymbolicParams::default(),
+        )
+        .ok()?;
+        let (mut f_factor, mut f_solve) = (0.0f64, 2.0 * mat.compute_nnz() as f64);
+        let mut count = |c: usize| {
+            f_factor += (c * c) as f64;
+            f_solve += 4.0 * c as f64;
+        };
+        match symbolic.raw() {
+            SymbolicCholeskyRaw::Simplicial(s) => {
+                for w in s.col_ptr().windows(2) {
+                    count(w[1] - w[0]);
+                }
+            }
+            SymbolicCholeskyRaw::Supernodal(s) => {
+                for i in 0..s.n_supernodes() {
+                    let width = s.supernode_end()[i] - s.supernode_begin()[i];
+                    let below = s.supernode(i).pattern().len();
+                    for j in 0..width {
+                        count(below + width - j);
+                    }
+                }
+            }
+        }
+        // Measured on frames of 100 to 5,000 members: per flop, a supernodal
+        // factorisation runs about three times faster than the triangular
+        // solves, a simplicial one slightly slower.
+        let speed = match symbolic.raw() {
+            SymbolicCholeskyRaw::Simplicial(_) => 1.2,
+            SymbolicCholeskyRaw::Supernodal(_) => 0.33,
+        };
+        let auto_refactor_cost = (speed * f_factor / f_solve).clamp(2.0, 40.0).round() as usize;
+        let par = Par::Seq;
+        let req = StackReq::any_of(&[
+            symbolic.factorize_numeric_llt_scratch::<f64>(par, Default::default()),
+            symbolic.solve_in_place_scratch::<f64>(1, par),
+        ]);
+        Some(Self {
+            n,
+            l_values: vec![0.0; symbolic.len_val()],
+            stack: MemBuffer::try_new(req).ok()?,
+            mat,
+            diag_pos,
+            block_pos,
+            symbolic,
+            factor_flops: f_factor,
+            auto_refactor_cost,
+        })
+    }
+
+    fn factor(&mut self) -> bool {
+        let stack = MemStack::new(&mut self.stack);
+        self.symbolic
+            .factorize_numeric_llt(
+                &mut self.l_values,
+                self.mat.as_ref(),
+                Side::Lower,
+                LltRegularization::default(),
+                Par::Seq,
+                stack,
+                Default::default(),
+            )
+            .is_ok()
+    }
+
+    /// v <- (L Lᵀ)⁻¹ v with the stored factorisation.
+    fn apply(&mut self, v: &mut [f64]) {
         let stack = MemStack::new(&mut self.stack);
         LltRef::new(&self.symbolic, &self.l_values).solve_in_place_with_conj(
             Conj::No,
@@ -436,86 +602,22 @@ impl LinSolver {
             y[c] += acc;
         }
     }
-
-    /// Preconditioned CG from x = 0. Returns the iteration count, or None if
-    /// it did not converge within `max_iters`; `self.r` then holds the
-    /// residual of the returned x.
-    fn pcg(&mut self, b: &[f64], x: &mut [f64], tolerance: f64, max_iters: usize) -> Option<usize> {
-        let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f64>();
-        let (mut r, mut z, mut p, mut ap) = (
-            std::mem::take(&mut self.r),
-            std::mem::take(&mut self.z),
-            std::mem::take(&mut self.p),
-            std::mem::take(&mut self.ap),
-        );
-        x.fill(0.0);
-        r.copy_from_slice(b);
-        let target = dot(b, b) * tolerance * tolerance;
-        let mut result = if target > 0.0 { None } else { Some(0) };
-        let mut rz = 0.0;
-        if result.is_none() {
-            for k in 1..=max_iters {
-                z.copy_from_slice(&r);
-                self.apply_factor(&mut z);
-                let rz_new = dot(&r, &z);
-                if k == 1 {
-                    p.copy_from_slice(&z);
-                } else {
-                    let beta = rz_new / rz;
-                    for i in 0..self.n {
-                        p[i] = z[i] + beta * p[i];
-                    }
-                }
-                rz = rz_new;
-                self.matvec(&p, &mut ap);
-                let pap = dot(&p, &ap);
-                if pap <= 0.0 || !pap.is_finite() {
-                    break;
-                }
-                let alpha = rz / pap;
-                for i in 0..self.n {
-                    x[i] += alpha * p[i];
-                    r[i] -= alpha * ap[i];
-                }
-                if dot(&r, &r) <= target {
-                    result = Some(k);
-                    break;
-                }
-            }
-        }
-        (self.r, self.z, self.p, self.ap) = (r, z, p, ap);
-        result
-    }
 }
 
-/// Conjugate gradients on node blocks: the matrix is one 6x6 block per node
-/// plus one 6x6 coupling block per beam, preconditioned by the inverse of the
-/// node blocks. Fixed DOFs stay in the numbering with a unit diagonal.
-struct BlockJacobi {
-    /// Node blocks in double precision, as assembled; `diag` is the copy
-    /// the iteration uses.
-    diag64: Vec<Matrix6<f64>>,
+/// The nodes behind a DOF numbering: every pair of slots (translation,
+/// rotation) that a beam end refers to is one node of six components, some
+/// of which may be fixed.
+pub(crate) struct NodeLayout {
     /// Compact DOF -> (node, component).
-    loc: Vec<(u32, u8)>,
-    free: Vec<[bool; 6]>,
-    diag: Vec<Matrix6<S>>,
-    inv: Vec<Matrix6<S>>,
+    pub loc: Vec<(u32, u8)>,
+    /// Per node, which of its six components are unknowns.
+    pub free: Vec<[bool; 6]>,
     /// Per beam: its end nodes (None = fully fixed end).
-    ends: Vec<[Option<u32>; 2]>,
-    /// Per beam: coupling block, rows at end b, columns at end a.
-    off: Vec<Matrix6<S>>,
-    live: Vec<bool>,
-    /// Previous solution, used as the starting guess.
-    x: Vec<Vector6<S>>,
-    b: Vec<Vector6<S>>,
-    r: Vec<Vector6<S>>,
-    z: Vec<Vector6<S>>,
-    p: Vec<Vector6<S>>,
-    ap: Vec<Vector6<S>>,
+    pub ends: Vec<[Option<u32>; 2]>,
 }
 
-impl BlockJacobi {
-    fn new(n: usize, blocks: &[[Option<usize>; 4]]) -> Self {
+impl NodeLayout {
+    pub fn new(n: usize, blocks: &[[Option<usize>; 4]]) -> Self {
         let mut ids: HashMap<(Option<usize>, Option<usize>), u32> = HashMap::new();
         let mut free = Vec::new();
         let mut loc = vec![(0u32, 0u8); n];
@@ -569,6 +671,43 @@ impl BlockJacobi {
             }
             d += 3;
         }
+        Self { loc, free, ends }
+    }
+}
+
+/// Conjugate gradients on node blocks: the matrix is one 6x6 block per node
+/// plus one 6x6 coupling block per beam, preconditioned by the inverse of the
+/// node blocks. Fixed DOFs stay in the numbering with a unit diagonal.
+struct BlockJacobi {
+    /// Node blocks in double precision, as assembled; `diag` is the copy
+    /// the iteration uses.
+    diag64: Vec<Matrix6<f64>>,
+    /// Compact DOF -> (node, component).
+    loc: Vec<(u32, u8)>,
+    free: Vec<[bool; 6]>,
+    diag: Vec<Matrix6<S>>,
+    inv: Vec<Matrix6<S>>,
+    /// Per beam: its end nodes (None = fully fixed end).
+    ends: Vec<[Option<u32>; 2]>,
+    /// Per beam: coupling block, rows at end b, columns at end a.
+    off: Vec<Matrix6<S>>,
+    live: Vec<bool>,
+    /// Previous solution, used as the starting guess.
+    x: Vec<Vector6<S>>,
+    b: Vec<Vector6<S>>,
+    r: Vec<Vector6<S>>,
+    z: Vec<Vector6<S>>,
+    p: Vec<Vector6<S>>,
+    ap: Vec<Vector6<S>>,
+}
+
+impl BlockJacobi {
+    fn new(n: usize, blocks: &[[Option<usize>; 4]]) -> Self {
+        Self::from_layout(NodeLayout::new(n, blocks))
+    }
+
+    fn from_layout(layout: NodeLayout) -> Self {
+        let NodeLayout { loc, free, ends } = layout;
         let nn = free.len();
         let zero = vec![Vector6::zeros(); nn];
         Self {

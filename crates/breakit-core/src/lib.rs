@@ -18,6 +18,7 @@
 //! Units are SI throughout (m, kg, s, N, Pa). The world is Y-up, matching Bevy.
 //! The crate has no game-engine dependency on purpose.
 
+mod blockchol;
 pub mod concrete;
 pub mod damage;
 pub mod dynamics;
