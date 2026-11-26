@@ -7,12 +7,12 @@ How BreakIt computes the sound of members straining, breaking and landing from t
 A sound is a **force** acting on a **body**. The body is a member; its vibration modes follow from its geometry and material. The force is whatever just happened to it: it was hit, or it was carrying load and suddenly is not, or a joint slipped, or a crack jumped. Both halves come from numbers the solver already has, so a long thin steel tie and a short fat concrete column sound different without anyone having tuned either.
 
 ```
-solver                     game (sound.rs)                 breakit-audio
+solver                     listen.rs (StructureListener)   breakit-audio
 member E, G, rho, A, I, L  -> Body ---------------------->  body.rs    modes: frequency, decay, gain
 utilisation, damage        -> Command::Strain ----------->  material.rs  force events
 break cause, position,     -> Command::Break  ----------->     |
   axial force, end moments    (elastic energy, axial share)    v
-debris speed, size         -> Command::Impact ----------->  modal.rs   modes driven by the force -> sound
+debris speed, size (game)  -> Command::Impact ----------->  modal.rs   modes driven by the force -> sound
 ```
 
 ## The body: modes from beam theory (`body.rs`)
@@ -59,6 +59,7 @@ A long member has hundreds of audible modes. Each voice gets a budget (28 per pi
 
 Nobody can listen in the cloud container, so it is checked by measurement:
 
+- End to end (`tests/simulated.rs`): a steel tie pulled apart in the real solver reports a rupture holding the energy σ²/2E · volume, nearly all of it axial, and is heard; a structure at rest under load is silent.
 - Unit tests: free-free bar frequencies against the textbook values (22.4, 61.7, 121 · √(EI/ρA)/2πL²), axial modes at `c/2L`, decay rates, the 1/ω step response, the pitch of a snapped tie at `c/4L` of its pieces, contact times, the Kaiser effect, creak rate against loading rate, strain energy against hand calculation.
 - Spectra against 52 CC0 recordings of wood, metal and rock breaking (the bank an earlier version used, still in git history). This caught two errors of intuition: slender members were first made far too bassy (fixed by the dipole radiation law), and concrete rubble too dull (stones are small and hard: short contacts, bright clicks).
 
@@ -74,7 +75,7 @@ Nobody can listen in the cloud container, so it is checked by measurement:
 
 ## Cost
 
-Modes are two-pole filters stored eight to a lane so the loop vectorises. See `docs/audio.md` for measured cost.
+Modes are two-pole filters stored eight to a lane so the loop vectorises. A busy collapse costs about 1.5% of a core; see `docs/audio.md` for the worst case.
 
 ## Sources
 

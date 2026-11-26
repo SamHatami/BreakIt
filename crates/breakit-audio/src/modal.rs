@@ -227,6 +227,8 @@ pub struct ModalVoice {
     direct_gain: f32,
     leak: f32,
     max_samples: u32,
+    /// Bank level below which the voice is inaudible after its gain.
+    floor: f32,
 }
 
 /// Integrator leak for held steps: forgets a released load in about 13 ms,
@@ -263,6 +265,7 @@ impl ModalVoice {
             direct_gain,
             leak: step_leak(sr),
             max_samples: (10.0 * sr) as u32,
+            floor: 1e-4 / gain.max(1e-3),
         }
     }
 
@@ -309,11 +312,11 @@ impl Voice for ModalVoice {
                 active |= *x != 0.0;
             }
             self.held[i] = held;
-            if !active && bank.level() < 2e-5 {
+            if !active && bank.level() < self.floor {
                 continue;
             }
             bank.process(&self.imp[i], &mut self.direct);
-            ringing |= bank.level() > 2e-5;
+            ringing |= bank.level() > self.floor;
         }
         for (o, &d) in out.iter_mut().zip(&self.direct) {
             *o += d * self.gain;

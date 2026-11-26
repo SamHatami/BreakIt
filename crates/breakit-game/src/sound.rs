@@ -5,11 +5,10 @@
 //! * Build mode: clicks for placing, deleting, selecting, supports, tools,
 //!   found by diffing the design and the build tool each frame, so build
 //!   code needs no sound calls.
-//! * Simulate mode: the members whose load or damage is changing most, with
-//!   their material, section and length (the audio engine computes their
-//!   vibration modes from those); damage onsets; breaks from
-//!   `DynamicSim::break_events` with the elastic energy the member let go
-//!   of; and debris ground hits from the visual debris world.
+//! * Simulate mode: `breakit_audio::StructureListener` follows the solver
+//!   (members whose load or damage is changing, damage onsets, breaks with
+//!   the elastic energy the member let go of), and debris ground hits come
+//!   from the visual debris world.
 //! * Always: the hall ambience at the lab's anchor positions (from
 //!   `breakit_lab::LabAnchors`), and the camera as the listener.
 //! * Test rigs: give a rig entity a [`RigSound`] and a `Transform`.
@@ -21,16 +20,16 @@
 use bevy::app::AppExit;
 use bevy::prelude::*;
 use breakit_audio::{
-    AmbientKind, AudioHandle, AudioOutput, Body, BreakInfo, Command, DamageState, MaterialKind,
-    Place, RigKind, UiSound,
+    AmbientKind, AudioHandle, AudioOutput, Body, Command, MaterialKind, Place, RigKind,
+    StructureListener, UiSound,
 };
-use breakit_core::{Material, MemberDamage, Section};
+use breakit_core::{Material, Section};
 use breakit_lab::{Anchor, LabAnchors, LabSettings};
 use breakit_render::breakit_mesh::debris::DebrisImpact;
 use breakit_render::breakit_mesh::MaterialKind as MeshMaterial;
 use breakit_render::StructureVisual;
 
-use crate::analysis::{BreakitSet, FrameState, Simulation};
+use crate::analysis::{BreakitSet, Simulation};
 use crate::build::BuildTool;
 use crate::camera::OrbitCamera;
 use crate::design::Design;
@@ -343,180 +342,32 @@ fn leave_test(sound: Res<Sound>) {
 // ---------------------------------------------------------------------------
 // Simulate mode
 
-/// Per-run bookkeeping for structure sounds.
+/// Per-run bookkeeping for structure sounds: the structure the run was
+/// built from and the listener that follows its simulation.
 #[derive(Resource, Default)]
 pub struct StructureSound {
-    seen_breaks: usize,
-    states: Vec<DamageState>,
-    members: Vec<MemberSound>,
-    /// Scratch: (activity, member) of the members worth hearing this frame.
-    active: Vec<(f32, usize)>,
-}
-
-/// What the sound remembers about one member between frames.
-#[derive(Clone, Copy, Debug, Default)]
-struct MemberSound {
-    /// Utilisation with the solver's frame-to-frame jitter smoothed out.
-    load: f32,
-    damage: f32,
-    /// How much its load and damage have been changing lately.
-    activity: f32,
-    /// Elastic energy it holds, J, and the axial share of it. Held for a
-    /// few frames so a break still knows what the member was carrying.
-    energy: f32,
-    axial: f32,
-}
-
-/// Members sent to the audio engine per frame; it keeps as many voices.
-const STRAIN_MEMBERS: usize = breakit_audio::mixer::MAX_STRAIN_VOICES;
-
-/// The vibrating body of design member `i`: its material, section and
-/// current length.
-fn member_body(design: &Design, state: &FrameState, i: usize, damage: &MemberDamage) -> Body {
-    let b = &design.beams[i];
-    let length = member_point(state, design, i, 0.0).distance(member_point(state, design, i, 1.0));
-    // A member that has lost stiffness (cracked, yielded) rings duller.
-    Body::member(&b.kind.material(), &b.kind.section(), length.max(0.05) as f64)
-        .with_damage(1.0 - damage.stiffness as f32)
-}
-
-/// Elastic strain energy in a member, J, from its axial force and end
-/// moments (linear between the ends), and the axial share of it.
-fn strain_energy(material: &Material, section: &Section, length: f64, d: &MemberDamage) -> (f32, f32) {
-    let e = material.youngs_modulus;
-    let axial = d.axial * d.axial * length / (2.0 * e * section.area);
-    let mut bending = 0.0;
-    for (axis, inertia) in [(0, section.iy), (1, section.iz)] {
-        // Solver sign convention: uniform bending has opposite end signs.
-        let (a, b) = (d.moment[axis][0], -d.moment[axis][1]);
-        bending += length * (a * a + a * b + b * b) / (6.0 * e * inertia);
-    }
-    let total = axial + bending;
-    if !total.is_finite() || total <= 0.0 {
-        return (0.0, 0.5);
-    }
-    (total as f32, (axial / total) as f32)
-}
-
-fn member_point(state: &FrameState, design: &Design, i: usize, t: f32) -> Vec3 {
-    let b = &design.beams[i];
-    let (a, c) = match (state.positions.get(b.a), state.positions.get(b.b)) {
-        (Some(a), Some(c)) => (*a, *c),
-        _ => (design.nodes[b.a], design.nodes[b.b]),
-    };
-    a.lerp(c, t)
+    structure: Option<breakit_core::Structure>,
+    listener: StructureListener,
 }
 
 fn structure_sounds(
     time: Res<Time>,
     sound: Res<Sound>,
     design: Res<Design>,
-    state: Res<FrameState>,
     sim: Option<Res<Simulation>>,
     mut st: ResMut<StructureSound>,
 ) {
     let Some(sim) = sim else { return };
-    let sim = sim.sim();
-    let n = design.beams.len();
-    let first = st.members.len() != n;
-    if first {
-        st.states = vec![DamageState::Intact; n];
-        st.members = vec![MemberSound::default(); n];
-    }
-    let dt = time.delta_secs().clamp(1e-3, 0.1);
     let st = &mut *st;
-
-    // Follow every member; remember the ones that are changing.
-    st.active.clear();
-    for i in 0..n {
-        if sim.is_broken(i) {
-            continue;
-        }
-        let d = sim.damage(i);
-        let u = sim.utilization(i) as f32;
-        if !u.is_finite() {
-            continue;
-        }
-        let m = &mut st.members[i];
-        let beam = &design.beams[i];
-        let length = design.nodes[beam.a].distance(design.nodes[beam.b]) as f64;
-        let (energy, axial) = strain_energy(&beam.kind.material(), &beam.kind.section(), length, d);
-        if energy >= m.energy {
-            m.energy = energy;
-            m.axial = axial;
-        } else {
-            m.energy += (energy - m.energy) * (dt / 0.1).min(1.0);
-        }
-        let damage = d.damage as f32;
-        if first {
-            m.load = u;
-            m.damage = damage;
-            continue;
-        }
-        let load = m.load + (u - m.load) * (dt / 0.05).min(1.0);
-        let change = (load - m.load).abs() + 10.0 * (damage - m.damage).max(0.0);
-        m.activity += (change / dt - m.activity) * (dt / 0.2).min(1.0);
-        m.load = load;
-        m.damage = damage.max(m.damage);
-        if m.activity > 0.01 {
-            st.active.push((m.activity, i));
-        }
-    }
-    // Strain: the members changing most are heard, each through its own
-    // modes. The audio engine listens to how load and damage move.
-    st.active.sort_by(|a, b| b.0.total_cmp(&a.0));
-    for &(_, i) in st.active.iter().take(STRAIN_MEMBERS) {
-        let m = &st.members[i];
-        sound.send(Command::Strain {
-            id: i as u32,
-            body: member_body(&design, &state, i, sim.damage(i)),
-            utilization: m.load,
-            damage: m.damage,
-            place: Place::at(v(member_point(&state, &design, i, 0.5))),
-        });
-    }
-
-    // Damage onsets (breaks are reported separately below).
-    for i in 0..n {
-        let d = sim.damage(i);
-        if d.state > st.states[i] {
-            st.states[i] = d.state;
-            if d.state != DamageState::Broken {
-                sound.send(Command::Damage {
-                    body: member_body(&design, &state, i, d),
-                    state: d.state,
-                    energy: st.members[i].energy,
-                    place: Place::at(v(member_point(&state, &design, i, 0.5))),
-                });
-            }
-        }
-    }
-
-    // Breaks: what the member was, where it failed, and the elastic energy
-    // it was holding when it let go.
-    let events = sim.break_events();
-    for e in events.iter().skip(st.seen_breaks) {
-        if e.member >= n {
-            continue;
-        }
-        let m = &st.members[e.member];
-        sound.send(Command::Break {
-            info: BreakInfo {
-                body: member_body(&design, &state, e.member, sim.damage(e.member)),
-                cause: e.cause,
-                at: e.position as f32,
-                energy: m.energy,
-                axial: m.axial,
-            },
-            place: Place::at(v(member_point(
-                &state,
-                &design,
-                e.member,
-                e.position as f32,
-            ))),
-        });
-    }
-    st.seen_breaks = events.len();
+    // The design cannot change during a run.
+    let structure = st.structure.get_or_insert_with(|| design.to_structure());
+    st.listener.update(
+        sim.sim(),
+        structure,
+        time.delta_secs(),
+        [0.0; 3],
+        |command| sound.send(command),
+    );
 }
 
 fn core_material(k: MeshMaterial) -> MaterialKind {
@@ -625,25 +476,6 @@ mod tests {
         let mut h = snap(3, 2, 2);
         h.hovered = Some(1);
         assert_eq!(classify(&b, &h), Some(UiSound::Hover));
-    }
-
-    #[test]
-    fn strain_energy_matches_hand_calculation() {
-        // A 2 m steel tube under 100 kN tension: N²L / 2EA.
-        let (material, section) = (Material::steel(), Section::tube(0.05, 0.005));
-        let mut d = MemberDamage::new(MaterialKind::Steel);
-        d.axial = 100e3;
-        let (u, share) = strain_energy(&material, &section, 2.0, &d);
-        let exact = 100e3f64.powi(2) * 2.0 / (2.0 * 210e9 * section.area);
-        assert!((u as f64 / exact - 1.0).abs() < 1e-3, "{u} vs {exact}");
-        assert!((share - 1.0).abs() < 1e-6);
-        // Uniform bending M (end moments M and -M): M²L / 2EI.
-        d.axial = 0.0;
-        d.moment[1] = [5e3, -5e3];
-        let (u, share) = strain_energy(&material, &section, 2.0, &d);
-        let exact = 5e3f64.powi(2) * 2.0 / (2.0 * 210e9 * section.iz);
-        assert!((u as f64 / exact - 1.0).abs() < 1e-3, "{u} vs {exact}");
-        assert!(share < 1e-6);
     }
 
     #[test]

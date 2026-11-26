@@ -4,14 +4,14 @@ All sound in BreakIt is synthesised while the game runs, with no sample files.
 
 The structure's sounds (members straining, damage, breaks, debris) are physically based: the game hands the audio engine what the solver knows about a member, and the sound is computed from that. The model, its sources and its limits are in `docs/sound-physics.md`. Ambience, rigs and UI are ordinary synthesis patches.
 
-- `crates/breakit-audio` (no engine): member vibration modes (`body.rs`), the modal engine (`modal.rs`), the force events (`material.rs`), the ambience, rig and UI patches, the mixer, the hall reverb, device output (cpal) and a WAV recorder.
-- `crates/breakit-game/src/sound.rs` (Bevy): turns game and solver state into audio commands. It never touches samples.
+- `crates/breakit-audio` (no engine): member vibration modes (`body.rs`), the modal engine (`modal.rs`), the force events (`material.rs`), the listener that turns a `DynamicSim` into commands (`listen.rs`), the ambience, rig and UI patches, the mixer, the hall reverb, device output (cpal) and a WAV recorder.
+- `crates/breakit-game/src/sound.rs` (Bevy): runs the listener on the game's simulation and turns the rest of the game state (debris, rigs, lab anchors, build edits, camera) into audio commands. It never touches samples.
 
 ## How it fits together
 
 The game sends `breakit_audio::Command`s through an `AudioHandle` (the `Sound` resource in the game). They are cheap messages on a channel; the `Mixer` applies them between blocks on the audio thread.
 
-| Command | Sent by `sound.rs` when | Sounds like |
+| Command | Sent when | Sounds like |
 |---|---|---|
 | `Strain` | every frame in simulate mode, for the 8 members whose load or damage is changing most: the member's `Body` (material, section, length), utilisation and damage | joints sticking and slipping as the load moves (steel: a bolt bangs into bearing; timber: creaks whose pitch rises with loading rate), micro-cracks as damage grows (sparse ticks early, dense crackle with rare loud cracks near failure). A steady load is silent |
 | `Damage` | a member's `DamageState` gets worse (yielded, cracked, crushed, delaminated), with the elastic energy it holds | a small release in that member: a crack and its aftershocks, a joint slip at first yield, grinding, plies peeling |
@@ -32,7 +32,7 @@ Patches are modal synthesis with stochastic excitation: an exciter (click, noise
 - At most 48 one-shots; the quietest is stolen. At most 6 impacts per 50 ms, so a collapse is not a wall of identical knocks. At most 8 straining members; one not updated for 1.5 s is dropped. Rigs not updated for 0.5 s fade out.
 - A peak limiter with a soft knee: the output never exceeds 1.
 
-Cost: the full mix (beds, reverb and a busy collapse) renders 100 to 180 times faster than real time on one core of the cloud container, so under 1% of a core in the game.
+Cost: a busy collapse with ambience and reverb renders about 70 times faster than real time on one core of the cloud container (1.5% of a core). The worst case the mixer allows, 48 one-shots all ringing long steel breaks plus 8 straining members, measured about 10% of a core (`cargo test --release -p breakit-audio -- --ignored --nocapture cost`). New voices get fewer modes when 12 or more one-shots already sound.
 
 ## Listening and checking
 
@@ -40,7 +40,13 @@ Cost: the full mix (beds, reverb and a busy collapse) renders 100 to 180 times f
 cargo run --release -p breakit-audio --example render_demo -- <dir> [stress breaks impacts geometry ambience rigs ui collapse]
 ```
 
-writes one WAV per scene (add `steel timber concrete composite` for one failure story per material; `geometry` plays the same events on members of different size), each a scripted sequence of the same commands the game sends. `BREAKIT_AUDIO_WAV=<file>` makes the game record to a WAV instead of the sound card, and `BREAKIT_CAPTURE=<dir>` records `<dir>/audio.wav` alongside the screenshots. `BREAKIT_MUTE=1` starts muted. Without a sound device (the cloud container) the game runs silent.
+writes one WAV per scene (add `steel timber concrete composite` for one failure story per material; `geometry` plays the same events on members of different size), each a scripted sequence of the same commands the game sends. ```text
+cargo run --release -p breakit-audio --example render_sim -- <dir>
+```
+
+runs the real solver on a steel and a timber truss loaded to failure and renders what the listener makes of it: nothing is scripted but the load. `tests/simulated.rs` checks the same path end to end (a steel tie pulled apart reports a rupture with the energy σ²/2E · volume and is heard; a structure at rest is silent).
+
+`BREAKIT_AUDIO_WAV=<file>` makes the game record to a WAV instead of the sound card, and `BREAKIT_CAPTURE=<dir>` records `<dir>/audio.wav` alongside the screenshots. `BREAKIT_MUTE=1` starts muted. Without a sound device (the cloud container) the game runs silent.
 
 On Linux, building needs the ALSA headers (`libasound2-dev`).
 

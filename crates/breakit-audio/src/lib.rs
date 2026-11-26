@@ -27,6 +27,7 @@
 pub mod ambience;
 pub mod body;
 pub mod dsp;
+pub mod listen;
 pub mod material;
 pub mod mixer;
 pub mod modal;
@@ -38,6 +39,7 @@ pub mod wav;
 
 pub use body::{Body, Ends};
 pub use breakit_core::{BreakCause, DamageState, MaterialKind};
+pub use listen::StructureListener;
 pub use material::BreakInfo;
 pub use mixer::Mixer;
 pub use output::{AudioHandle, AudioOutput};

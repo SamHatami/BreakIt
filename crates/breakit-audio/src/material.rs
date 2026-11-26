@@ -36,10 +36,18 @@ use crate::dsp::{OnePole, Rng};
 use crate::modal::{step_leak, Bank, Hit, ModalVoice, Pulses};
 use crate::{BoxVoice, BreakCause, DamageState, MaterialKind, Voice};
 
-/// Modes per body in a break, an impact and a straining member.
+/// Modes per body in a break, an impact and a straining member, at full
+/// detail.
 const BREAK_MODES: usize = 28;
 const IMPACT_MODES: usize = 22;
 const STRAIN_MODES: usize = 18;
+
+/// A mode budget scaled by `detail` (0..1). The mixer lowers detail when
+/// many voices already sound: in a collapse nobody can tell 28 modes from
+/// 12, and the cost is all in the modes.
+fn budget(modes: usize, detail: f32) -> usize {
+    ((modes as f32 * detail.clamp(0.3, 1.0)) as usize).max(6)
+}
 
 /// Overall scale from unit-energy bank output to full scale.
 const OUTPUT: f32 = 0.8;
@@ -254,7 +262,7 @@ const FLOOR: u8 = 2;
 const EXTRA: u8 = 3;
 
 /// A member breaks.
-pub fn break_voice(info: &BreakInfo, sr: f32, seed: u32) -> Option<BoxVoice> {
+pub fn break_voice(info: &BreakInfo, detail: f32, sr: f32, seed: u32) -> Option<BoxVoice> {
     let body = sanitize(&info.body)?;
     let energy = finite(info.energy, 0.0).max(0.02 * capacity_energy(&body));
     let gain = level(energy) * OUTPUT;
@@ -290,17 +298,17 @@ pub fn break_voice(info: &BreakInfo, sr: f32, seed: u32) -> Option<BoxVoice> {
         transverse: (1.0 - axial).sqrt().max(0.25),
         axial: axial.sqrt().max(0.15),
     };
-    let broken = |b: Body| b.with_damage(b.damage.max(0.25));
+    let modes = budget(BREAK_MODES, detail);
     let mut banks = vec![
-        Bank::new(&broken(pa).modes(drive, BREAK_MODES, seed), sr),
+        Bank::new(&pa.modes(drive, modes, seed), sr),
         Bank::new(
-            &broken(pb).modes(
+            &pb.modes(
                 if connection {
                     Drive { at: 0.04, ..drive }
                 } else {
                     drive
                 },
-                BREAK_MODES,
+                modes,
                 seed ^ 0xB,
             ),
             sr,
@@ -560,7 +568,14 @@ pub fn contact_time(m: f32, v: f32, r: f32, e: f32) -> f32 {
 }
 
 /// A loose piece lands. `speed` m/s into the floor, `mass` kg.
-pub fn impact_voice(body: &Body, speed: f32, mass: f32, sr: f32, seed: u32) -> Option<BoxVoice> {
+pub fn impact_voice(
+    body: &Body,
+    speed: f32,
+    mass: f32,
+    detail: f32,
+    sr: f32,
+    seed: u32,
+) -> Option<BoxVoice> {
     let body = sanitize(body)?;
     let speed = finite(speed, 0.0).clamp(0.0, 60.0);
     let mass = finite(mass, 0.0).clamp(0.0, 20_000.0);
@@ -602,13 +617,18 @@ pub fn impact_voice(body: &Body, speed: f32, mass: f32, sr: f32, seed: u32) -> O
         transverse: 1.0,
         axial: if slender > 3.0 { 0.25 } else { 0.5 },
     };
+    // Lying on the floor damps it a little more than hanging free.
+    let resting = piece.with_damage(piece.damage.max(0.15));
     // Quiet pieces get fewer modes: nobody hears the difference.
-    let budget = if gain > 0.05 {
-        IMPACT_MODES
-    } else {
-        IMPACT_MODES / 2
-    };
-    let modes = piece.with_damage(0.3).modes(drive, budget, seed);
+    let budget = budget(
+        if gain > 0.05 {
+            IMPACT_MODES
+        } else {
+            IMPACT_MODES / 2
+        },
+        detail,
+    );
+    let modes = resting.modes(drive, budget, seed);
     // The mode gains assume an ideal impulse. A real contact lasts `tau`
     // and leaves the modes above about 1/tau alone, so a soft landing rings
     // less of the piece. Most of that loss is real (a soft landing *is*
@@ -633,7 +653,7 @@ pub fn impact_voice(body: &Body, speed: f32, mass: f32, sr: f32, seed: u32) -> O
         Bank::new(&modes, sr),
         // The same bar, driven at the far end, for when it slaps down.
         Bank::new(
-            &piece.with_damage(0.3).modes(
+            &resting.modes(
                 Drive {
                     at: 1.0 - at,
                     ..drive
@@ -1092,7 +1112,7 @@ mod tests {
     #[test]
     fn every_break_sounds_ends_and_stays_finite() {
         for (m, cause) in CAUSES {
-            let v = break_voice(&info(m, cause), SR, 3).unwrap();
+            let v = break_voice(&info(m, cause), 1.0, SR, 3).unwrap();
             let (x, alive) = render(v, 10.5);
             assert!(!alive, "{m:?} {cause:?} never ended");
             assert!(x.iter().all(|v| v.is_finite()), "{m:?} {cause:?}");
@@ -1104,7 +1124,7 @@ mod tests {
     #[test]
     fn steel_rings_on_and_concrete_does_not() {
         let tail = |m, cause| {
-            let (x, _) = render(break_voice(&info(m, cause), SR, 5).unwrap(), 2.0);
+            let (x, _) = render(break_voice(&info(m, cause), 1.0, SR, 5).unwrap(), 2.0);
             let n = x.len();
             let at = (1.2 * SR) as usize;
             if n <= at {
@@ -1125,7 +1145,7 @@ mod tests {
         let loud = |e: f32| {
             let mut i = info(MaterialKind::Steel, BreakCause::Rupture);
             i.energy = e;
-            rms(&render(break_voice(&i, SR, 9).unwrap(), 0.3).0)
+            rms(&render(break_voice(&i, 1.0, SR, 9).unwrap(), 0.3).0)
         };
         let ratio = loud(4000.0) / loud(250.0);
         // 16x the energy: 4x by physics, 2.3x after compression.
@@ -1139,7 +1159,7 @@ mod tests {
         let mut i = info(MaterialKind::Steel, BreakCause::Rupture);
         i.axial = 1.0;
         i.at = 0.5;
-        let (x, _) = render(break_voice(&i, SR, 2).unwrap(), 0.5);
+        let (x, _) = render(break_voice(&i, 1.0, SR, 2).unwrap(), 0.5);
         let x = &x[(0.05 * SR) as usize..];
         let power = |f: f32| {
             let (mut s, mut c) = (0.0f32, 0.0f32);
@@ -1171,7 +1191,7 @@ mod tests {
 
         let hit = |m, speed: f32, mass: f32| {
             let body = Body::fragment(m, 0.4);
-            render(impact_voice(&body, speed, mass, SR, 4).unwrap(), 3.0).0
+            render(impact_voice(&body, speed, mass, 1.0, SR, 4).unwrap(), 3.0).0
         };
         let s = hit(MaterialKind::Steel, 4.0, 6.0);
         let t = hit(MaterialKind::Timber, 4.0, 6.0);
@@ -1198,6 +1218,7 @@ mod tests {
             &Body::fragment(MaterialKind::Timber, 0.02),
             0.6,
             0.002,
+            1.0,
             SR,
             1
         )
@@ -1311,7 +1332,7 @@ mod tests {
     fn bad_numbers_make_no_voice() {
         let mut body = Body::typical(MaterialKind::Steel, 3.0);
         body.area = f32::NAN;
-        assert!(impact_voice(&body, 3.0, 5.0, SR, 1).is_none());
+        assert!(impact_voice(&body, 3.0, 5.0, 1.0, SR, 1).is_none());
         assert!(StrainVoice::new(&body, SR, 1).is_none());
         body.area = 0.0;
         assert!(damage_voice(&body, DamageState::Cracked, 10.0, SR, 1).is_none());
@@ -1324,6 +1345,7 @@ mod tests {
                 energy: f32::INFINITY,
                 axial: f32::NAN,
             },
+            1.0,
             SR,
             1,
         );

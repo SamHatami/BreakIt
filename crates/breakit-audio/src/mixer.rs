@@ -236,6 +236,16 @@ impl Mixer {
         self.shots.len()
     }
 
+    /// How much detail a new voice gets: fewer modes when many voices
+    /// already sound.
+    fn detail(&self) -> f32 {
+        match self.shots.len() {
+            0..=11 => 1.0,
+            12..=27 => 0.6,
+            _ => 0.4,
+        }
+    }
+
     fn next_seed(&mut self) -> u32 {
         self.seed = self.seed.wrapping_add(0x9E37_79B9);
         self.seed
@@ -307,7 +317,7 @@ impl Mixer {
             }
             Command::Break { info, place } => {
                 let seed = self.next_seed();
-                if let Some(v) = material::break_voice(&info, sr, seed) {
+                if let Some(v) = material::break_voice(&info, self.detail(), sr, seed) {
                     self.play(v, Bus::Structure, Some(place), 1.0, 4.0);
                 }
             }
@@ -325,7 +335,8 @@ impl Mixer {
                     return;
                 }
                 let seed = self.next_seed();
-                if let Some(v) = material::impact_voice(&body, speed, mass, sr, seed) {
+                if let Some(v) = material::impact_voice(&body, speed, mass, self.detail(), sr, seed)
+                {
                     self.impact_window.1 += 1;
                     self.play(v, Bus::Structure, Some(place), 1.0, 3.0);
                 }
