@@ -43,7 +43,7 @@ pub use damage::{DamageState, MemberDamage};
 pub use dynamics::{BreakCause, BreakEvent, DynamicSim, SimConfig, Solver, SolverStats};
 pub use joint::{Joint, JointKind};
 pub use loads::{LoadCase, LoadKind, LoadSet, RigState, Window};
-pub use material::{Material, MaterialKind};
+pub use material::{ConcreteClass, Material, MaterialKind, SteelGrade, TimberClass};
 pub use model::{Member, NodeLoad, Structure, Support};
 pub use section::{Section, Shape};
 pub use statics::{solve_static, MemberForces, StaticResult};
