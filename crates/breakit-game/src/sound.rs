@@ -8,8 +8,8 @@
 //! * Simulate mode: one stress bed per material from member utilisation,
 //!   damage onsets, breaks from `DynamicSim::break_events`, and debris ground
 //!   hits from the visual debris world.
-//! * Always: the hall ambience at the lab's anchor positions, and the camera
-//!   as the listener.
+//! * Always: the hall ambience at the lab's anchor positions (from
+//!   `breakit_lab::LabAnchors`), and the camera as the listener.
 //! * Test rigs: give a rig entity a [`RigSound`] and a `Transform`.
 //!
 //! `BREAKIT_AUDIO_WAV=<file>` records everything to a WAV instead of the
@@ -22,6 +22,7 @@ use breakit_audio::{
     AmbientKind, AudioHandle, AudioOutput, Command, DamageState, MaterialKind, Place, RigKind,
     UiSound,
 };
+use breakit_lab::{Anchor, LabAnchors, LabSettings};
 use breakit_render::breakit_mesh::debris::DebrisImpact;
 use breakit_render::breakit_mesh::MaterialKind as MeshMaterial;
 use breakit_render::StructureVisual;
@@ -45,7 +46,6 @@ impl Plugin for SoundPlugin {
             .insert_resource(Sound(handle))
             .init_resource::<SoundAnchors>()
             .init_resource::<StructureSound>()
-            .add_systems(Startup, start_ambience)
             .add_systems(
                 Update,
                 (
@@ -56,6 +56,7 @@ impl Plugin for SoundPlugin {
                         .after(BreakitSet::Physics),
                     debris_sounds,
                     rig_sounds,
+                    anchors_from_lab.run_if(resource_exists_and_changed::<LabAnchors>),
                     update_ambience,
                 ),
             )
@@ -125,83 +126,127 @@ fn update_listener(sound: Res<Sound>, camera: Option<Single<&GlobalTransform, Wi
 // ---------------------------------------------------------------------------
 // Ambience
 
-/// Fixed hall sound sources in world units, with how many metres of sound
-/// travel one world unit is. The hall is drawn 20x larger than the play
-/// table, so its anchors use 1/20. The lab scene can overwrite this from its
-/// own anchors; the defaults follow its layout (60 x 30 m hall centred on
-/// lab (0, 0), table at lab (4, 5), table top 0.86 m above the floor).
-#[derive(Resource, Clone, Debug)]
-pub struct SoundAnchors {
-    pub sources: Vec<(AmbientKind, Option<Vec3>, f32, f32)>,
+/// One fixed hall sound source.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AmbientSource {
+    pub kind: AmbientKind,
+    /// World position, or `None` for a wide, non-positional bed.
+    pub position: Option<Vec3>,
+    /// Metres of sound travel per world unit: 1 / `model_scale` for the
+    /// hall, which is drawn larger than the play table.
+    pub metres_per_unit: f32,
+    pub level: f32,
 }
 
-/// Lab metres to world units around the play table.
-pub fn lab_to_world(x: f32, y: f32, z: f32) -> Vec3 {
-    const SCALE: f32 = 20.0;
-    Vec3::new((x - 4.0) * SCALE, (y - 0.86) * SCALE, (z - 5.0) * SCALE)
+/// The hall's sound sources. Built from the lab's [`LabAnchors`] once the
+/// lab exists; until then a room-tone bed plays on its own.
+#[derive(Resource, Clone, Debug)]
+pub struct SoundAnchors {
+    pub sources: Vec<AmbientSource>,
 }
 
 impl Default for SoundAnchors {
     fn default() -> Self {
-        let lab = 1.0 / 20.0;
         Self {
-            sources: vec![
-                // (kind, world position or None for a wide bed, metres per unit, level)
-                (AmbientKind::Room, None, 1.0, 1.0),
-                (
-                    AmbientKind::Hvac,
-                    Some(lab_to_world(-18.0, 10.0, -12.0)),
-                    lab,
-                    0.9,
-                ),
-                (
-                    AmbientKind::Hvac,
-                    Some(lab_to_world(20.0, 10.0, 12.0)),
-                    lab,
-                    0.7,
-                ),
-                (
-                    AmbientKind::ElectricalHum,
-                    Some(lab_to_world(6.0, 10.5, 3.0)),
-                    lab,
-                    0.5,
-                ),
-                (
-                    AmbientKind::ElectricalHum,
-                    Some(lab_to_world(28.0, 1.5, -13.0)),
-                    lab,
-                    0.6,
-                ),
-                (
-                    AmbientKind::Machinery,
-                    Some(lab_to_world(-26.0, 1.0, -10.0)),
-                    lab,
-                    0.8,
-                ),
-            ],
+            sources: vec![AmbientSource {
+                kind: AmbientKind::Room,
+                position: None,
+                metres_per_unit: 1.0,
+                level: 1.0,
+            }],
         }
     }
 }
 
-fn start_ambience(sound: Res<Sound>, anchors: Res<SoundAnchors>) {
-    send_ambience(&sound, &anchors);
-}
-
-fn update_ambience(sound: Res<Sound>, anchors: Res<SoundAnchors>) {
-    if anchors.is_changed() && !anchors.is_added() {
-        send_ambience(&sound, &anchors);
+impl SoundAnchors {
+    /// Room tone everywhere, air handling high in the roof, mains hum at the
+    /// electrical cabinets and the lamps nearest the table, and machinery
+    /// (motors and pumps idling) at the power units and pumps.
+    pub fn from_lab(settings: &LabSettings, anchors: &LabAnchors) -> Self {
+        let mpu = 1.0 / settings.model_scale.max(1e-3);
+        let mut sources = SoundAnchors::default().sources;
+        let mut add = |kind, position, level| {
+            sources.push(AmbientSource {
+                kind,
+                position: Some(position),
+                metres_per_unit: mpu,
+                level,
+            });
+        };
+        // Air handling units on the roof: the lab has no anchor for them, so
+        // place two along the ridge, plus one at the control room's AC.
+        let ridge = settings.hall.ridge;
+        add(
+            AmbientKind::Hvac,
+            settings.lab_to_world(Vec3::new(-15.0, ridge - 1.5, 0.0)),
+            0.9,
+        );
+        add(
+            AmbientKind::Hvac,
+            settings.lab_to_world(Vec3::new(15.0, ridge - 1.5, 0.0)),
+            0.7,
+        );
+        for p in anchors.of(Anchor::ControlRoom) {
+            add(AmbientKind::Hvac, p, 0.4);
+        }
+        for p in anchors.of(Anchor::ElectricalCabinets) {
+            add(AmbientKind::ElectricalHum, p, 0.6);
+        }
+        let mut lamps: Vec<Vec3> = anchors.of(Anchor::HighBayLamp).collect();
+        lamps.sort_by(|a, b| a.length_squared().total_cmp(&b.length_squared()));
+        for p in lamps.into_iter().take(3) {
+            add(AmbientKind::ElectricalHum, p, 0.25);
+        }
+        for p in anchors
+            .of(Anchor::PowerUnit)
+            .chain(anchors.of(Anchor::Pump))
+        {
+            add(AmbientKind::Machinery, p, 0.45);
+        }
+        Self { sources }
     }
 }
 
-fn send_ambience(sound: &Sound, anchors: &SoundAnchors) {
-    for (i, &(kind, pos, scale, level)) in anchors.sources.iter().enumerate() {
+fn anchors_from_lab(
+    settings: Res<LabSettings>,
+    lab: Res<LabAnchors>,
+    mut anchors: ResMut<SoundAnchors>,
+) {
+    if lab.0.is_empty() {
+        return;
+    }
+    *anchors = SoundAnchors::from_lab(&settings, &lab);
+}
+
+fn update_ambience(sound: Res<Sound>, anchors: Res<SoundAnchors>, mut sent: Local<usize>) {
+    if !anchors.is_changed() {
+        return;
+    }
+    for (i, a) in anchors.sources.iter().enumerate() {
         sound.send(Command::Ambient {
             id: i as u32,
-            kind,
-            level,
-            place: pos.map(|p| Place::scaled(v(p), scale)),
+            kind: a.kind,
+            level: a.level,
+            place: a.position.map(|p| Place::scaled(v(p), a.metres_per_unit)),
         });
     }
+    // Silence sources a previous list had and this one does not.
+    for i in anchors.sources.len()..*sent {
+        for kind in [
+            AmbientKind::Room,
+            AmbientKind::Hvac,
+            AmbientKind::ElectricalHum,
+            AmbientKind::Machinery,
+        ] {
+            sound.send(Command::Ambient {
+                id: i as u32,
+                kind,
+                level: 0.0,
+                place: None,
+            });
+        }
+    }
+    *sent = anchors.sources.len();
 }
 
 // ---------------------------------------------------------------------------
@@ -540,8 +585,26 @@ mod tests {
     }
 
     #[test]
-    fn lab_anchor_conversion_puts_the_table_at_the_origin() {
-        assert!(lab_to_world(4.0, 0.86, 5.0).length() < 1e-5);
-        assert!((lab_to_world(4.0, 0.0, 5.0).y + 17.2).abs() < 1e-4);
+    fn lab_anchors_become_scaled_sources() {
+        let settings = LabSettings::default();
+        let lab = LabAnchors(vec![
+            (Anchor::ElectricalCabinets, Vec3::new(500.0, -15.0, 100.0)),
+            (Anchor::PowerUnit, Vec3::new(-300.0, -15.0, 40.0)),
+            (Anchor::HighBayLamp, Vec3::new(0.0, 200.0, 0.0)),
+        ]);
+        let a = SoundAnchors::from_lab(&settings, &lab);
+        assert_eq!(a.sources[0].kind, AmbientKind::Room);
+        assert!(a.sources.iter().any(|s| s.kind == AmbientKind::Machinery));
+        assert!(a
+            .sources
+            .iter()
+            .filter(|s| s.position.is_some())
+            .all(|s| (s.metres_per_unit - 0.05).abs() < 1e-6));
+        // Roof units are above the table.
+        assert!(a
+            .sources
+            .iter()
+            .filter(|s| s.kind == AmbientKind::Hvac)
+            .all(|s| s.position.unwrap().y > 100.0));
     }
 }

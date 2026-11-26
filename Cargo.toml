@@ -4,6 +4,7 @@ members = [
     "crates/breakit-audio",
     "crates/breakit-core",
     "crates/breakit-game",
+    "crates/breakit-lab",
     "crates/breakit-mesh",
     "crates/breakit-render",
 ]

@@ -1,5 +1,6 @@
 //! Draws the scene around the members: nodes as spheres, supports and loads
-//! as gizmos, ground and light. The beams themselves are drawn by
+//! as gizmos. The hall, the play table and the lights come from
+//! `breakit-lab`. The beams themselves are drawn by
 //! `breakit-render` (see `visuals.rs`). Reads only [`Design`] (topology) and
 //! [`FrameState`] (positions).
 
@@ -12,13 +13,12 @@ pub struct FrameRenderPlugin;
 
 impl Plugin for FrameRenderPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (setup_scene, setup_assets))
-            .add_systems(
-                PostUpdate,
-                (rebuild_visuals, update_visuals, draw_supports_and_loads)
-                    .chain()
-                    .before(TransformSystems::Propagate),
-            );
+        app.add_systems(Startup, setup_assets).add_systems(
+            PostUpdate,
+            (rebuild_visuals, update_visuals, draw_supports_and_loads)
+                .chain()
+                .before(TransformSystems::Propagate),
+        );
     }
 }
 
@@ -34,31 +34,6 @@ struct NodeVisual(usize);
 /// Revision the spawned visuals were built for.
 #[derive(Default)]
 struct BuiltFor(Option<(u64, usize, usize)>);
-
-fn setup_scene(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    commands.spawn((
-        DirectionalLight {
-            shadow_maps_enabled: true,
-            illuminance: 8_000.0,
-            ..default()
-        },
-        Transform::from_xyz(4.0, 10.0, 6.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
-    commands.spawn((
-        Mesh3d(meshes.add(Plane3d::new(Vec3::Y, Vec2::splat(30.0)))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.22, 0.24, 0.22),
-            perceptual_roughness: 1.0,
-            ..default()
-        })),
-        // Slightly below y = 0 so ground-level beams don't z-fight.
-        Transform::from_xyz(0.0, -0.08, 0.0),
-    ));
-}
 
 fn setup_assets(
     mut commands: Commands,

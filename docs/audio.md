@@ -45,7 +45,7 @@ On Linux, building needs the ALSA headers (`libasound2-dev`).
 ## Hooks for other systems
 
 - Test rigs: add `RigSound { kind, drive, speed }` next to a `Transform`. `drive` is 0..1, `speed` the physical rate (wind m/s, actuator, paddle or cart velocity m/s, rope speed). `breakit_core::RigState` from the loads work maps onto it directly.
-- Lab scene: overwrite the `SoundAnchors` resource with the lab's anchor positions (HVAC vents, lamp and cabinet hum, machinery). The defaults follow the lab layout.
+- Lab scene: `SoundAnchors` is rebuilt from `breakit_lab::LabAnchors` and `LabSettings::model_scale` whenever the anchors change (HVAC in the roof and at the control room, hum at the cabinets and nearest lamps, machinery at the power units and pumps).
 - Anything else: `Res<Sound>` and `sound.send(Command::Ui(UiSound::Pass))`.
 
 ## Open points
