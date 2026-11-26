@@ -8,5 +8,6 @@
 - Pin the Bevy version when the game crate is added; check that release's migration guide and examples before writing Bevy code.
 - Current status and open problems: `docs/solver-spike.md`.
 - Material and damage models: `docs/materials.md`.
+- Member end joints (pinned, bolted, welded...) and connection failure: `docs/joints.md`.
 - Member visuals (GPU deformation, damage looks, breaking): `docs/visuals.md`. `GpuMember` in `breakit-mesh` and `Member` in `breakit-render/src/member.wesl` must stay field-for-field identical.
 - The hall and play table: `docs/lab.md`. The structure is full size; the hall is drawn `model_scale` (20) times larger so the table reads as a 1:20 model.

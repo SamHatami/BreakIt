@@ -6,6 +6,7 @@
 use nalgebra::{SMatrix, SVector};
 
 use crate::frame::member_axes;
+use crate::joint::bending_stiffness;
 use crate::{NodeLoad, Structure, Vec3};
 
 type Mat12 = SMatrix<f64, 12, 12>;
@@ -29,6 +30,9 @@ pub struct MemberForces {
     /// material rules as the dynamic solver (for steel
     /// (N/Ny)² + |My|/Mpy + |Mz|/Mpz).
     pub utilization: f64,
+    /// Utilisation of the connections at ends a and b (force and moment
+    /// against [`crate::Joint`] capacities); 0 for rigid joints.
+    pub joint_utilization: [f64; 2],
 }
 
 #[derive(Clone, Debug)]
@@ -70,28 +74,31 @@ pub fn local_stiffness(s: &Structure, m: usize) -> Mat12 {
     k[(9, 9)] = gj;
     k[(3, 9)] = -gj;
     k[(9, 3)] = -gj;
-    // Bending about z: uy (1,7) and rz (5,11).
-    let c = e * sec.iz / l.powi(3);
-    let bz = [
-        [12.0, 6.0 * l, -12.0, 6.0 * l],
-        [6.0 * l, 4.0 * l * l, -6.0 * l, 2.0 * l * l],
-        [-12.0, -6.0 * l, 12.0, -6.0 * l],
-        [6.0 * l, 2.0 * l * l, -6.0 * l, 4.0 * l * l],
-    ];
-    let iz = [1, 5, 7, 11];
-    // Bending about y: uz (2,8) and ry (4,10); coupling signs flip.
-    let cy = e * sec.iy / l.powi(3);
-    let by = [
-        [12.0, -6.0 * l, -12.0, -6.0 * l],
-        [-6.0 * l, 4.0 * l * l, 6.0 * l, 2.0 * l * l],
-        [-12.0, 6.0 * l, 12.0, 6.0 * l],
-        [-6.0 * l, 2.0 * l * l, 6.0 * l, 4.0 * l * l],
-    ];
-    let iy = [2, 4, 8, 10];
-    for r in 0..4 {
-        for col in 0..4 {
-            k[(iz[r], iz[col])] = c * bz[r][col];
-            k[(iy[r], iy[col])] = cy * by[r][col];
+    // Bending: end moments M = K φ, with φ the node rotations relative to the
+    // chord and K from the member's bending stiffness and its end joints.
+    // About z: DOFs uy (1, 7) and rz (5, 11), chord rotation (uy_b − uy_a)/L.
+    // About y: DOFs uz (2, 8) and ry (4, 10), chord rotation −(uz_b − uz_a)/L.
+    for (axis, idx, sign, inertia) in [
+        (0, [2, 4, 8, 10], -1.0, sec.iy),
+        (1, [1, 5, 7, 11], 1.0, sec.iz),
+    ] {
+        let kb = bending_stiffness(
+            e * inertia / l,
+            [mem.ends[0].stiffness[axis], mem.ends[1].stiffness[axis]],
+        );
+        // φ = B [v_a, θ_a, v_b, θ_b].
+        let c = sign / l;
+        let bm = [[c, 1.0, -c, 0.0], [c, 0.0, -c, 1.0]];
+        for r in 0..4 {
+            for col in 0..4 {
+                let mut v = 0.0;
+                for i in 0..2 {
+                    for j in 0..2 {
+                        v += bm[i][r] * kb[i][j] * bm[j][col];
+                    }
+                }
+                k[(idx[r], idx[col])] = v;
+            }
         }
     }
     k
@@ -144,6 +151,22 @@ pub fn solve_static(s: &Structure, loads: &[NodeLoad]) -> Result<StaticResult, S
         for i in 0..3 {
             f[l.node * 6 + i] += l.force[i];
             f[l.node * 6 + 3 + i] += l.moment[i];
+        }
+    }
+
+    // A node where members meet through pins can be free to rotate about an
+    // axis no member resists. That rotation carries no load, so pin it with a
+    // tiny spring instead of calling the structure unstable.
+    if s.members
+        .iter()
+        .any(|m| m.ends.iter().any(|j| !j.is_rigid()))
+    {
+        let scale = (0..n)
+            .filter(|d| d % 6 >= 3)
+            .map(|d| diag[d])
+            .fold(0.0, f64::max);
+        for d in (0..n).filter(|d| d % 6 >= 3 && diag[*d] != 0.0) {
+            entries.push((d, d, 1e-10 * scale));
         }
     }
 
@@ -209,7 +232,12 @@ pub fn solve_static(s: &Structure, loads: &[NodeLoad]) -> Result<StaticResult, S
                 vy: fl[7],
                 vz: fl[8],
                 utilization: 0.0,
+                joint_utilization: [0.0; 2],
             };
+            for end in 0..2 {
+                mf.joint_utilization[end] =
+                    mem.ends[end].utilization(axial, [mf.vz, mf.vy], [mf.my[end], mf.mz[end]]);
+            }
             let law = laws.get(&mem.material, &mem.section);
             mf.utilization = law.intact_utilization(mf.axial, [mf.my, mf.mz], [mf.vz, mf.vy]);
             mf
