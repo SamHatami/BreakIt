@@ -58,6 +58,13 @@ fn point_mass_weighs_like_a_static_tip_load() {
         },
     );
     let before = sim.node_mass(tip);
+    // Taking a mass off again restores the node; too much leaves 1%.
+    sim.add_point_mass(tip, kg);
+    sim.add_point_mass(tip, -kg);
+    assert!((sim.node_mass(tip) - before).abs() < 1e-9);
+    sim.add_point_mass(tip, -1e6);
+    assert!((sim.node_mass(tip) - 0.01 * before).abs() < 1e-9);
+    sim.add_point_mass(tip, before - 0.01 * before);
     sim.add_point_mass(tip, kg);
     assert!((sim.node_mass(tip) - before - kg).abs() < 1e-9);
     // Fixed nodes stay fixed.

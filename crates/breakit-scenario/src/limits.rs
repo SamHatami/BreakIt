@@ -105,7 +105,7 @@ impl fmt::Display for Violation {
                 "The deck has a {gap:.1} m gap at {at:.1} m along it; wheels need a node every {max:.1} m."
             ),
             Violation::PayloadUnattached { payload } => {
-                write!(f, "Nothing holds the {payload}.")
+                write!(f, "Nothing holds the {payload}: each of its feet needs a node of its own.")
             }
         }
     }
@@ -189,7 +189,7 @@ pub fn check_limits(
             }
         }
     }
-    for (p, n) in scenario.payloads.iter().zip(&binding.payload_nodes) {
+    for (p, n) in scenario.payloads.iter().zip(&binding.payload_feet) {
         if n.is_none() {
             out.push(Violation::PayloadUnattached {
                 payload: p.name.clone(),

@@ -156,18 +156,101 @@ pub struct Deck {
     pub max_gap: f64,
 }
 
-/// Something the structure must hold at a point, such as a tank or a
-/// signal head. It is added to the carrying node as a point mass, so it has
-/// weight (ramped in with self weight) and inertia when shaken.
+/// Equipment the structure must carry: a tank, a pump skid, a rooftop unit.
+///
+/// It sits on the player's nodes at its feet. Its mass is shared between
+/// the feet as point masses, so it has weight (ramped in with self weight)
+/// and inertia when shaken, and its centre of mass `height` above the feet
+/// turns sideways inertia into an overturning couple on them. A resting or
+/// bolted item can tip, slide or tear its bolts and come off.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Payload {
     pub name: String,
+    /// Centre of the footprint, where it sits on the structure.
     pub at: [f64; 3],
-    /// How far the carrying node may be from `at`, metres.
+    /// How far each carrying node may be from its foot, metres.
     #[serde(default = "default_payload_tol")]
     pub tolerance: f64,
     /// kg.
     pub mass: f64,
+    /// Feet as offsets from `at`. Empty: one foot at `at`.
+    #[serde(default)]
+    pub feet: Vec<[f64; 3]>,
+    /// Centre of mass above the feet, m.
+    #[serde(default)]
+    pub height: f64,
+    /// Drawn size (x, y, z), m.
+    #[serde(default)]
+    pub size: Option<[f64; 3]>,
+    #[serde(default)]
+    pub mount: Mount,
+    #[serde(default)]
+    pub limits: PayloadLimits,
+    /// Losing it fails the test.
+    #[serde(default)]
+    pub critical: bool,
+}
+
+impl Payload {
+    /// Rough contact radius, m: half the largest drawn size, else half the
+    /// footprint span, else 0.3 m.
+    pub fn radius(&self) -> f64 {
+        if let Some(sz) = self.size {
+            return 0.5 * sz.iter().copied().fold(0.0, f64::max);
+        }
+        let span = self
+            .feet
+            .iter()
+            .map(|f| (f[0] * f[0] + f[2] * f[2]).sqrt())
+            .fold(0.0, f64::max);
+        if span > 0.0 {
+            span
+        } else {
+            0.3
+        }
+    }
+
+    /// Foot positions in the world, as built.
+    pub fn foot_positions(&self) -> Vec<[f64; 3]> {
+        if self.feet.is_empty() {
+            return vec![self.at];
+        }
+        self.feet
+            .iter()
+            .map(|f| [self.at[0] + f[0], self.at[1] + f[1], self.at[2] + f[2]])
+            .collect()
+    }
+}
+
+/// How the equipment is held on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum Mount {
+    /// Welded or cast in: never comes off.
+    #[default]
+    Fixed,
+    /// Bolted down; each foot's bolts hold `capacity` N in pull-out or
+    /// shear, after which it rests on friction 0.3.
+    Bolted { capacity: f64 },
+    /// Just standing there. Tips when a foot lifts, slides when sideways
+    /// inertia beats `friction` times the weight on its feet.
+    Resting { friction: f64 },
+}
+
+/// Tolerances for the equipment. Each one set becomes a report row; with
+/// `strict` a breach fails the test, otherwise it costs score.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PayloadLimits {
+    /// Largest tilt of its footprint, degrees.
+    #[serde(default)]
+    pub tilt_deg: Option<f64>,
+    /// Largest downward deflection under its feet, m.
+    #[serde(default)]
+    pub sag: Option<f64>,
+    /// Largest movement of its footprint centre, m.
+    #[serde(default)]
+    pub drift: Option<f64>,
+    #[serde(default)]
+    pub strict: bool,
 }
 
 fn default_deck_height() -> f64 {
