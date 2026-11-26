@@ -62,8 +62,6 @@ The "Simulate wind, quake and wave loads" work is adding richer load models in `
 
 Q-01 is easy for a braced tower; the budget is what bites. Make it harder with a heavier tank, a lower frequency nearer the tower's own, or fewer footings once the part catalog has thinner sections.
 
-## In the game (`breakit-game/src/test_scenario.rs`)
+## In the game
 
-N cycles scenarios (and free play), B toggles challenge / sandbox. Build mode shows the brief, cost against budget and the blocking problems; Space only starts the test when nothing blocks it. Simulate mode runs a `TestRun` and shows phase, time and the report summary when decided. Build volume, anchors, lane, payloads and vehicles are gizmos until the play table and report screens replace them.
-
-Open: the build-mode static check still uses the player's own loads (the starter bridge's 3 x 100 kN), not the scenario's; anchor capacity (pull-out, sliding) waits for foundation components.
+The game's screens play these scenarios: see `docs/game-ui.md`. Build shows the blocking problems and RUN TEST only starts when there are none; the test screen steps a `TestRun` and the report screen shows its `Report`. Build volume, anchors, lane, payloads and vehicles are gizmos (`breakit-game/src/guides.rs`) until the play table draws them. Anchor capacity (pull-out, sliding) waits for foundation components.
