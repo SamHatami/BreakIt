@@ -7,3 +7,4 @@
 - Current status and open problems: `docs/solver-spike.md`.
 - Material and damage models: `docs/materials.md`.
 - Member visuals (GPU deformation, damage looks, breaking): `docs/visuals.md`. `GpuMember` in `breakit-mesh` and `Member` in `breakit-render/src/member.wesl` must stay field-for-field identical.
+- Sound (procedural, no sample files): `docs/audio.md`. Patches live in `breakit-audio`; the game only sends commands from `breakit-game/src/sound.rs`.

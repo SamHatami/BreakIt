@@ -77,7 +77,10 @@ pub struct Pink {
 
 impl Pink {
     pub fn new(seed: u32) -> Self {
-        Self { rng: Rng::new(seed), b: [0.0; 3] }
+        Self {
+            rng: Rng::new(seed),
+            b: [0.0; 3],
+        }
     }
 
     #[inline]
@@ -99,7 +102,10 @@ pub struct Brown {
 
 impl Brown {
     pub fn new(seed: u32) -> Self {
-        Self { rng: Rng::new(seed), y: 0.0 }
+        Self {
+            rng: Rng::new(seed),
+            y: 0.0,
+        }
     }
 
     #[inline]
@@ -160,7 +166,12 @@ pub struct SvfOut {
 impl Svf {
     /// `q` around 0.7 is flat; higher rings.
     pub fn new(cutoff: f32, q: f32, sr: f32) -> Self {
-        let mut f = Self { g: 0.0, k: 1.0, ic1: 0.0, ic2: 0.0 };
+        let mut f = Self {
+            g: 0.0,
+            k: 1.0,
+            ic1: 0.0,
+            ic2: 0.0,
+        };
         f.set(cutoff, q, sr);
         f
     }
@@ -182,7 +193,11 @@ impl Svf {
         let v2 = self.ic2 + a2 * self.ic1 + a3 * v3;
         self.ic1 = 2.0 * v1 - self.ic1;
         self.ic2 = 2.0 * v2 - self.ic2;
-        SvfOut { lp: v2, bp: v1, hp: x - k * v1 - v2 }
+        SvfOut {
+            lp: v2,
+            bp: v1,
+            hp: x - k * v1 - v2,
+        }
     }
 
     #[inline]
@@ -215,7 +230,13 @@ pub struct Resonator {
 
 impl Resonator {
     pub fn new(freq: f32, t60: f32, sr: f32) -> Self {
-        let mut r = Self { b1: 0.0, b2: 0.0, y1: 0.0, y2: 0.0, gain: 1.0 };
+        let mut r = Self {
+            b1: 0.0,
+            b2: 0.0,
+            y1: 0.0,
+            y2: 0.0,
+            gain: 1.0,
+        };
         r.set(freq, t60, sr);
         r
     }
@@ -298,7 +319,10 @@ pub struct Decay {
 
 impl Decay {
     pub fn new(t60: f32, sr: f32) -> Self {
-        Self { level: 1.0, k: (-6.907_755 / (t60.max(1e-4) * sr)).exp() }
+        Self {
+            level: 1.0,
+            k: (-6.907_755 / (t60.max(1e-4) * sr)).exp(),
+        }
     }
 
     #[inline]
@@ -328,7 +352,12 @@ pub struct AttackDecay {
 
 impl AttackDecay {
     pub fn new(attack: f32, t60: f32, sr: f32) -> Self {
-        Self { attack: attack.max(1e-4), t: 0.0, dt: 1.0 / sr, decay: Decay::new(t60, sr) }
+        Self {
+            attack: attack.max(1e-4),
+            t: 0.0,
+            dt: 1.0 / sr,
+            decay: Decay::new(t60, sr),
+        }
     }
 
     #[inline]
@@ -400,7 +429,11 @@ pub struct Smooth {
 
 impl Smooth {
     pub fn new(value: f32, time: f32, sr: f32) -> Self {
-        Self { value, target: value, k: 1.0 - (-1.0 / (time.max(1e-4) * sr)).exp() }
+        Self {
+            value,
+            target: value,
+            k: 1.0 - (-1.0 / (time.max(1e-4) * sr)).exp(),
+        }
     }
 
     #[inline]
@@ -419,7 +452,10 @@ pub struct Delay {
 
 impl Delay {
     pub fn new(max_samples: usize) -> Self {
-        Self { buf: vec![0.0; max_samples.max(2)], pos: 0 }
+        Self {
+            buf: vec![0.0; max_samples.max(2)],
+            pos: 0,
+        }
     }
 
     #[inline]
@@ -472,7 +508,9 @@ mod tests {
         let crossings = out[..4800].windows(2).filter(|w| w[0] * w[1] < 0.0).count();
         assert!((190..=210).contains(&crossings), "{crossings}");
         // 60 dB down after t60.
-        let late = out[24_000..24_200].iter().fold(0.0f32, |m, x| m.max(x.abs()));
+        let late = out[24_000..24_200]
+            .iter()
+            .fold(0.0f32, |m, x| m.max(x.abs()));
         assert!(late < peak * 2e-3, "late {late}");
     }
 

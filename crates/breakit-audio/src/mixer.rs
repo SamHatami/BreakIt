@@ -51,7 +51,10 @@ struct Listener {
 
 impl Default for Listener {
     fn default() -> Self {
-        Self { position: [0.0, 2.0, 10.0], right: [1.0, 0.0, 0.0] }
+        Self {
+            position: [0.0, 2.0, 10.0],
+            right: [1.0, 0.0, 0.0],
+        }
     }
 }
 
@@ -69,7 +72,12 @@ struct Gains {
 fn spatial(listener: &Listener, place: Option<&Place>, ref_distance: f32) -> Gains {
     let Some(p) = place else {
         let g = std::f32::consts::FRAC_1_SQRT_2;
-        return Gains { l: g, r: g, send: 0.25, air: 20_000.0 };
+        return Gains {
+            l: g,
+            r: g,
+            send: 0.25,
+            air: 20_000.0,
+        };
     };
     let d = [
         p.position[0] - listener.position[0],
@@ -108,7 +116,11 @@ struct Channel {
 
 impl Channel {
     fn new(sr: f32) -> Self {
-        Self { gains: Gains::default(), air: OnePole::new(20_000.0, sr), prev: Gains::default() }
+        Self {
+            gains: Gains::default(),
+            air: OnePole::new(20_000.0, sr),
+            prev: Gains::default(),
+        }
     }
 
     /// Mixes `mono` into the dry and reverb buffers with gains ramped from
@@ -119,7 +131,8 @@ impl Channel {
         let (p, g) = (self.prev, self.gains);
         for (i, &x) in mono.iter().enumerate() {
             let t = (i as f32 + 1.0) / n;
-            let x = self.air.lp(x) * gain;
+            // Offset: see the reverb; keeps the filter out of subnormals.
+            let x = self.air.lp(x + 1e-12) * gain;
             dry[i][0] += x * (p.l + (g.l - p.l) * t);
             dry[i][1] += x * (p.r + (g.r - p.r) * t);
             wet[i] += x * (p.send + (g.send - p.send) * t);
@@ -246,26 +259,49 @@ impl Mixer {
     pub fn handle(&mut self, cmd: Command) {
         let sr = self.sr;
         match cmd {
-            Command::Listener { position, right, .. } => {
+            Command::Listener {
+                position, right, ..
+            } => {
                 self.listener = Listener { position, right };
             }
-            Command::Stress { material, load, rate, members, place } => {
+            Command::Stress {
+                material,
+                load,
+                rate,
+                members,
+                place,
+            } => {
                 let bed = &mut self.beds[material_index(material)];
                 bed.voice.set(load, rate, members);
                 bed.place = Some(place);
             }
-            Command::Damage { material, state, size, place } => {
+            Command::Damage {
+                material,
+                state,
+                size,
+                place,
+            } => {
                 let seed = self.next_seed();
                 if let Some(v) = damage_voice(material, state, size, sr, seed) {
                     self.play(v, Bus::Structure, Some(place), 1.0, 3.0);
                 }
             }
-            Command::Break { material, cause, size, place } => {
+            Command::Break {
+                material,
+                cause,
+                size,
+                place,
+            } => {
                 let seed = self.next_seed();
                 let v = break_voice(material, cause, size, sr, seed);
                 self.play(v, Bus::Structure, Some(place), 1.0, 4.0);
             }
-            Command::Impact { material, speed, size, place } => {
+            Command::Impact {
+                material,
+                speed,
+                size,
+                place,
+            } => {
                 let window = (self.clock / (sr as u64 / 20).max(1)) as u32;
                 if self.impact_window.0 != window {
                     self.impact_window = (window, 0);
@@ -279,7 +315,13 @@ impl Mixer {
                     self.play(v, Bus::Structure, Some(place), 1.0, 3.0);
                 }
             }
-            Command::Rig { id, kind, drive, speed, place } => {
+            Command::Rig {
+                id,
+                kind,
+                drive,
+                speed,
+                place,
+            } => {
                 if let Some(r) = self.rigs.iter_mut().find(|r| r.id == id && r.kind == kind) {
                     r.voice.set(drive, speed);
                     r.place = place;
@@ -299,8 +341,17 @@ impl Mixer {
                     });
                 }
             }
-            Command::Ambient { id, kind, level, place } => {
-                if let Some(a) = self.ambient.iter_mut().find(|a| a.id == id && a.kind == kind) {
+            Command::Ambient {
+                id,
+                kind,
+                level,
+                place,
+            } => {
+                if let Some(a) = self
+                    .ambient
+                    .iter_mut()
+                    .find(|a| a.id == id && a.kind == kind)
+                {
                     for v in &mut a.voices {
                         v.set_level(level);
                     }
@@ -315,7 +366,13 @@ impl Mixer {
                             v
                         })
                         .collect();
-                    self.ambient.push(Ambient { id, kind, voices, place, channel: Channel::new(sr) });
+                    self.ambient.push(Ambient {
+                        id,
+                        kind,
+                        voices,
+                        place,
+                        channel: Channel::new(sr),
+                    });
                 }
             }
             Command::Ui(sound) => {
@@ -336,7 +393,14 @@ impl Mixer {
 
     /// Starts a one-shot. `ref_distance` (m) is how close you must be to hear
     /// it at full level.
-    pub fn play(&mut self, voice: BoxVoice, bus: Bus, place: Option<Place>, gain: f32, ref_distance: f32) {
+    pub fn play(
+        &mut self,
+        voice: BoxVoice,
+        bus: Bus,
+        place: Option<Place>,
+        gain: f32,
+        ref_distance: f32,
+    ) {
         if self.shots.len() >= MAX_ONE_SHOTS {
             // Steal the quietest structure or UI voice.
             if let Some((i, _)) = self
@@ -409,7 +473,13 @@ impl Mixer {
             self.mono.iter_mut().for_each(|x| *x = 0.0);
             bed.voice.render(&mut self.mono);
             bed.channel.gains = spatial(&listener, bed.place.as_ref(), 4.0);
-            bed.channel.mix(&self.mono, bus[Bus::Structure.index()], sr, &mut self.dry, &mut self.wet);
+            bed.channel.mix(
+                &self.mono,
+                bus[Bus::Structure.index()],
+                sr,
+                &mut self.dry,
+                &mut self.wet,
+            );
         }
 
         // Rigs, fading out the ones the game stopped updating.
@@ -417,7 +487,11 @@ impl Mixer {
             r.idle += dt;
             let target = if r.idle > RIG_TIMEOUT { 0.0 } else { 1.0 };
             let start = r.fade;
-            r.fade = if target > r.fade { (r.fade + dt / 0.05).min(1.0) } else { (r.fade - dt / 0.4).max(0.0) };
+            r.fade = if target > r.fade {
+                (r.fade + dt / 0.05).min(1.0)
+            } else {
+                (r.fade - dt / 0.4).max(0.0)
+            };
             if r.idle > RIG_TIMEOUT && r.fade <= 0.0 {
                 return false;
             }
@@ -427,7 +501,13 @@ impl Mixer {
                 *x *= start + (r.fade - start) * (i as f32 + 1.0) / n as f32;
             }
             r.channel.gains = spatial(&listener, Some(&r.place), 4.0);
-            r.channel.mix(&self.mono, bus[Bus::Rigs.index()], sr, &mut self.dry, &mut self.wet);
+            r.channel.mix(
+                &self.mono,
+                bus[Bus::Rigs.index()],
+                sr,
+                &mut self.dry,
+                &mut self.wet,
+            );
             true
         });
 
@@ -440,7 +520,8 @@ impl Mixer {
                     v.render(&mut self.mono);
                 }
                 a.channel.gains = spatial(&listener, a.place.as_ref(), 4.0);
-                a.channel.mix(&self.mono, g, sr, &mut self.dry, &mut self.wet);
+                a.channel
+                    .mix(&self.mono, g, sr, &mut self.dry, &mut self.wet);
             } else {
                 // Wide bed: one voice per ear, a little of it into the hall.
                 self.mono.iter_mut().for_each(|x| *x = 0.0);
@@ -462,14 +543,19 @@ impl Mixer {
             mono.iter_mut().for_each(|x| *x = 0.0);
             let alive = s.voice.render(mono);
             let peak = mono.iter().fold(0.0f32, |m, x| m.max(x.abs()));
-            s.loudness = if s.loudness.is_finite() { s.loudness.max(peak) * 0.9 + peak * 0.1 } else { peak };
+            s.loudness = if s.loudness.is_finite() {
+                s.loudness.max(peak) * 0.9 + peak * 0.1
+            } else {
+                peak
+            };
             s.channel.gains = spatial(&listener, s.place.as_ref(), s.ref_distance);
             if s.bus == Bus::Ui {
                 // Interface sounds sit in the head, almost dry.
                 s.channel.gains.send = 0.06;
                 s.channel.gains.air = 20_000.0;
             }
-            s.channel.mix(mono, s.gain * bus[s.bus.index()], sr, dry, wet);
+            s.channel
+                .mix(mono, s.gain * bus[s.bus.index()], sr, dry, wet);
             alive
         });
 
@@ -488,11 +574,19 @@ impl Mixer {
         }
         let target = if peak > 0.8 { 0.8 / peak } else { 1.0 };
         let start = self.limiter;
-        self.limiter = if target < self.limiter { target } else { 1.0 - (1.0 - self.limiter) * release };
+        self.limiter = if target < self.limiter {
+            target
+        } else {
+            1.0 - (1.0 - self.limiter) * release
+        };
         for (i, f) in self.pending.iter_mut().enumerate() {
             let t = (i as f32 + 1.0) / n as f32;
             // Gain falling: drop at once. Rising: ramp across the block.
-            let g = if self.limiter < start { self.limiter } else { start + (self.limiter - start) * t };
+            let g = if self.limiter < start {
+                self.limiter
+            } else {
+                start + (self.limiter - start) * t
+            };
             f[0] = limit(f[0] * g);
             f[1] = limit(f[1] * g);
             if !f[0].is_finite() || !f[1].is_finite() {
@@ -535,24 +629,50 @@ mod tests {
         let mut m = Mixer::new(48_000.0);
         let place = Place::at([1.0, 1.0, 0.0]);
         for (i, mat) in MATERIALS.iter().enumerate() {
-            m.handle(Command::Stress { material: *mat, load: 1.2, rate: 0.5, members: 4.0, place });
+            m.handle(Command::Stress {
+                material: *mat,
+                load: 1.2,
+                rate: 0.5,
+                members: 4.0,
+                place,
+            });
             m.handle(Command::Damage {
                 material: *mat,
                 state: crate::DamageState::Yielded,
                 size: 40.0,
                 place,
             });
-            m.handle(Command::Break { material: *mat, cause: BreakCause::Brittle, size: 60.0, place });
-            m.handle(Command::Impact { material: *mat, speed: 4.0, size: 10.0, place });
+            m.handle(Command::Break {
+                material: *mat,
+                cause: BreakCause::Brittle,
+                size: 60.0,
+                place,
+            });
+            m.handle(Command::Impact {
+                material: *mat,
+                speed: 4.0,
+                size: 10.0,
+                place,
+            });
             m.handle(Command::Rig {
                 id: i as u32,
-                kind: [RigKind::WindFan, RigKind::ShakeTable, RigKind::WavePaddle, RigKind::Cart][i],
+                kind: [
+                    RigKind::WindFan,
+                    RigKind::ShakeTable,
+                    RigKind::WavePaddle,
+                    RigKind::Cart,
+                ][i],
                 drive: 0.8,
                 speed: 1.0,
                 place,
             });
         }
-        m.handle(Command::Ambient { id: 0, kind: AmbientKind::Hvac, level: 1.0, place: None });
+        m.handle(Command::Ambient {
+            id: 0,
+            kind: AmbientKind::Hvac,
+            level: 1.0,
+            place: None,
+        });
         m.handle(Command::Ui(UiSound::PlaceBeam));
         let out = m.render_seconds(2.0);
         assert!(out.iter().all(|x| x.is_finite()));
@@ -565,7 +685,13 @@ mod tests {
     fn rigs_fade_out_when_no_longer_updated() {
         let mut m = Mixer::new(48_000.0);
         let place = Place::at([0.0, 0.0, 0.0]);
-        m.handle(Command::Rig { id: 7, kind: RigKind::WindFan, drive: 1.0, speed: 20.0, place });
+        m.handle(Command::Rig {
+            id: 7,
+            kind: RigKind::WindFan,
+            drive: 1.0,
+            speed: 20.0,
+            place,
+        });
         m.render_seconds(0.2);
         assert_eq!(m.rigs.len(), 1);
         m.render_seconds(1.5);

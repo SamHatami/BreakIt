@@ -49,11 +49,17 @@ pub struct Place {
 
 impl Place {
     pub fn at(position: Pos) -> Self {
-        Self { position, metres_per_unit: 1.0 }
+        Self {
+            position,
+            metres_per_unit: 1.0,
+        }
     }
 
     pub fn scaled(position: Pos, metres_per_unit: f32) -> Self {
-        Self { position, metres_per_unit }
+        Self {
+            position,
+            metres_per_unit,
+        }
     }
 }
 
@@ -145,27 +151,60 @@ pub enum Command {
     /// The camera: its position and unit right and up vectors.
     Listener { position: Pos, right: Pos, up: Pos },
     /// How hard the members of one material are working right now,
-    /// aggregated by the game. `load` is utilisation over the bed's onset
-    /// (0 = quiet, 1 = at capacity, above 1 = past it), `rate` how fast it
-    /// is rising per second, `members` roughly how many members contribute.
+    /// aggregated by the game. `load` is the utilisation of the hardest
+    /// working members (1 = at capacity, above 1 = past it; the bed is quiet
+    /// below about 0.3), `rate` how fast it is rising per second, `members`
+    /// how many members are above half capacity.
     /// The engine keeps one bed per material and smooths it.
-    Stress { material: MaterialKind, load: f32, rate: f32, members: f32, place: Place },
+    Stress {
+        material: MaterialKind,
+        load: f32,
+        rate: f32,
+        members: f32,
+        place: Place,
+    },
     /// A member reached a worse damage state (yielded, cracked, crushed,
     /// delaminated). `size` is the member's mass in kg.
-    Damage { material: MaterialKind, state: DamageState, size: f32, place: Place },
+    Damage {
+        material: MaterialKind,
+        state: DamageState,
+        size: f32,
+        place: Place,
+    },
     /// A member broke.
-    Break { material: MaterialKind, cause: BreakCause, size: f32, place: Place },
+    Break {
+        material: MaterialKind,
+        cause: BreakCause,
+        size: f32,
+        place: Place,
+    },
     /// A loose piece hit the floor or the structure. `speed` m/s normal to
     /// the contact, `size` kg.
-    Impact { material: MaterialKind, speed: f32, size: f32, place: Place },
+    Impact {
+        material: MaterialKind,
+        speed: f32,
+        size: f32,
+        place: Place,
+    },
     /// A test rig's state. `drive` 0..1 is how hard it works; `speed` is its
     /// physical rate (fan wind speed in m/s, actuator / paddle / cart
     /// velocity in m/s, winch rope speed). Rigs not updated for half a
     /// second fade out.
-    Rig { id: u32, kind: RigKind, drive: f32, speed: f32, place: Place },
+    Rig {
+        id: u32,
+        kind: RigKind,
+        drive: f32,
+        speed: f32,
+        place: Place,
+    },
     /// Set the level (0..1) of an ambient source. `place: None` plays it as
     /// a wide, non-positional bed.
-    Ambient { id: u32, kind: AmbientKind, level: f32, place: Option<Place> },
+    Ambient {
+        id: u32,
+        kind: AmbientKind,
+        level: f32,
+        place: Option<Place>,
+    },
     /// A one-shot interface sound.
     Ui(UiSound),
     /// Bus volume, linear 0..1.

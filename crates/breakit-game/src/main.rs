@@ -11,6 +11,7 @@ mod capture;
 mod design;
 mod hud;
 mod render;
+mod sound;
 mod visuals;
 
 use bevy::prelude::*;
@@ -42,6 +43,7 @@ fn main() {
             visuals::VisualsPlugin,
             hud::HudPlugin,
             capture::CapturePlugin,
+            sound::SoundPlugin,
         ))
         .add_systems(Update, toggle_mode)
         .run();

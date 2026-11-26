@@ -41,7 +41,10 @@ impl Hall {
         Self {
             sr,
             pre: Delay::new((0.12 * sr) as usize),
-            lines: lengths.iter().map(|&l| Delay::new(l as usize + 4)).collect(),
+            lines: lengths
+                .iter()
+                .map(|&l| Delay::new(l as usize + 4))
+                .collect(),
             lengths,
             gains,
             // Highs die faster: cladding and air absorb them.
@@ -63,7 +66,9 @@ impl Hall {
         let ms = self.sr * 0.001;
         for (x, o) in input.iter().zip(out.iter_mut()) {
             // Low rumble would pile up in the loop as boom.
-            let x = self.input_hp.hp(*x);
+            // The tiny offset keeps decaying tails out of subnormal floats,
+            // which are many times slower to compute.
+            let x = self.input_hp.hp(*x) + 1e-12;
             self.pre.write(x);
             let src = self.pre.read(14.0 * ms);
             let mut el = 0.0;
@@ -127,7 +132,12 @@ mod tests {
         let mut out = vec![[0.0; 2]; n];
         hall.process(&input, &mut out);
         let rms = |a: usize, b: usize| {
-            (out[a..b].iter().map(|f| f[0] * f[0] + f[1] * f[1]).sum::<f32>() / (b - a) as f32).sqrt()
+            (out[a..b]
+                .iter()
+                .map(|f| f[0] * f[0] + f[1] * f[1])
+                .sum::<f32>()
+                / (b - a) as f32)
+                .sqrt()
         };
         let early = rms((0.1 * sr) as usize, (0.3 * sr) as usize);
         let late = rms((2.1 * sr) as usize, (2.3 * sr) as usize);

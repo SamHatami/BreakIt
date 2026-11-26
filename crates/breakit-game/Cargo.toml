@@ -8,6 +8,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+breakit-audio = { path = "../breakit-audio" }
 breakit-core = { path = "../breakit-core" }
 breakit-render = { path = "../breakit-render" }
 # Pinned on purpose: Bevy breaks its API every release. Upgrade deliberately,

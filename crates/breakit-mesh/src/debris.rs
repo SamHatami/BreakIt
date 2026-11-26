@@ -8,7 +8,8 @@
 
 use glam::{Quat, Vec3};
 
-use crate::fracture::DebrisPiece;
+use crate::fracture::{DebrisPiece, PiecePart};
+use crate::state::MaterialKind;
 
 #[derive(Clone, Copy, Debug)]
 pub struct DebrisConfig {
@@ -56,7 +57,29 @@ pub struct DebrisBody {
     rest_position: Vec3,
     rest_rotation: Quat,
     pub asleep: bool,
+    /// What it is made of, for impact sounds.
+    pub kind: MaterialKind,
+    pub part: PiecePart,
 }
+
+/// A piece hitting the ground hard enough to be heard.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DebrisImpact {
+    pub position: Vec3,
+    /// Closing speed along the contact normal, m/s.
+    pub speed: f32,
+    /// Bounding radius of the piece, m.
+    pub radius: f32,
+    pub kind: MaterialKind,
+    pub part: PiecePart,
+}
+
+/// Impacts slower than this (m/s) are resting contact, not hits.
+pub const IMPACT_MIN_SPEED: f32 = 0.5;
+
+/// At most this many impacts are kept for a consumer that has not drained
+/// them (the oldest are dropped).
+const MAX_PENDING_IMPACTS: usize = 64;
 
 #[derive(Clone, Debug, Default)]
 pub struct DebrisWorld {
@@ -65,6 +88,8 @@ pub struct DebrisWorld {
     next_id: u64,
     /// Ids removed by the piece cap during the last `add`/`step`.
     pub removed: Vec<u64>,
+    /// Ground hits since the last [`DebrisWorld::drain_impacts`].
+    impacts: Vec<DebrisImpact>,
 }
 
 impl DebrisWorld {
@@ -92,6 +117,8 @@ impl DebrisWorld {
             rest_position: piece.position,
             rest_rotation: piece.rotation,
             asleep: false,
+            kind: piece.kind,
+            part: piece.part,
         });
         let max = self.config.max_pieces;
         if self.bodies.len() > max {
@@ -100,6 +127,11 @@ impl DebrisWorld {
                 .extend(self.bodies.drain(..extra).map(|b| b.id));
         }
         id
+    }
+
+    /// Takes the ground hits recorded since the last call (for sound).
+    pub fn drain_impacts(&mut self) -> impl Iterator<Item = DebrisImpact> + '_ {
+        self.impacts.drain(..)
     }
 
     pub fn awake_count(&self) -> usize {
@@ -127,6 +159,7 @@ impl DebrisWorld {
             let inv_i = 2.5 / (b.radius * b.radius).max(1e-6); // 1/(2/5 m r²), m = 1
             let n = Vec3::Y;
             let mut deepest = 0.0f32;
+            let mut hit = 0.0f32;
             for pass in 0..2 {
                 for p in &b.contact_points {
                     let arm = b.rotation * *p;
@@ -139,6 +172,9 @@ impl DebrisWorld {
                     let vn = v_contact.dot(n);
                     if vn >= 0.0 {
                         continue;
+                    }
+                    if pass == 0 {
+                        hit = hit.max(-vn);
                     }
                     // Bounce only real impacts; resting contact is inelastic.
                     let e = if pass == 0 && vn < -1.0 {
@@ -161,6 +197,18 @@ impl DebrisWorld {
                     b.velocity += impulse;
                     b.angular_velocity += arm.cross(impulse) * inv_i;
                 }
+            }
+            if hit >= IMPACT_MIN_SPEED {
+                if self.impacts.len() >= MAX_PENDING_IMPACTS {
+                    self.impacts.remove(0);
+                }
+                self.impacts.push(DebrisImpact {
+                    position: b.position,
+                    speed: hit,
+                    radius: b.radius,
+                    kind: b.kind,
+                    part: b.part,
+                });
             }
             let touching = deepest > 0.0;
             if touching {
@@ -221,9 +269,24 @@ mod tests {
                 w.add(p);
             }
         }
+        let mut hits = Vec::new();
         for _ in 0..60 * 12 {
             w.step(1.0 / 60.0);
+            hits.extend(w.drain_impacts());
         }
+        assert!(!hits.is_empty(), "falling pieces should report ground hits");
+        assert!(hits
+            .iter()
+            .all(|h| h.speed >= IMPACT_MIN_SPEED && h.position.is_finite()));
+        // Pieces at rest make no more sound.
+        for _ in 0..60 {
+            w.step(1.0 / 60.0);
+        }
+        assert_eq!(
+            w.drain_impacts().count(),
+            0,
+            "resting contact reported as impacts"
+        );
         for b in &w.bodies {
             assert!(b.position.is_finite());
             // Resting on (not under, not far above) the ground.

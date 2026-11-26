@@ -10,7 +10,12 @@ pub fn write_wav(path: &Path, samples: &[f32], channels: u16, sample_rate: u32) 
     f.flush()
 }
 
-pub fn write_wav_to<W: Write>(w: &mut W, samples: &[f32], channels: u16, sample_rate: u32) -> io::Result<()> {
+pub fn write_wav_to<W: Write>(
+    w: &mut W,
+    samples: &[f32],
+    channels: u16,
+    sample_rate: u32,
+) -> io::Result<()> {
     let data_len = (samples.len() * 2) as u32;
     let block_align = channels * 2;
     w.write_all(b"RIFF")?;

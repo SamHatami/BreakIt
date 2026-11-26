@@ -2106,6 +2106,7 @@ name = "breakit-game"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "breakit-audio",
  "breakit-core",
  "breakit-render",
 ]

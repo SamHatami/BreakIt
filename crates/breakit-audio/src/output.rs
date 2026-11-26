@@ -75,7 +75,9 @@ impl AudioOutput {
         use cpal::SampleFormat;
 
         let host = cpal::default_host();
-        let device = host.default_output_device().ok_or("no audio output device")?;
+        let device = host
+            .default_output_device()
+            .ok_or("no audio output device")?;
         let supported = device.default_output_config().map_err(|e| e.to_string())?;
         let format = supported.sample_format();
         let config: cpal::StreamConfig = supported.config();
@@ -121,7 +123,12 @@ impl AudioOutput {
         stream.play().map_err(|e| e.to_string())?;
         let description = format!("{sr} Hz, {channels} ch, {format:?}");
         Ok((
-            AudioOutput { _stream: Some(stream), recorder: None, sample_rate: sr, description },
+            AudioOutput {
+                _stream: Some(stream),
+                recorder: None,
+                sample_rate: sr,
+                description,
+            },
             AudioHandle { tx: Some(tx) },
         ))
     }
@@ -162,7 +169,10 @@ impl AudioOutput {
             AudioOutput {
                 #[cfg(feature = "device")]
                 _stream: None,
-                recorder: Some(Recorder { stop, thread: Some(thread) }),
+                recorder: Some(Recorder {
+                    stop,
+                    thread: Some(thread),
+                }),
                 sample_rate,
                 description: "WAV recorder".into(),
             },
