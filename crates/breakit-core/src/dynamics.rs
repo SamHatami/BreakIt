@@ -502,6 +502,11 @@ impl DynamicSim {
             }
         }
         Self {
+            // Built here, not on the first step: the symbolic analysis of a
+            // large structure costs several frames' worth of time.
+            direct: (config.solver == Solver::Direct)
+                .then(|| DirectSystem::new(&bodies, &beams, config.linear_backend))
+                .flatten(),
             config,
             bodies,
             beams,
@@ -509,7 +514,6 @@ impl DynamicSim {
             contacts,
             contact_events: Vec::new(),
             time: 0.0,
-            direct: None,
             stats: SolverStats::default(),
         }
     }

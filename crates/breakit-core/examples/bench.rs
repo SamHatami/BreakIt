@@ -202,6 +202,8 @@ fn configs() -> Vec<(&'static str, SimConfig)> {
         ),
         ("cholesky", with(Cholesky, 1e-6)),
         ("cholesky-1e-4", with(Cholesky, 1e-4)),
+        ("scalar", with(CholeskyScalar, 1e-6)),
+        ("scalar-1e-4", with(CholeskyScalar, 1e-4)),
         ("jacobi", with(BlockJacobi, 1e-6)),
         ("jacobi-1e-4", with(BlockJacobi, 1e-4)),
         ("jacobi-1e-3", with(BlockJacobi, 1e-3)),
@@ -234,6 +236,118 @@ fn weight(s: &Structure) -> f64 {
     s.self_weight_loads(9.81).iter().map(|l| -l.force.y).sum()
 }
 
+/// Time the kernels of the two Cholesky backends on the matrix pattern of
+/// each case, outside the simulation: one numeric factorisation, one direct
+/// solve (a triangular solve pair) and one CG iteration (a triangular solve
+/// pair, a product with the matrix and the vector updates). Minimum over
+/// repetitions.
+fn kernels(sizes: &str) {
+    use linsolve::{tri, Backend, LinSolver, Policy, BLOCK_NNZ};
+    println!(
+        "| structure | members | unknowns | backend | factor entries | factor flops (sum of squared column counts) | auto refactor cost | us per factorisation | us per direct solve | us per CG iteration |"
+    );
+    println!("|---|---|---|---|---|---|---|---|---|---|");
+    for size in sizes.split(',') {
+        for case in cases(size) {
+            let s = &case.s;
+            // The DOF numbering of the dynamic solver.
+            let mut fixed = vec![(false, false); s.nodes.len()];
+            for sup in &s.supports {
+                fixed[sup.node].0 |= sup.fixes_translation();
+                fixed[sup.node].1 |= sup.fixes_rotation();
+            }
+            let mut n = 0;
+            let mut next = |free: bool| {
+                free.then(|| {
+                    n += 3;
+                    n - 3
+                })
+            };
+            let slots: Vec<_> = fixed.iter().map(|f| (next(!f.0), next(!f.1))).collect();
+            let blocks: Vec<_> = s
+                .members
+                .iter()
+                .map(|m| [slots[m.a].0, slots[m.a].1, slots[m.b].0, slots[m.b].1])
+                .collect();
+            // Any positive definite values do: the work does not depend on
+            // them. Each beam gets a diagonally dominant block.
+            let mut seed = 0x9E3779B97F4A7C15u64;
+            let mut unit = move || {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                (seed >> 11) as f64 / (1u64 << 53) as f64
+            };
+            let assemble = |lin: &mut LinSolver, unit: &mut dyn FnMut() -> f64| {
+                lin.clear();
+                for d in 0..n {
+                    lin.add_diagonal(d, 1.0);
+                }
+                for i in 0..blocks.len() {
+                    let mut k = [0.0; BLOCK_NNZ];
+                    for r in 0..12 {
+                        for c in 0..r {
+                            k[tri(r, c)] = 0.2 * (unit() - 0.5);
+                        }
+                        k[tri(r, r)] = 2.0 + unit();
+                    }
+                    lin.add_block(i, &k);
+                }
+            };
+            let rhs: Vec<f64> = (0..n).map(|_| unit() - 0.5).collect();
+            let mut x = vec![0.0; n];
+            for (name, backend) in [
+                ("faer scalar", Backend::CholeskyScalar),
+                ("node blocks", Backend::Cholesky),
+            ] {
+                let policy = |max_iters| Policy {
+                    tolerance: 1e-30,
+                    refactor_cost: usize::MAX / 4,
+                    max_iters,
+                    max_age: 0,
+                };
+                let (mut factor, mut direct, mut iteration) = (f64::MAX, f64::MAX, f64::MAX);
+                let mut stats = linsolve::Stats::default();
+                for _ in 0..8 {
+                    // A fresh factorisation and a direct solve, then CG on
+                    // that factorisation for a different matrix, to a
+                    // tolerance it cannot reach: 5 and 25 iterations.
+                    let mut cg = [0.0; 2];
+                    for (t, iters) in cg.iter_mut().zip([5, 25]) {
+                        let mut lin = LinSolver::new(n, &blocks, backend).unwrap();
+                        assemble(&mut lin, &mut unit);
+                        assert!(lin.solve(&rhs, &mut x, &policy(1)));
+                        let a = lin.stats;
+                        factor = factor.min(a.factor_seconds);
+                        direct = direct.min(a.solve_seconds);
+                        assemble(&mut lin, &mut unit);
+                        assert!(lin.solve(&rhs, &mut x, &policy(iters)));
+                        let b = lin.stats;
+                        assert_eq!(b.cg_iterations - a.cg_iterations, iters);
+                        *t = b.solve_seconds - a.solve_seconds;
+                        stats = b;
+                    }
+                    iteration = iteration.min((cg[1] - cg[0]) / 20.0);
+                }
+                let lin = LinSolver::new(n, &blocks, backend).unwrap();
+                assert_eq!(lin.stats.factor_entries, stats.factor_entries);
+                println!(
+                    "| {} | {} | {} | {name} | {} | {:.3e} | {} | {:.0} | {:.0} | {:.0} |",
+                    case.name,
+                    s.members.len(),
+                    n,
+                    lin.stats.factor_entries,
+                    lin.stats.factor_flops,
+                    lin.stats.auto_refactor_cost,
+                    factor * 1e6,
+                    direct * 1e6,
+                    iteration * 1e6,
+                );
+            }
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let arg = |k: &str| {
@@ -244,7 +358,11 @@ fn main() {
     let sizes = arg("--sizes").unwrap_or("s,m,l".into());
     let only = arg("--only");
     let with_static = args.iter().any(|a| a == "--static");
+    let worst = args.iter().any(|a| a == "--worst");
     let short = args.iter().any(|a| a == "--short");
+    if args.iter().any(|a| a == "--kernels") {
+        return kernels(&sizes);
+    }
     let frames_elastic = if short { 2 } else { 180 };
     let frames_collapse = if short { 2 } else { 300 };
     let dt = 1.0 / 60.0;
@@ -301,6 +419,7 @@ fn main() {
                 let mut sim = DynamicSim::new(s, cfg.clone());
                 let mut scale = 1.0;
                 let mut t = Vec::new();
+                let mut frame_stats: Vec<(SolverStats, SolverStats)> = Vec::new();
                 for _ in 0..frames_collapse {
                     if sim.break_events().is_empty() {
                         scale *= 1.03;
@@ -308,9 +427,51 @@ fn main() {
                             sim.set_force(n, push * scale);
                         }
                     }
+                    let before = sim.solver_stats();
                     let t0 = Instant::now();
                     sim.step(dt);
                     t.push(t0.elapsed().as_secs_f64() * 1e3);
+                    frame_stats.push((before, sim.solver_stats()));
+                }
+                if worst {
+                    let st = sim.solver_stats();
+                    let hist = |lo: usize, hi: usize| {
+                        frame_stats
+                            .iter()
+                            .filter(|(a, b)| {
+                                (lo..hi).contains(&(b.extra_iterations - a.extra_iterations))
+                            })
+                            .count()
+                    };
+                    eprintln!(
+                        "  collapse totals: {} substeps, {} extra iterations, {} backtracks; frames with 0 / 1-2 / 3-4 / 5+ extra iterations: {} / {} / {} / {}",
+                        st.substeps,
+                        st.extra_iterations,
+                        st.backtracks,
+                        hist(0, 1),
+                        hist(1, 3),
+                        hist(3, 5),
+                        hist(5, 99),
+                    );
+                    // The slowest collapse frames and what they spent.
+                    let mut order: Vec<usize> = (0..t.len()).collect();
+                    order.sort_by(|&a, &b| t[b].partial_cmp(&t[a]).unwrap());
+                    for &f in order.iter().take(8) {
+                        let (a, b) = &frame_stats[f];
+                        eprintln!(
+                            "  frame {f}: {:.1} ms, solves {}, factorisations {}, cg {}, fallbacks {}, backtracks {}, extra iterations {}, assembly {:.1} factor {:.1} solve {:.1} ms",
+                            t[f],
+                            b.linear.solves - a.linear.solves,
+                            b.linear.factorizations - a.linear.factorizations,
+                            b.linear.cg_iterations - a.linear.cg_iterations,
+                            b.linear.fallbacks - a.linear.fallbacks,
+                            b.backtracks - a.backtracks,
+                            b.extra_iterations - a.extra_iterations,
+                            (b.linear.assembly_seconds - a.linear.assembly_seconds) * 1e3,
+                            (b.linear.factor_seconds - a.linear.factor_seconds) * 1e3,
+                            (b.linear.solve_seconds - a.linear.solve_seconds) * 1e3,
+                        );
+                    }
                 }
                 let co = timing(t);
                 let st_co = sim.solver_stats().linear;
