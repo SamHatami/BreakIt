@@ -11,7 +11,26 @@ use breakit_water_gpu::{GpuSolver, Relaxation};
 
 const DT: f64 = 1.0 / 60.0;
 
-fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
+/// One test at a time: software adapters compile shaders with a JIT that
+/// has crashed when several devices did so at once.
+static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The guard comes first so it is dropped last, after the device.
+type Gpu = (
+    std::sync::MutexGuard<'static, ()>,
+    wgpu::Device,
+    wgpu::Queue,
+);
+
+fn device() -> Option<Gpu> {
+    let guard = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (device, queue) = adapter_device()?;
+    Some((guard, device, queue))
+}
+
+fn adapter_device() -> Option<(wgpu::Device, wgpu::Queue)> {
     futures_lite::future::block_on(async {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = instance
@@ -81,7 +100,7 @@ fn difference(a: &[f64], b: &[f64]) -> (f64, f64) {
 
 #[test]
 fn waves_on_a_beach_match_the_cpu_solver() {
-    let Some((device, queue)) = device() else {
+    let Some((_guard, device, queue)) = device() else {
         return;
     };
     let mut cpu = flume();
@@ -148,7 +167,7 @@ fn basin() -> Solver {
 
 #[test]
 fn a_basin_with_a_current_a_pile_and_a_splash_matches_the_cpu_solver() {
-    let Some((device, queue)) = device() else {
+    let Some((_guard, device, queue)) = device() else {
         return;
     };
     let mut cpu = basin();
@@ -189,7 +208,7 @@ fn a_basin_with_a_current_a_pile_and_a_splash_matches_the_cpu_solver() {
 
 #[test]
 fn the_mirror_may_lag_without_changing_the_water() {
-    let Some((device, queue)) = device() else {
+    let Some((_guard, device, queue)) = device() else {
         return;
     };
     // One run waits for every step, the other never does: its mirror is a
