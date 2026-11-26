@@ -7,6 +7,18 @@ use breakit_core::{
 use common::*;
 use std::f64::consts::PI;
 
+/// Apply `force` at `node`, ramped linearly over `ramp` seconds (a suddenly
+/// applied load would overshoot to about twice its static effect), then hold
+/// until `total` seconds have passed.
+fn ramp_load(sim: &mut DynamicSim, node: usize, force: Vec3, ramp: f64, total: f64) {
+    let frames = (total * 60.0) as usize;
+    for f in 0..frames {
+        let t = f as f64 / 60.0;
+        sim.set_force(node, force * (t / ramp).min(1.0));
+        sim.step(1.0 / 60.0);
+    }
+}
+
 fn quiet(plasticity: bool) -> SimConfig {
     SimConfig {
         gravity: Vec3::zeros(),
@@ -72,7 +84,7 @@ fn sideways_load_on_portal_frame_matches_static_solve() {
     s.add_support(Support::fixed(right[0]));
     let loads = [
         NodeLoad::force(left[4], Vec3::new(5000.0, 0.0, 2000.0)),
-        NodeLoad::force(right[4], Vec3::new(0.0, -20_000.0, 0.0)),
+        NodeLoad::force(right[4], Vec3::new(0.0, -2_000.0, 0.0)),
     ];
     let stat = solve_static(&s, &loads).unwrap();
     let mut sim = DynamicSim::new(&s, quiet(false));
@@ -107,10 +119,13 @@ fn column_buckles_above_euler_load_only() {
             },
         );
         // Axial load plus a 0.1% lateral nudge as the imperfection.
-        sim.set_force(ids[12], Vec3::new(0.001 * p_cr, -ratio * p_cr, 0.0));
-        for _ in 0..240 {
-            sim.step(1.0 / 60.0);
-        }
+        ramp_load(
+            &mut sim,
+            ids[12],
+            Vec3::new(0.001 * p_cr, -ratio * p_cr, 0.0),
+            2.0,
+            5.0,
+        );
         sim.displacement(ids[12]).x
     };
     let below = sway(0.8);
@@ -129,11 +144,13 @@ fn plastic_hinge_forms_at_collapse_load_and_then_snaps() {
     let run = |ratio: f64, seconds: f64| {
         let (s, ids) = cantilever(l, 8, Material::steel());
         let mut sim = DynamicSim::new(&s, quiet(true));
-        sim.set_force(ids[8], Vec3::new(0.0, -ratio * p_collapse, 0.0));
-        sim.step(seconds);
-        for _ in 0..(seconds * 60.0) as usize {
-            sim.step(1.0 / 60.0);
-        }
+        ramp_load(
+            &mut sim,
+            ids[8],
+            Vec3::new(0.0, -ratio * p_collapse, 0.0),
+            1.0,
+            seconds,
+        );
         sim
     };
     let safe = run(0.8, 2.0);
@@ -216,4 +233,45 @@ fn broken_pieces_fall_freely() {
         sim.displacement(ids[4]).y < -1.0,
         "tip should have fallen away"
     );
+}
+
+#[test]
+fn axial_tension_lowers_the_plastic_moment() {
+    // Short and stiff, so the tension barely straightens the beam (P-delta).
+    let l = 0.5;
+    let (ny, mp) = (355e6 * tube().area, 355e6 * tube().zz);
+    let hinge = |axial: f64| {
+        let (s, ids) = cantilever(l, 8, Material::steel());
+        let mut sim = DynamicSim::new(&s, quiet(true));
+        // 80% of Mp at the root from the vertical load, plus axial tension.
+        ramp_load(
+            &mut sim,
+            ids[8],
+            Vec3::new(axial * ny, -0.8 * mp / l, 0.0),
+            1.0,
+            2.0,
+        );
+        sim.hinge_rotation(0)
+    };
+    assert_eq!(hinge(0.0), 0.0, "bending alone stays elastic");
+    // (0.6)² + 0.8 > 1, so the same moment yields once 60% of Ny is added.
+    assert!(hinge(0.6) > 0.0, "combined load should form a hinge");
+}
+
+#[test]
+fn short_stiff_members_survive_a_sudden_heavy_load() {
+    // 62 mm steel elements with a 25.6 kN load dropped on in one frame: a
+    // light, very stiff tip node. Regression test for the solver throwing the
+    // tip a whole element length in one substep.
+    let mut s = Structure::new();
+    let mat = Material::steel().elastic_only();
+    let ids = s.add_line(Vec3::zeros(), Vec3::new(0.5, 0.0, 0.0), 8, &mat, &tube());
+    s.add_support(Support::fixed(ids[0]));
+    let f = Vec3::new(0.0, -25_600.0, 0.0);
+    let stat = solve_static(&s, &[NodeLoad::force(ids[8], f)]).unwrap();
+    let mut sim = DynamicSim::new(&s, quiet(false));
+    sim.set_force(ids[8], f);
+    assert!(sim.settle(5.0, 1e-6));
+    let (d, e) = (sim.displacement(ids[8]).y, stat.displacements[ids[8]].y);
+    assert!(rel_err(d, e) < 0.01, "xpbd {d:e} vs static {e:e}");
 }

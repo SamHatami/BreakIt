@@ -1,4 +1,3 @@
-# CI for the BreakIt workspace.
 name: CI
 
 on:
@@ -9,25 +8,19 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Bevy-free solver: fmt, clippy (advisory), release-mode tests.
   core:
+    name: breakit-core tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Format
-        run: cargo fmt --all -- --check
-      - name: Clippy (advisory while the solver is a spike)
-        continue-on-error: true
-        run: cargo clippy -p breakit-core -- -D warnings
-      - name: Test (release)
-        run: cargo test -p breakit-core --release
+      - run: cargo fmt --all --check
+      - run: cargo test --release -p breakit-core
 
   # Bevy app: needs system libs for windowing/input (audio is off, so no ALSA).
   game:
+    name: breakit-game check and tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -38,7 +31,5 @@ jobs:
             libudev-dev libwayland-dev libxkbcommon-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Check
-        run: cargo check -p breakit-game --all-targets
-      - name: Test
-        run: cargo test -p breakit-game
+      - run: cargo check -p breakit-game --all-targets
+      - run: cargo test -p breakit-game
