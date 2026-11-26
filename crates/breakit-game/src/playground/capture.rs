@@ -46,6 +46,7 @@ fn script(
     sheets: Res<Sheets>,
     mut table: ResMut<PlayTable>,
     mut bench: ResMut<Bench>,
+    mut design: ResMut<crate::design::Design>,
     sim: Option<Res<Simulation>>,
     mut actions: MessageWriter<UiAction>,
     mut exit: MessageWriter<AppExit>,
@@ -80,6 +81,9 @@ fn script(
         }
         2 if waited >= 20 && *screen.get() == Screen::Build => {
             *table = PlayTable::builtin(0);
+            // Without the starter's three 100 kN loads, so wind and the
+            // truck are what the bridge feels.
+            design.loads.iter_mut().for_each(|l| *l = Vec3::ZERO);
             orbit.focus = Vec3::new(0.0, 0.3, 0.0);
             orbit.distance = 13.0;
             orbit.yaw = 0.55;
@@ -90,7 +94,7 @@ fn script(
         3 if waited >= 20 && *screen.get() == Screen::Playground => {
             bench.setup.wind.on = true;
             bench.setup.wind.speed = 25.0;
-            bench.setup.traffic.mass = 30.0;
+            bench.setup.traffic.mass = 20.0;
             bench.pick = Some(Pick::Member(3));
             bench.trace = Some(Trace::new(Probe::member(3)[0], TRACE_SECONDS));
             next(&mut s);
@@ -104,6 +108,7 @@ fn script(
             next(&mut s);
         }
         6 if waited >= 5 => {
+            play(PlayAction::Restart);
             bench.setup.wind.on = false;
             bench.setup.quake.on = true;
             bench.setup.quake.amplitude = 0.5;
@@ -113,21 +118,27 @@ fn script(
             bench.trace = Some(Trace::new(Probe::node(3)[1], TRACE_SECONDS));
             next(&mut s);
         }
-        7 if t - s.t0 > 3.0 => {
+        7 if waited >= 3 && t > 3.0 => {
             shot(&mut commands, "playground-2-quake.png");
             next(&mut s);
         }
         8 if waited >= 5 => {
+            play(PlayAction::Restart);
             bench.setup.quake.on = false;
             bench.deform = 0;
             bench.setup.drop.mass = 10_000.0;
             bench.setup.drop.height = 3.0;
-            play(PlayAction::DropWeight);
             next(&mut s);
         }
-        9 if t - s.t0 > 0.9 => {
-            shot(&mut commands, "playground-3-drop.png");
+        9 if waited >= 3 && t > 0.8 && t < 5.0 => {
+            play(PlayAction::DropWeight);
             next(&mut s);
+            s.step = 90;
+        }
+        90 if t - s.t0 > 0.9 => {
+            shot(&mut commands, "playground-3-drop.png");
+            s.step = 10;
+            s.since = s.frame;
         }
         10 if waited >= 5 => {
             play(PlayAction::NextTable);

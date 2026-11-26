@@ -785,7 +785,7 @@ pub fn update_readouts(
     if let Some(tr) = trace {
         let cols = tr.columns(GRAPH_COLUMNS);
         let (lo, hi) = tr.range();
-        let span = (hi - lo).max(1e-9);
+        let span = (hi - lo).max(1.0);
         for (bar, mut node) in &mut bars {
             let (top, h) = match cols.get(bar.0).copied().flatten() {
                 Some(v) if v >= 0.0 => ((hi - v) / span, v / span),
