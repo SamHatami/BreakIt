@@ -287,7 +287,7 @@ impl LinSolver {
         self.want_factor = true;
     }
 
-    /// Solve A x = b for the matrix assembled since the last [`clear`].
+    /// Solve A x = b for the matrix assembled since the last [`clear`](Self::clear).
     /// Returns false if the matrix is
     /// not positive definite.
     pub fn solve(&mut self, b: &[f64], x: &mut [f64], policy: &Policy) -> bool {

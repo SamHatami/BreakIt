@@ -140,21 +140,12 @@ impl StructureVisual {
 #[derive(Resource, Default)]
 pub struct MemberFrame(pub VisualFrame);
 
-#[derive(Resource, Debug, Clone)]
+#[derive(Resource, Debug, Clone, Default)]
 pub struct RenderSettings {
     /// Colour members by utilisation instead of showing their material.
     pub stress_view: bool,
     /// Members to highlight (hover, selection).
     pub highlighted: Vec<usize>,
-}
-
-impl Default for RenderSettings {
-    fn default() -> Self {
-        Self {
-            stress_view: false,
-            highlighted: Vec::new(),
-        }
-    }
 }
 
 /// What the renderer did last frame, for HUDs and benchmarks.

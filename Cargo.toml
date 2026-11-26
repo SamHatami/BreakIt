@@ -12,6 +12,25 @@ members = [
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/SamHatami/BreakIt"
+# Bevy 0.20.1 needs 1.97.1. The toolchain CI and agents use is pinned in
+# rust-toolchain.toml.
+rust-version = "1.97.1"
+
+# Every crate opts in with `[lints] workspace = true`. CI runs clippy with
+# `-D warnings`, so a warning here fails the build. Silence a lint locally with
+# `#[expect(clippy::..., reason = "...")]` on the item, not crate-wide.
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+# Bevy systems take many `Query`/`Res` parameters and nested query types by
+# design, and solver kernels pass many scalars; these two lints are noise here.
+too_many_arguments = "allow"
+type_complexity = "allow"
+# Leftovers that must not reach main.
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
 
 [workspace.dependencies]
 nalgebra = "0.33"

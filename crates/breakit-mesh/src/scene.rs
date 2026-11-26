@@ -393,7 +393,7 @@ impl VisualScene {
                             profile: bar,
                             kind: MaterialKind::Steel,
                             flags: flags::REBAR,
-                            seed: rng.next(),
+                            seed: rng.next_f32(),
                             born: self.time,
                             state: MemberVisualState::default(),
                             ring: Vec3::ZERO,

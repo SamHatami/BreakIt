@@ -5,8 +5,12 @@ description = "Structural solver for BreakIt: 3D beam frames, static FEM and rea
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 faer = "0.22"
 nalgebra.workspace = true
 rayon = "1"
+
+[lints]
+workspace = true

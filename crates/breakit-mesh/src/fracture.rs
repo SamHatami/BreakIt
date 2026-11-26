@@ -91,12 +91,12 @@ impl Rng {
     pub fn new(seed: u32) -> Self {
         Self(seed.wrapping_mul(0x9e37_79b9) ^ 0x85eb_ca6b)
     }
-    pub fn next(&mut self) -> f32 {
+    pub fn next_f32(&mut self) -> f32 {
         self.0 = self.0.wrapping_add(0x6d2b_79f5);
         hash01(self.0)
     }
     pub fn range(&mut self, lo: f32, hi: f32) -> f32 {
-        lo + (hi - lo) * self.next()
+        lo + (hi - lo) * self.next_f32()
     }
     pub fn signed(&mut self) -> f32 {
         self.range(-1.0, 1.0)
@@ -293,7 +293,7 @@ pub fn fracture(input: &BreakInput) -> Fracture {
     let width = 2.0 * profile.half_width();
     let size = depth.max(width);
     let sb = position.clamp(0.02, 0.98);
-    let fseed = rng.next();
+    let fseed = rng.next_f32();
     let loops = profile.outline();
     let cap = profile.cap();
     let none = |p: Vec3| p;
@@ -393,7 +393,7 @@ pub fn fracture(input: &BreakInput) -> Fracture {
             );
             // Splinters: thin slivers sticking out of both faces.
             for (piece, dir) in [(&mut a, 1.0f32), (&mut b, -1.0f32)] {
-                let n_spl = 7 + (rng.next() * 5.0) as usize;
+                let n_spl = 7 + (rng.next_f32() * 5.0) as usize;
                 for _ in 0..n_spl {
                     let p = Vec2::new(
                         rng.signed() * profile.half_depth(),
@@ -536,7 +536,7 @@ pub fn fracture(input: &BreakInput) -> Fracture {
                 vel_at(0.5 + zb * 0.5) + kick(&mut rng, 1.0, 0.3),
                 spin(&mut rng, 0.4),
             ));
-            let n_chunks = 4 + (rng.next() * 4.0) as usize;
+            let n_chunks = 4 + (rng.next_f32() * 4.0) as usize;
             for _ in 0..n_chunks {
                 let s = rng.range(za, zb);
                 let off = Vec2::new(
