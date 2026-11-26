@@ -1,0 +1,17 @@
+[package]
+name = "breakit-audio"
+version = "0.1.0"
+description = "Engine-free procedural audio for BreakIt: material stress and fracture sounds, debris impacts, hangar ambience, test rigs and UI, synthesised in real time."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["device"]
+# Real-time output through the system's default sound device. Without it the
+# crate still synthesises and renders to WAV (tests, CI, headless capture).
+device = ["dep:cpal"]
+
+[dependencies]
+breakit-core = { path = "../breakit-core" }
+cpal = { version = "0.17", optional = true }

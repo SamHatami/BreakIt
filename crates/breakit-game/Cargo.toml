@@ -8,6 +8,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+breakit-audio = { path = "../breakit-audio" }
 breakit-core = { path = "../breakit-core" }
 breakit-lab = { path = "../breakit-lab" }
 breakit-render = { path = "../breakit-render" }

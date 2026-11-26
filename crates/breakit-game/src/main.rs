@@ -12,6 +12,7 @@ mod design;
 mod hud;
 mod perf;
 mod render;
+mod sound;
 mod visuals;
 
 use bevy::prelude::*;
@@ -46,6 +47,7 @@ fn main() {
             hud::HudPlugin,
             capture::CapturePlugin,
             perf::PerfPlugin,
+            sound::SoundPlugin,
         ))
         .add_systems(Update, (toggle_mode, cycle_table))
         .run();
