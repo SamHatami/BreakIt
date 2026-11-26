@@ -7,7 +7,10 @@
 //! render code.
 
 use bevy::prelude::*;
-use breakit_core::{solve_static, Block, BreakCause, DynamicSim, Ground, NodeLoad, SimConfig};
+use breakit_core::{
+    solve_static_with_springs, Block, BreakCause, DynamicSim, Ground, NodeLoad, NodeSpring,
+    SimConfig,
+};
 use breakit_lab::PlayTable;
 use breakit_playground::Live;
 use breakit_scenario::TestRun;
@@ -211,11 +214,18 @@ pub fn static_analysis(
         return;
     }
     let extra: Vec<NodeLoad> = sheets.current().static_loads(&design);
-    *state = compute_static(&design, scale.0, &extra);
+    let springs = sheets.current().static_springs(&design);
+    *state = compute_static(&design, scale.0, &extra, &springs);
 }
 
-/// Pure static analysis: self weight, the player's loads and `extra`.
-pub fn compute_static(design: &Design, scale: f32, extra: &[NodeLoad]) -> FrameState {
+/// Pure static analysis: self weight, the player's loads and `extra`, with
+/// `springs` as extra elastic supports (floats).
+pub fn compute_static(
+    design: &Design,
+    scale: f32,
+    extra: &[NodeLoad],
+    springs: &[NodeSpring],
+) -> FrameState {
     let mut state = FrameState {
         positions: design.nodes.clone(),
         members: vec![MemberState::default(); design.beams.len()],
@@ -229,7 +239,7 @@ pub fn compute_static(design: &Design, scale: f32, extra: &[NodeLoad]) -> FrameS
     let mut loads = structure.self_weight_loads(GRAVITY as f64);
     loads.extend(design.node_loads());
     loads.extend_from_slice(extra);
-    match solve_static(&structure, &loads) {
+    match solve_static_with_springs(&structure, &loads, springs) {
         Ok(r) => {
             state.displacements = r.displacements.iter().map(|&d| from_core(d)).collect();
             for (i, p) in state.positions.iter_mut().enumerate() {
@@ -412,7 +422,7 @@ mod tests {
     #[test]
     fn static_state_reports_utilization_and_sag() {
         let d = Design::starter_bridge();
-        let s = compute_static(&d, 1.0, &[]);
+        let s = compute_static(&d, 1.0, &[], &[]);
         assert!(s.error.is_none(), "{:?}", s.error);
         assert_eq!(s.members.len(), d.beams.len());
         assert!(s.max_utilization() > 0.0);
@@ -431,7 +441,7 @@ mod tests {
         let a = d.add_node(Vec3::ZERO);
         let b = d.add_node(Vec3::X);
         d.add_beam(a, b, BeamKind::part("steel-tube-m"));
-        let s = compute_static(&d, 1.0, &[]);
+        let s = compute_static(&d, 1.0, &[], &[]);
         assert!(s.error.is_some());
     }
 

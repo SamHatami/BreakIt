@@ -44,6 +44,7 @@ The load physics is `breakit_core::loads` (see `docs/loads.md`); `breakit-scenar
 - `Water`: a core `Water` case in the flume: bed, still level (filled over `ramp`), current and a `Surge` (solitary wave) or `Regular` (Airy) waves from the paddle at `paddle` (default -13.6 m, the lab flume's upstream wall). Morison drag and inertia plus buoyancy on every submerged member; payloads feel no water.
 - `DeckLoad` (uniform N/m along the lane), the proof test's deck stand-in and sandbox player loads stay in `Binding::deck_forces`: the core has no uniform deck load.
 - Proof test: the traffic cases are switched off (`factor` 0) and the deck stand-in takes over; the `LoadSet` factor follows the proof ramp.
+- Floats: any sealed tube in a `Water` case displaces water (core `Water`, see `docs/water.md`). The build-mode static check sees still water as a spring bed: `Binding::static_support` gives the buoyant force at the built position and a vertical water-plane spring per node in the surface (core `Water::static_support`), plus a soft horizontal spring (`FLOAT_DRIFT_STIFFNESS`) so a raft held only by floats still solves; the game passes them to `solve_static_with_springs`. Start the water case before the clock (`start: -settle`, `ramp: 0`) when the structure floats, so the water is there while its weight comes on.
 - `Binding::forces_at(scenario, t)` is a static preview (axle loads by the lever rule, no bounce or shaking) for build mode's static check and the brief. The test itself runs the core models.
 - `TestRun::rig_state()` and `vehicles()` give the rigs (trucks, table) for drawing; before the test, `Binding::load_set` tells the lab which rigs to roll in.
 - Payloads are point masses on the nearest node (`DynamicSim::add_point_mass`), so their weight comes from gravity and they have inertia when shaken.
@@ -61,15 +62,19 @@ The load physics is `breakit_core::loads` (see `docs/loads.md`); `breakit-scenar
 | | | Unbraced (sway) platform, 60x5 tube | the deck amplifies the shaking, the pump slides off at 2.1 s: fail |
 | Q-01 | Water tower on the shake table: 4 t tank at 6 m, 0.4 g at 1.5 Hz | 2-level braced mast, 25x2.5 tube | pass, 2 stars, 782 |
 
-| W-01 | Billboard in the fan wall: 6 x 3 m board (1.2 t, bolted, C_d 1.8) 8 m up, 40 m/s with 15 % gusts along +x | 4-leg tower, 2 storeys, 35x3.5 tube | pass, 3 stars, 929, util 0.49 |
-| | | 40x4 tube | pass, 2 stars, 762 (heavy) |
-| | | 30x3 tube | pass, 2 stars, 806, util 0.93 |
-| | | 25x2.5 tube | survives yielding, board sways 400 mm, 1 star |
-| | | 20x2 tube | blows over at 3.3 s |
+| W-01 | Billboard in the fan wall: 6 x 3 m board (1.2 t, bolted, C_d 1.8) 8 m up, 40 m/s with 15 % gusts along +x | 4-leg tower, 2 storeys, 30x3 tube | pass, 3 stars, 982, util 0.54 |
+| | | 35x3.5 tube | pass, 2 stars, 839 |
+| | | 40x4 tube | pass, 2 stars, 714 (heavy) |
+| | | 25x2.5 tube | survives yielding (util 1.06), 2 stars, 750 |
+| | | 20x2 tube | blows over at 3.5 s |
 | F-01 | Pump jetty in the flume: 3 t pump house resting (friction 0.35) on a deck 1 m up, legs from the bed at -3.2 m, 2.6 m deep water, 1.5 m/s current, 1.8 m surge whose crest reaches the deck | X-braced legs, 30x3 tube | pass, 3 stars, 916, util 0.70 |
 | | | X-braced, 40x4 | pass, 2 stars, 739 |
 | | | X-braced, 25x2.5 | yields (util 1.19), pump drifts 89 mm, 1 star |
 | | | Unbraced legs, 60x5 | pass, 2 stars, 799, pump drifts 74 mm |
+| F-02 | Floating footbridge: 6.3 m path across the flume, moored only by two pins on the near bank (the far bank takes nothing), 2 kN/m crowd, 0.6 m/s current, 0.4 m waves along the flume | Two large pontoons (813x16, 4.8 m) at the middle and far end, frame 30x3 | pass, 3 stars, sag 248 mm |
+| | | Same pontoons at stations 2 and 5 | holds, path sinks 563 mm at the free end: 2 stars |
+| | | Three small pontoons (406x8) | not enough lift, sinks at 2.7 s |
+| | | No pontoons | swings down about the pins at once |
 
 Q-01 is easy for a braced tower; the budget is what bites. Make it harder with a heavier tank, a lower frequency nearer the tower's own, or fewer footings once the part catalog has thinner sections.
 
