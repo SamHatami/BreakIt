@@ -1,0 +1,14 @@
+[package]
+name = "breakit-game"
+version = "0.1.0"
+description = "BreakIt game: Bevy app shell (camera, build mode, frame rendering) on top of breakit-core."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+breakit-core = { path = "../breakit-core" }
+# Pinned on purpose: Bevy breaks its API every release. Upgrade deliberately,
+# following that release's migration guide.
+bevy = { version = "=0.20.1", default-features = false, features = ["3d", "ui"] }

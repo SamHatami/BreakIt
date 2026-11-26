@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/breakit-core"]
+members = ["crates/breakit-core", "crates/breakit-game"]
 
 [workspace.package]
 edition = "2021"
@@ -9,3 +9,11 @@ repository = "https://github.com/SamHatami/BreakIt"
 
 [workspace.dependencies]
 nalgebra = "0.33"
+
+# Bevy is slow in debug builds; optimise dependencies but keep our own code
+# quick to compile.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
