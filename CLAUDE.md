@@ -8,3 +8,4 @@
 - Material and damage models: `docs/materials.md`.
 - Member visuals (GPU deformation, damage looks, breaking): `docs/visuals.md`. `GpuMember` in `breakit-mesh` and `Member` in `breakit-render/src/member.wesl` must stay field-for-field identical.
 - Scenario loads (wind, quake, water, vehicles, impacts) and their rig hooks: `docs/loads.md`.
+- The hall and play table: `docs/lab.md`. The structure is full size; the hall is drawn `model_scale` (20) times larger so the table reads as a 1:20 model.

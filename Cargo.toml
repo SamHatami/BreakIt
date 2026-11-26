@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/breakit-core",
     "crates/breakit-game",
+    "crates/breakit-lab",
     "crates/breakit-mesh",
     "crates/breakit-render",
 ]
