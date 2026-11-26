@@ -64,7 +64,7 @@ fn feed_renderer(
     };
 
     frame.0 = match &sim {
-        Some(sim) if simulating => current.frame_from_sim(&sim.sim),
+        Some(sim) if simulating => current.frame_from_sim(sim.sim()),
         _ => {
             let utilization: Vec<f32> = state.members.iter().map(|m| m.utilization).collect();
             let positions = if state.positions.len() == design.nodes.len() {

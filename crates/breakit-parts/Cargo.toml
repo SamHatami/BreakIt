@@ -1,0 +1,13 @@
+[package]
+name = "breakit-parts"
+version = "0.1.0"
+description = "Engine-free building parts for BreakIt: the part catalog, standard section families, sandbox limits and costs, all resolving to breakit-core members."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+breakit-core = { path = "../breakit-core" }
+breakit-mesh = { path = "../breakit-mesh" }
+serde = { version = "1", features = ["derive"] }
+ron = "0.12"
