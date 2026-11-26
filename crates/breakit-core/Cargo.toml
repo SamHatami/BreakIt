@@ -9,3 +9,4 @@ repository.workspace = true
 [dependencies]
 faer = "0.22"
 nalgebra.workspace = true
+rayon = "1"

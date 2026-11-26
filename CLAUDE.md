@@ -8,3 +8,4 @@
 - Material and damage models: `docs/materials.md`.
 - Scenarios, limits and scoring: `docs/scenarios.md`. Scenario data and grading live in the engine-free `breakit-scenario` crate.
 - Member visuals (GPU deformation, damage looks, breaking): `docs/visuals.md`. `GpuMember` in `breakit-mesh` and `Member` in `breakit-render/src/member.wesl` must stay field-for-field identical.
+- The hall and play table: `docs/lab.md`. The structure is full size; the hall is drawn `model_scale` (20) times larger so the table reads as a 1:20 model.

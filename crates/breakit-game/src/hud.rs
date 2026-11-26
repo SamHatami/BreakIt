@@ -40,7 +40,7 @@ fn spawn_hud(mut commands: Commands) {
 const BUILD_HELP: &str = "\
 LMB add node / select, clicks chain beams   Esc deselect
 S support   F load   X delete node   M material   C clear
-Tab plane   Q/E plane down/up   D deflection view
+Tab plane   Q/E plane down/up   D deflection view   T table   F3 frame time
 N next scenario   B challenge / sandbox
 RMB orbit   MMB or Shift+RMB pan   wheel zoom
 Space run the test";
