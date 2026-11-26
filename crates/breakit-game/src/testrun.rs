@@ -1,32 +1,27 @@
-//! The test run: applies each load case at its time, records what happens
-//! for the chart recorder and the report, slows down on the first break,
-//! and ends the run.
+//! The test run on screen: mirrors the scenario run's timeline into the
+//! chart recorder and the log, slows down on the first break, and opens
+//! the report once the outcome has played out. The loads and the grading
+//! are `breakit_scenario::TestRun`'s.
 
 use bevy::prelude::*;
-use breakit_core::Vec3 as CoreVec3;
 
-use crate::analysis::{cause_label, BreakitSet, FrameState, SimClock, Simulation, SPEEDS};
-use crate::design::{to_core, Design};
+use crate::analysis::{BreakitSet, FrameState, SimClock, Simulation, SPEEDS};
 use crate::flow::{Screen, UiAction};
-use crate::scenario::{Sheets, TestEvent, TestRecord, TimedEvent, CHART_COLUMNS};
+use crate::scenario::{Sheets, TestOutcome, TestRecord, TimedEvent, CHART_COLUMNS};
 
 pub struct TestRunPlugin;
 
 impl Plugin for TestRunPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TestRecord>()
+            .init_resource::<TestOutcome>()
             .init_resource::<Heatmap>()
             .init_resource::<SlowMo>()
             .add_systems(OnEnter(Screen::Test), begin_record)
             .add_systems(OnEnter(Screen::Report), freeze)
             .add_systems(
                 Update,
-                (
-                    test_actions,
-                    apply_load_cases.before(BreakitSet::Physics),
-                    record.after(BreakitSet::Physics),
-                )
-                    .run_if(in_state(Screen::Test)),
+                (test_actions, record.after(BreakitSet::Physics)).run_if(in_state(Screen::Test)),
             );
     }
 }
@@ -52,27 +47,21 @@ impl SlowMo {
 /// Slow motion speed and how long it lasts, real seconds.
 const SLOWMO_SPEED: f32 = 0.25;
 const SLOWMO_SECONDS: f32 = 2.5;
-/// Simulated seconds the run continues after the first break, so the
-/// collapse plays out before the report.
-const AFTER_BREAK: f32 = 3.0;
-
-/// Index of the current load case in the record (applied once per change).
-#[derive(Default)]
-struct Applied(Option<usize>);
-
 fn begin_record(
     mut rec: ResMut<TestRecord>,
-    design: Res<Design>,
+    mut outcome: ResMut<TestOutcome>,
+    check: Res<crate::scenario::ScenarioCheck>,
     mut slowmo: ResMut<SlowMo>,
     mut heat: ResMut<Heatmap>,
 ) {
     *rec = TestRecord {
-        cost: design.cost(),
+        cost: check.bill.total() as f32,
         chart: vec![0.0; CHART_COLUMNS],
         ..Default::default()
     };
     *slowmo = SlowMo::default();
     heat.0 = false;
+    outcome.0 = None;
 }
 
 fn freeze(mut clock: ResMut<SimClock>) {
@@ -109,117 +98,54 @@ fn test_actions(
     }
 }
 
-fn apply_load_cases(
-    sheets: Res<Sheets>,
-    design: Res<Design>,
-    sim: Option<ResMut<Simulation>>,
-    mut rec: ResMut<TestRecord>,
-    mut applied: Local<Applied>,
-) {
-    let Some(mut sim) = sim else { return };
-    let s = sheets.current();
-    let t = sim.sim.time() as f32;
-    if t == 0.0 {
-        applied.0 = None;
-    }
-    let case = s.case_at(t);
-    if case == applied.0 || case.is_none() {
-        return;
-    }
-    applied.0 = case;
-    let c = case.unwrap();
-    let mut forces: Vec<CoreVec3> = design.loads.iter().map(|&f| to_core(f)).collect();
-    for (n, f) in s.case_forces(c) {
-        if let Some(slot) = forces.get_mut(n) {
-            *slot += to_core(f);
-        }
-    }
-    for (n, f) in forces.into_iter().enumerate() {
-        sim.sim.set_force(n, f);
-    }
-    rec.events.push(TimedEvent {
-        time: t,
-        event: TestEvent::CaseStarted { case: c },
-    });
-}
-
 #[allow(clippy::too_many_arguments)]
 fn record(
     time: Res<Time>,
     sheets: Res<Sheets>,
-    design: Res<Design>,
     state: Res<FrameState>,
     sim: Option<Res<Simulation>>,
     mut rec: ResMut<TestRecord>,
     mut clock: ResMut<SimClock>,
     mut slowmo: ResMut<SlowMo>,
     mut next: ResMut<NextState<Screen>>,
+    mut outcome: ResMut<TestOutcome>,
 ) {
     let Some(sim) = sim else { return };
     let s = sheets.current();
-    let t = sim.sim.time() as f32;
+    let run = sim.run();
+    let t = run.time() as f32;
     let total = s.total_duration();
 
-    // Utilisation and sag.
+    // The chart: worst member per column, test and proof test alike.
     let util = state.max_utilization();
-    rec.peak_utilization = rec.peak_utilization.max(util);
-    // Sag stops counting at the first break: debris falling is not sag.
-    let intact = rec.first_break.is_none();
-    for i in (0..s.load_points.len()).filter(|_| intact) {
-        let n = s.load_point_node(i);
-        if let (Some(rest), Some(now)) = (design.nodes.get(n), state.positions.get(n)) {
-            rec.peak_sag = rec.peak_sag.max(rest.y - now.y);
-        }
-    }
-    if total > 0.0 {
+    if total > 0.0 && t >= 0.0 {
         let col = ((t / total) * CHART_COLUMNS as f32) as usize;
         if let Some(c) = rec.chart.get_mut(col.min(CHART_COLUMNS - 1)) {
             *c = c.max(util);
         }
     }
-    let yielded = rec
-        .events
-        .iter()
-        .any(|e| matches!(e.event, TestEvent::FirstYield { .. }));
-    if !yielded {
-        if let Some((m, u)) = state
-            .members
-            .iter()
-            .enumerate()
-            .filter(|(_, m)| !m.broken && m.utilization >= 1.0)
-            .map(|(i, m)| (i, m.utilization))
-            .next()
-        {
-            rec.events.push(TimedEvent {
-                time: t,
-                event: TestEvent::FirstYield {
-                    member: m,
-                    utilization: u,
-                },
-            });
-        }
-    }
 
-    // Breaks.
-    let known = rec.broken_members().len();
-    let events = sim.sim.break_events();
-    for e in &events[known.min(events.len())..] {
-        rec.events.push(TimedEvent {
-            time: e.time as f32,
-            event: TestEvent::Broke {
-                member: e.member,
-                cause: cause_label(&e.cause),
-            },
-        });
-        if rec.first_break.is_none() {
-            rec.first_break = Some(e.time as f32);
-            *slowmo = SlowMo {
-                remaining: SLOWMO_SECONDS,
-                restore: clock.speed,
-            };
-            clock.speed = SLOWMO_SPEED;
-        }
+    // Read-outs from the run.
+    let m = run.measured();
+    rec.peak_utilization = m.peak_utilization as f32;
+    rec.peak_sag = m
+        .peak_deck_sag
+        .or_else(|| m.payload_drift.iter().copied().reduce(f64::max))
+        .unwrap_or(0.0) as f32;
+    let first_break = m.first_break.as_ref().map(|b| b.0 as f32);
+    if rec.first_break.is_none() && first_break.is_some() {
+        *slowmo = SlowMo {
+            remaining: SLOWMO_SECONDS,
+            restore: clock.speed,
+        };
+        clock.speed = SLOWMO_SPEED;
     }
+    rec.first_break = first_break;
+    rec.events = run
+        .timeline()
+        .iter()
+        .filter_map(|e| TimedEvent::from_entry(s, e))
+        .collect();
 
     // Slow motion runs on real time.
     if slowmo.active() && !clock.paused {
@@ -229,10 +155,8 @@ fn record(
         }
     }
 
-    // End of the run.
-    let done = t >= total || rec.first_break.is_some_and(|b| t >= b + AFTER_BREAK);
-    if done {
-        rec.completed = t >= total && rec.first_break.is_none();
+    if run.is_done() {
+        outcome.0 = Some(run.report());
         next.set(Screen::Report);
     }
 }

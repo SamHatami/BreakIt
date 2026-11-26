@@ -8,6 +8,7 @@
 
 use bevy::prelude::*;
 use breakit_core::{solve_static, BreakCause, DynamicSim, NodeLoad, SimConfig};
+use breakit_scenario::TestRun;
 
 use crate::design::{from_core, to_core, Design};
 use crate::flow::Screen;
@@ -115,16 +116,28 @@ pub const SPEEDS: [f32; 5] = [0.125, 0.25, 0.5, 1.0, 2.0];
 /// Gravity used everywhere, m/s^2.
 pub const GRAVITY: f32 = 9.81;
 
-/// Live real-time simulation, present only in simulate mode.
+/// Live real-time simulation, present only in a test and its report: the
+/// sheet's graded [`TestRun`], which applies the scenario's loads (and in
+/// the sandbox the player's own).
 #[derive(Resource)]
 pub struct Simulation {
-    pub sim: DynamicSim,
+    run: Box<TestRun>,
     seen_breaks: usize,
 }
 
+impl Simulation {
+    pub fn sim(&self) -> &DynamicSim {
+        self.run.sim()
+    }
+
+    pub fn run(&self) -> &TestRun {
+        &self.run
+    }
+}
+
 /// Computes the static response of the design when it, the sheet, or the
-/// deflection scale changes. On a sheet, the check previews its heaviest
-/// load case.
+/// deflection scale changes. The check previews the sheet's loads (see
+/// [`crate::scenario::Scenario::static_loads`]).
 pub fn static_analysis(
     design: Res<Design>,
     scale: Res<DeflectionScale>,
@@ -134,17 +147,7 @@ pub fn static_analysis(
     if state.revision == Some(design.revision) && !scale.is_changed() && !sheets.is_changed() {
         return;
     }
-    let s = sheets.current();
-    let extra: Vec<NodeLoad> = s
-        .heaviest_case()
-        .map(|c| {
-            s.case_forces(c)
-                .into_iter()
-                .filter(|(n, f)| *n < design.nodes.len() && *f != Vec3::ZERO)
-                .map(|(n, f)| NodeLoad::force(n, to_core(f)))
-                .collect()
-        })
-        .unwrap_or_default();
+    let extra: Vec<NodeLoad> = sheets.current().static_loads(&design);
     *state = compute_static(&design, scale.0, &extra);
 }
 
@@ -184,19 +187,35 @@ pub fn compute_static(design: &Design, scale: f32, extra: &[NodeLoad]) -> FrameS
 fn start_simulation(
     mut commands: Commands,
     design: Res<Design>,
+    sheets: Res<Sheets>,
     mut state: ResMut<FrameState>,
     mut clock: ResMut<SimClock>,
+    mut next: ResMut<NextState<Screen>>,
 ) {
     *clock = SimClock::default();
     let structure = design.to_structure();
-    let sim = DynamicSim::new(
+    let config = SimConfig {
+        gravity: to_core(Vec3::new(0.0, -GRAVITY, 0.0)),
+        ..Default::default()
+    };
+    let s = sheets.current();
+    let bill = sheets.costs.estimate(&structure);
+    let run = match TestRun::new(
+        &s.def,
         &structure,
-        SimConfig {
-            gravity: to_core(Vec3::new(0.0, -GRAVITY, 0.0)),
-            ..Default::default()
-        },
-    );
-    // Loads are applied per load case by `testrun`.
+        &design.node_loads(),
+        bill,
+        s.mode,
+        config,
+    ) {
+        Ok(run) => run,
+        Err(v) => {
+            // Build mode doesn't offer the test while limits fail.
+            warn!("test blocked: {v:?}");
+            next.set(Screen::Build);
+            return;
+        }
+    };
     *state = FrameState {
         positions: design.nodes.clone(),
         members: vec![MemberState::default(); design.beams.len()],
@@ -204,7 +223,7 @@ fn start_simulation(
         ..Default::default()
     };
     commands.insert_resource(Simulation {
-        sim,
+        run: Box::new(run),
         seen_breaks: 0,
     });
 }
@@ -235,11 +254,15 @@ fn step_simulation(
     };
     *acc = (*acc + dt).min(8.0 * SIM_DT);
     while *acc >= SIM_DT {
-        sim.sim.step(SIM_DT);
+        if sim.run.is_done() {
+            *acc = 0.0;
+            break;
+        }
+        sim.run.step(SIM_DT);
         *acc -= SIM_DT;
     }
 
-    let s = &sim.sim;
+    let s = sim.sim();
     for (i, p) in state.positions.iter_mut().enumerate() {
         *p = from_core(s.position(i));
     }

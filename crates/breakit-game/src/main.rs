@@ -11,6 +11,7 @@ mod camera;
 mod capture;
 mod design;
 mod flow;
+mod guides;
 mod history;
 mod perf;
 mod render;
@@ -54,6 +55,7 @@ fn main() {
             visuals::VisualsPlugin,
             ui::GameUiPlugin,
             capture::CapturePlugin,
+            guides::GuidesPlugin,
             perf::PerfPlugin,
         ))
         .add_systems(Update, cycle_table.run_if(in_state(flow::Screen::Build)))

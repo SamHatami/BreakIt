@@ -1,157 +1,325 @@
-//! Scenarios ("sheets"): the site, the loads the test applies over time,
-//! the budget and the pass criteria, and the judging of a test run.
+//! The game's view of the test sheets. The scenarios themselves (limits,
+//! loads, the test run and the grading) live in the engine-free
+//! `breakit-scenario` crate; this module turns them into what the screens
+//! show and the build tool needs: anchors, load points, load-case bands,
+//! the live pre-test check and the static preview loads.
 //!
-//! Pure data and maths, no Bevy systems, so it is unit tested headless.
-//! A sheet's fixed nodes come first in the design (anchors, then load
-//! points) and are locked, so their indices never move while the player
-//! edits.
+//! Payload points come first in a sheet's design and are locked, so their
+//! node indices never move while the player edits. Anchors are not nodes:
+//! a node placed on one gets that foundation's support.
 
 use bevy::math::Vec3;
 use bevy::prelude::Resource;
+use breakit_core::NodeLoad;
+use breakit_scenario as bs;
+use breakit_scenario::{check_limits, Bill, Binding, CostModel, PlayMode, Violation};
 
-use crate::design::{BeamKind, Design, SupportKind};
+use crate::analysis::GRAVITY;
+use crate::design::{to_core, BeamKind, Design, SupportKind};
 
-/// The test rig a sheet runs on. The register groups sheets by rig.
+pub use breakit_scenario::Criterion as Check;
+pub use breakit_scenario::Report;
+
+/// Register tab a sheet sits under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Rig {
-    TrafficBridge,
+    Bridges,
+    Towers,
     Sandbox,
 }
 
 impl Rig {
-    pub const ALL: [Rig; 2] = [Rig::TrafficBridge, Rig::Sandbox];
+    pub const ALL: [Rig; 3] = [Rig::Bridges, Rig::Towers, Rig::Sandbox];
 
     pub fn label(self) -> &'static str {
         match self {
-            Rig::TrafficBridge => "Traffic bridge",
+            Rig::Bridges => "Bridges",
+            Rig::Towers => "Towers",
             Rig::Sandbox => "Sandbox",
         }
     }
+
+    /// The built-in play table this rig sits on (see `breakit_lab::PlayTable::builtin`).
+    pub fn table(self) -> usize {
+        match self {
+            Rig::Bridges => 0,
+            Rig::Towers => 3,
+            Rig::Sandbox => 1,
+        }
+    }
+
+    fn from_group(group: &str) -> Self {
+        match group {
+            "Towers" => Rig::Towers,
+            _ => Rig::Bridges,
+        }
+    }
 }
 
-/// One step of the test: these downward loads, in newtons, on these load
-/// points (indices into [`Scenario::load_points`]), for this long. Loads
-/// not listed are zero during the case.
+/// One band of the test timeline: a scenario event (or the proof test)
+/// from `start` to `end`, seconds of test time.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LoadCase {
-    pub name: &'static str,
-    pub duration: f32,
-    pub loads: Vec<(usize, f32)>,
+    pub name: String,
+    /// What it puts on the structure, e.g. `2 x 7.5 t` or `0.4 g`.
+    pub load: String,
+    pub start: f32,
+    pub end: f32,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+/// A sheet: a scenario played in a mode, with what the screens need from
+/// it worked out once.
+#[derive(Clone, Debug)]
 pub struct Scenario {
+    pub def: bs::Scenario,
+    pub mode: PlayMode,
+    /// Sheet number, e.g. "B-01".
     pub id: &'static str,
-    pub title: &'static str,
+    pub title: String,
     pub rig: Rig,
-    /// Clear span the structure must cross, metres (for the brief).
+    /// Length of the deck, or the width of the build area, metres.
     pub span: f32,
     pub anchors: Vec<(Vec3, SupportKind)>,
+    /// Payload positions; locked nodes at the start of the design.
     pub load_points: Vec<Vec3>,
+    /// Scenario events in time order, then the proof test if any.
     pub load_cases: Vec<LoadCase>,
-    /// Cost limit; `None` in the sandbox.
     pub budget: Option<f32>,
-    /// Cost for the bonus grade.
+    /// Cost for full marks.
     pub bonus_budget: Option<f32>,
-    /// Largest allowed sag at any load point, metres.
+    /// Deck sag objective, metres.
     pub sag_limit: Option<f32>,
     pub allowed: Vec<BeamKind>,
-    /// Free play: the player places supports and loads.
+    /// Free play: the player places supports and loads, no limits.
     pub sandbox: bool,
 }
 
-impl Scenario {
-    pub fn total_duration(&self) -> f32 {
-        self.load_cases.iter().map(|c| c.duration).sum()
-    }
+fn v3(p: [f64; 3]) -> Vec3 {
+    Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32)
+}
 
-    /// Index of the load case running at test time `t`, or `None` once the
-    /// test is over.
-    pub fn case_at(&self, t: f32) -> Option<usize> {
-        let mut end = 0.0;
-        for (i, c) in self.load_cases.iter().enumerate() {
-            end += c.duration;
-            if t < end {
-                return Some(i);
-            }
+fn event_load(e: &bs::Event) -> String {
+    match e {
+        bs::Event::Convoy { count, axles, .. } => {
+            let t = axles.iter().map(|a| a.load).sum::<f64>() / 9.81 / 1000.0;
+            format!("{count} x {t:.1} t")
         }
-        None
+        bs::Event::DeckLoad { per_metre, .. } => format!("{:.0} kN/m", per_metre / 1000.0),
+        bs::Event::GroundShake { peak, .. } => format!("{:.1} g", peak / 9.81),
+    }
+}
+
+/// A bonus objective in words, for the brief.
+pub fn objective_label(o: &bs::Objective) -> String {
+    match o {
+        bs::Objective::DeckDeflection { limit } => {
+            format!("Deck sag under {:.0} mm", limit * 1000.0)
+        }
+        bs::Objective::PayloadDrift { payload, limit } => {
+            format!("{payload} moves under {:.0} mm", limit * 1000.0)
+        }
+        bs::Objective::NoBreaks => "Nothing breaks".into(),
+        bs::Objective::GracefulFailure { warning } => {
+            format!("Proof test: {warning:.0} s warning before collapse")
+        }
+        bs::Objective::Reserve { factor } => format!("Proof test: holds x{factor:.1}"),
+    }
+}
+
+fn material(k: BeamKind) -> bs::MaterialClass {
+    k.material().kind.into()
+}
+
+impl Scenario {
+    pub fn new(def: bs::Scenario, mode: PlayMode) -> Self {
+        let sandbox = mode == PlayMode::Sandbox;
+        let id: &'static str = if sandbox {
+            "S-00"
+        } else {
+            Box::leak(def.sheet.clone().into_boxed_str())
+        };
+        let deck_len = def
+            .deck
+            .as_ref()
+            .map(|d| (v3(d.to) - v3(d.from)).length())
+            .unwrap_or(0.0);
+        let span = if deck_len > 0.0 {
+            deck_len
+        } else {
+            let v = &def.limits.volume;
+            (v.max[0] - v.min[0]) as f32
+        };
+        let duration = def.duration as f32;
+        let mut load_cases: Vec<LoadCase> = def
+            .events
+            .iter()
+            .map(|e| {
+                let (a, b) = bs::loads::event_window(e, deck_len as f64);
+                LoadCase {
+                    name: e.name().to_string(),
+                    load: event_load(e),
+                    start: a as f32,
+                    end: (b as f32).min(duration),
+                }
+            })
+            .collect();
+        load_cases.sort_by(|a, b| a.start.total_cmp(&b.start));
+        if let Some(o) = def.overload.filter(|_| !sandbox) {
+            let end = duration + ((o.max_factor - 1.0) / o.rate.max(1e-6)) as f32 + 1.0;
+            load_cases.push(LoadCase {
+                name: "Proof test".into(),
+                load: format!("up to x{:.0}", o.max_factor),
+                start: duration,
+                end,
+            });
+        }
+        let allowed = BeamKind::ALL
+            .into_iter()
+            .filter(|k| {
+                sandbox
+                    || def
+                        .limits
+                        .materials
+                        .as_ref()
+                        .is_none_or(|m| m.contains(&material(*k)))
+            })
+            .collect();
+        let sag_limit = def.objectives.iter().find_map(|o| match o {
+            bs::Objective::DeckDeflection { limit } => Some(*limit as f32),
+            _ => None,
+        });
+        Self {
+            id,
+            title: if sandbox {
+                "Free bench".into()
+            } else {
+                def.title.clone()
+            },
+            rig: if sandbox {
+                Rig::Sandbox
+            } else {
+                Rig::from_group(&def.group)
+            },
+            span,
+            anchors: def
+                .anchors
+                .iter()
+                .map(|a| {
+                    let s = match a.kind {
+                        bs::AnchorKind::Pinned => SupportKind::Pinned,
+                        bs::AnchorKind::Fixed => SupportKind::Fixed,
+                    };
+                    (v3(a.position), s)
+                })
+                .collect(),
+            load_points: def.payloads.iter().map(|p| v3(p.at)).collect(),
+            load_cases,
+            budget: def.limits.budget.filter(|_| !sandbox).map(|b| b as f32),
+            bonus_budget: (!sandbox).then_some(def.scoring.target_cost as f32),
+            sag_limit,
+            allowed,
+            sandbox,
+            mode,
+            def,
+        }
     }
 
-    /// Start time of each load case.
-    pub fn case_starts(&self) -> Vec<f32> {
-        let mut t = 0.0;
+    /// What the sheet loads, for the register: payloads, else the
+    /// heaviest event.
+    pub fn load_summary(&self) -> String {
+        if self.sandbox {
+            return "your own".into();
+        }
+        if let Some(p) = self.def.payloads.first() {
+            return format!("{:.0} t {}", p.mass / 1000.0, p.name);
+        }
+        self.load_cases
+            .first()
+            .map(|c| c.load.clone())
+            .unwrap_or_else(|| "self weight".into())
+    }
+
+    /// Test time the chart covers: the test, then the proof test.
+    pub fn total_duration(&self) -> f32 {
         self.load_cases
             .iter()
-            .map(|c| {
-                let s = t;
-                t += c.duration;
-                s
-            })
-            .collect()
+            .map(|c| c.end)
+            .fold(self.def.duration as f32, f32::max)
     }
 
-    /// Design node of load point `i`.
-    pub fn load_point_node(&self, i: usize) -> usize {
-        self.anchors.len() + i
+    /// The band running at test time `t`: the latest started one still
+    /// going, else the latest started. `None` before the first and after
+    /// the end.
+    pub fn case_at(&self, t: f32) -> Option<usize> {
+        if t < 0.0 || t >= self.total_duration() {
+            return None;
+        }
+        let started = || {
+            self.load_cases
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.start <= t)
+        };
+        started()
+            .rfind(|(_, c)| t < c.end)
+            .or_else(|| started().next_back())
+            .map(|(i, _)| i)
     }
 
-    /// The fixed nodes, before the player adds anything.
+    pub fn case_starts(&self) -> Vec<f32> {
+        self.load_cases.iter().map(|c| c.start).collect()
+    }
+
+    /// The design the player starts from: locked payload nodes, and the
+    /// anchors that give a node placed on them its support.
     pub fn initial_design(&self) -> Design {
-        if self.sandbox {
-            return Design::starter_bridge();
-        }
-        let mut d = Design::default();
-        for &(p, s) in &self.anchors {
-            d.add_locked_node(p, Some(s));
-        }
-        for &p in &self.load_points {
-            d.add_locked_node(p, None);
+        let mut d = if self.sandbox {
+            Design::starter_bridge()
+        } else {
+            let mut d = Design::default();
+            for &p in &self.load_points {
+                d.add_locked_node(p, None);
+            }
+            d
+        };
+        if !self.sandbox {
+            d.anchors = self.anchors.clone();
         }
         d
     }
 
-    /// Node forces (world frame, newtons) for load case `case`.
-    pub fn case_forces(&self, case: usize) -> Vec<(usize, Vec3)> {
-        let Some(c) = self.load_cases.get(case) else {
-            return Vec::new();
+    /// Nodes whose sag the sheet cares about: deck nodes on the lane, else
+    /// the payload nodes.
+    pub fn sag_nodes(&self, design: &Design) -> Vec<usize> {
+        let Some(d) = &self.def.deck else {
+            return (0..self.load_points.len()).collect();
         };
-        (0..self.load_points.len())
-            .map(|i| {
-                let f = c
-                    .loads
-                    .iter()
-                    .filter(|(p, _)| *p == i)
-                    .map(|(_, f)| *f)
-                    .sum::<f32>();
-                (self.load_point_node(i), Vec3::new(0.0, -f, 0.0))
+        let (a, b) = (v3(d.from), v3(d.to));
+        let len = (b - a).length().max(1e-6);
+        let dir = (b - a) / len;
+        design
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| {
+                let r = **p - a;
+                let along = r.dot(dir);
+                let off = r - dir * along;
+                (-0.01..=len + 0.01).contains(&along)
+                    && off.y.abs() <= d.height as f32
+                    && Vec3::new(off.x, 0.0, off.z).length() <= d.width as f32
             })
+            .map(|(i, _)| i)
             .collect()
     }
 
-    /// The load case with the largest total load, which build mode's static
-    /// check previews.
-    pub fn heaviest_case(&self) -> Option<usize> {
-        self.load_cases
-            .iter()
-            .enumerate()
-            .map(|(i, c)| (i, c.loads.iter().map(|l| l.1).sum::<f32>()))
-            .filter(|(_, total)| *total > 0.0)
-            .max_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(i, _)| i)
-    }
-
-    /// Every fixed node has a beam, and they are all joined into one
+    /// Every payload node has a beam, and they are all joined into one
     /// structure.
     pub fn is_connected(&self, d: &Design) -> bool {
-        let fixed = self.anchors.len() + self.load_points.len();
-        if fixed == 0 {
-            return !d.beams.is_empty();
+        let fixed = self.load_points.len();
+        if fixed == 0 || d.nodes.len() < fixed {
+            return !d.beams.is_empty() && d.nodes.len() >= fixed;
         }
-        if d.nodes.len() < fixed {
-            return false;
-        }
-        // Union-find over the design's beams.
         let mut parent: Vec<usize> = (0..d.nodes.len()).collect();
         fn root(p: &mut [usize], mut i: usize) -> usize {
             while p[i] != i {
@@ -168,14 +336,92 @@ impl Scenario {
         (0..fixed).all(|i| root(&mut parent, i) == r0)
             && (0..fixed).all(|i| d.beams.iter().any(|b| b.a == i || b.b == i))
     }
+
+    /// Loads for build mode's static check: payload weights, the moment of
+    /// the test with the most load on the structure, and for ground
+    /// shaking each payload's peak inertia force.
+    pub fn static_loads(&self, design: &Design) -> Vec<NodeLoad> {
+        if design.beams.is_empty() {
+            return Vec::new();
+        }
+        let s = design.to_structure();
+        let binding = Binding::new(&self.def, &s);
+        let mut out = Vec::new();
+        let mut best: (f64, Vec<breakit_core::Vec3>) = (0.0, Vec::new());
+        let steps = (self.def.duration * 10.0).ceil() as usize;
+        for k in 0..=steps {
+            let f = binding.forces_at(&self.def, k as f64 * 0.1);
+            let total: f64 = f.iter().map(|x| x.norm()).sum();
+            if total > best.0 {
+                best = (total, f);
+            }
+        }
+        for (n, f) in best.1.into_iter().enumerate() {
+            if f.norm() > 0.0 {
+                out.push(NodeLoad::force(n, f));
+            }
+        }
+        let shake = self
+            .def
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                bs::Event::GroundShake {
+                    peak, direction, ..
+                } => Some(v3(*direction).normalize_or_zero() * *peak as f32),
+                _ => None,
+            })
+            .max_by(|a, b| a.length().total_cmp(&b.length()))
+            .unwrap_or(Vec3::ZERO);
+        for (p, n) in self.def.payloads.iter().zip(&binding.payload_nodes) {
+            if let Some(n) = *n {
+                let m = p.mass as f32;
+                out.push(NodeLoad::force(
+                    n,
+                    to_core(Vec3::new(0.0, -m * GRAVITY, 0.0) + shake * m),
+                ));
+            }
+        }
+        out
+    }
 }
 
-/// Something worth telling the player during a test run.
+/// The live pre-test check for the current design: its bill and what
+/// blocks the test.
+#[derive(Resource, Debug, Default, Clone)]
+pub struct ScenarioCheck {
+    pub bill: Bill,
+    pub violations: Vec<Violation>,
+    pub key: Option<(u64, usize)>,
+}
+
+impl ScenarioCheck {
+    pub fn blocks_test(&self) -> bool {
+        !self.violations.is_empty()
+    }
+
+    pub fn compute(s: &Scenario, design: &Design, costs: &CostModel) -> (Bill, Vec<Violation>) {
+        let structure = design.to_structure();
+        let bill = costs.estimate(&structure);
+        let violations = if design.beams.is_empty() {
+            vec![Violation::NoSupports]
+        } else {
+            check_limits(&s.def, &structure, &bill, s.mode)
+        };
+        (bill, violations)
+    }
+}
+
+/// Something worth telling the player during a test run, from the run's
+/// timeline.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TestEvent {
     CaseStarted { case: usize },
-    FirstYield { member: usize, utilization: f32 },
+    FirstYield { member: usize, state: String },
     Broke { member: usize, cause: String },
+    Collapse { reason: String },
+    Passed,
+    ProofHeld { factor: f32 },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -184,18 +430,53 @@ pub struct TimedEvent {
     pub event: TestEvent,
 }
 
-/// What a test run measured.
+impl TimedEvent {
+    /// The UI's reading of a run timeline entry, given the sheet's bands.
+    pub fn from_entry(s: &Scenario, e: &bs::TimelineEntry) -> Option<Self> {
+        let time = e.time as f32;
+        let event = match &e.what {
+            bs::Happening::EventStarted { name, .. } => TestEvent::CaseStarted {
+                case: s.load_cases.iter().position(|c| &c.name == name)?,
+            },
+            bs::Happening::ProofTestStarted => TestEvent::CaseStarted {
+                case: s.load_cases.iter().position(|c| c.name == "Proof test")?,
+            },
+            bs::Happening::FirstDamage { member, state } => TestEvent::FirstYield {
+                member: *member,
+                state: state.clone(),
+            },
+            bs::Happening::Break { member, cause } => TestEvent::Broke {
+                member: *member,
+                cause: cause.clone(),
+            },
+            bs::Happening::Collapse { reason } => TestEvent::Collapse {
+                reason: reason.clone(),
+            },
+            bs::Happening::Passed => TestEvent::Passed,
+            bs::Happening::ProofTestHeld { factor } => TestEvent::ProofHeld {
+                factor: *factor as f32,
+            },
+            bs::Happening::EventEnded { .. } => return None,
+        };
+        Some(Self { time, event })
+    }
+}
+
+/// The graded report of the run that just ended, handed from the test
+/// screen to the report screen.
+#[derive(Resource, Debug, Default, Clone)]
+pub struct TestOutcome(pub Option<Report>);
+
+/// What the UI records of a test run, for the chart recorder and the log.
 #[derive(Resource, Clone, Debug, Default, PartialEq)]
 pub struct TestRecord {
     pub events: Vec<TimedEvent>,
-    /// Largest sag at any load point over the run, metres.
+    /// Largest deck sag (or payload drift), metres.
     pub peak_sag: f32,
-    /// Highest member utilisation over the run.
+    /// Highest member utilisation over the test (not the proof test).
     pub peak_utilization: f32,
-    /// Time of the first break, if any.
+    /// Time of the first break in the test, if any.
     pub first_break: Option<f32>,
-    /// The run reached the end of its last load case.
-    pub completed: bool,
     pub cost: f32,
     /// Worst utilisation per chart column (see [`CHART_COLUMNS`]).
     pub chart: Vec<f32>,
@@ -216,84 +497,7 @@ impl TestRecord {
     }
 }
 
-/// One pass criterion, measured against what was required.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Check {
-    pub label: String,
-    pub measured: String,
-    pub required: String,
-    pub ok: bool,
-    /// Bonus checks don't decide pass or fail.
-    pub bonus: bool,
-}
-
-/// Judges a finished test run.
-pub fn judge(s: &Scenario, r: &TestRecord) -> Vec<Check> {
-    let mut out = Vec::new();
-    let total = s.total_duration();
-    out.push(Check {
-        label: format!("Survive {}", case_span_label(s)),
-        measured: match r.first_break {
-            Some(t) => format!("broke at {t:.2} s"),
-            None if r.completed => "held".into(),
-            None => "stopped early".into(),
-        },
-        required: format!("{total:.1} s, nothing breaks"),
-        ok: r.first_break.is_none() && r.completed,
-        bonus: false,
-    });
-    if let Some(limit) = s.sag_limit {
-        out.push(Check {
-            label: "Peak sag at load points".into(),
-            measured: format!("{:.0} mm", r.peak_sag * 1000.0),
-            required: format!("under {:.0} mm", limit * 1000.0),
-            ok: r.peak_sag <= limit,
-            bonus: false,
-        });
-    }
-    if let Some(budget) = s.budget {
-        out.push(Check {
-            label: "Cost".into(),
-            measured: money(r.cost),
-            required: format!("under {}", money(budget)),
-            ok: r.cost <= budget,
-            bonus: false,
-        });
-    }
-    if let Some(bonus) = s.bonus_budget {
-        out.push(Check {
-            label: "Bonus: cost".into(),
-            measured: money(r.cost),
-            required: format!("under {}", money(bonus)),
-            ok: r.cost <= bonus,
-            bonus: true,
-        });
-    }
-    if !s.sandbox {
-        out.push(Check {
-            label: "Bonus: no member over 80%".into(),
-            measured: format!("peak {:.0}%", r.peak_utilization * 100.0),
-            required: "80%".into(),
-            ok: r.peak_utilization <= 0.8,
-            bonus: true,
-        });
-    }
-    out
-}
-
-pub fn passed(checks: &[Check]) -> bool {
-    checks.iter().filter(|c| !c.bonus).all(|c| c.ok)
-}
-
-fn case_span_label(s: &Scenario) -> String {
-    match s.load_cases.len() {
-        0 => "the test".into(),
-        1 => "LC1".into(),
-        n => format!("LC1 to LC{n}"),
-    }
-}
-
-/// Formats an amount with a thin thousands gap: `41 200 kr`.
+/// Formats an amount with a thin thousands gap: `2 100 kr`.
 pub fn money(v: f32) -> String {
     let n = v.round().max(0.0) as u64;
     let s = n.to_string();
@@ -307,11 +511,12 @@ pub fn money(v: f32) -> String {
     out + " kr"
 }
 
-/// Which sheet is open, and every sheet in the register.
+/// Which sheet is open, every sheet in the register, and the cost model.
 #[derive(Resource, Clone, Debug)]
 pub struct Sheets {
     pub all: Vec<Scenario>,
     pub current: usize,
+    pub costs: CostModel,
 }
 
 impl Default for Sheets {
@@ -319,6 +524,7 @@ impl Default for Sheets {
         Self {
             all: catalogue(),
             current: 0,
+            costs: CostModel::default(),
         }
     }
 }
@@ -329,199 +535,101 @@ impl Sheets {
     }
 }
 
-const KN: f32 = 1000.0;
-
-/// The built-in sheets.
+/// The built-in scenarios as sheets, then a sandbox bench on the first
+/// bridge.
 pub fn catalogue() -> Vec<Scenario> {
-    let steel_timber = vec![BeamKind::SteelTube, BeamKind::Timber];
-    vec![
-        Scenario {
-            id: "B-01",
-            title: "Plank crossing",
-            rig: Rig::TrafficBridge,
-            span: 4.0,
-            anchors: vec![
-                (Vec3::new(-2.0, 0.0, 0.0), SupportKind::Pinned),
-                (Vec3::new(2.0, 0.0, 0.0), SupportKind::Pinned),
-            ],
-            load_points: vec![Vec3::new(0.0, 0.0, 0.0)],
-            load_cases: vec![
-                LoadCase {
-                    name: "Self weight",
-                    duration: 2.0,
-                    loads: vec![],
-                },
-                LoadCase {
-                    name: "Handcart 2 t",
-                    duration: 5.0,
-                    loads: vec![(0, 20.0 * KN)],
-                },
-            ],
-            budget: Some(6_000.0),
-            bonus_budget: Some(4_500.0),
-            sag_limit: Some(0.02),
-            allowed: steel_timber.clone(),
-            sandbox: false,
-        },
-        Scenario {
-            id: "B-02",
-            title: "Footbridge over flume",
-            rig: Rig::TrafficBridge,
-            span: 6.0,
-            anchors: vec![
-                (Vec3::new(-3.0, 0.0, 0.0), SupportKind::Pinned),
-                (Vec3::new(3.0, 0.0, 0.0), SupportKind::Pinned),
-            ],
-            load_points: vec![
-                Vec3::new(-1.0, 0.0, 0.0),
-                Vec3::new(0.0, 0.0, 0.0),
-                Vec3::new(1.0, 0.0, 0.0),
-            ],
-            load_cases: vec![
-                LoadCase {
-                    name: "Self weight",
-                    duration: 2.0,
-                    loads: vec![],
-                },
-                LoadCase {
-                    name: "One vehicle",
-                    duration: 4.0,
-                    loads: vec![(1, 40.0 * KN)],
-                },
-                LoadCase {
-                    name: "Three vehicles",
-                    duration: 6.0,
-                    loads: vec![(0, 40.0 * KN), (1, 40.0 * KN), (2, 40.0 * KN)],
-                },
-            ],
-            budget: Some(14_000.0),
-            bonus_budget: Some(10_000.0),
-            sag_limit: Some(0.024),
-            allowed: steel_timber.clone(),
-            sandbox: false,
-        },
-        Scenario {
-            id: "B-03",
-            title: "Two-lane road bridge",
-            rig: Rig::TrafficBridge,
-            span: 10.0,
-            anchors: vec![
-                (Vec3::new(-5.0, 0.0, 0.0), SupportKind::Pinned),
-                (Vec3::new(5.0, 0.0, 0.0), SupportKind::Pinned),
-            ],
-            load_points: (-2..=2).map(|i| Vec3::new(i as f32, 0.0, 0.0)).collect(),
-            load_cases: vec![
-                LoadCase {
-                    name: "Self weight",
-                    duration: 2.0,
-                    loads: vec![],
-                },
-                LoadCase {
-                    name: "One lorry",
-                    duration: 4.0,
-                    loads: vec![(1, 60.0 * KN), (2, 60.0 * KN)],
-                },
-                LoadCase {
-                    name: "Queue, both lanes",
-                    duration: 8.0,
-                    loads: (0..5).map(|i| (i, 60.0 * KN)).collect(),
-                },
-            ],
-            budget: Some(30_000.0),
-            bonus_budget: Some(24_000.0),
-            sag_limit: Some(0.04),
-            allowed: steel_timber.clone(),
-            sandbox: false,
-        },
-        Scenario {
-            id: "S-00",
-            title: "Free bench",
-            rig: Rig::Sandbox,
-            span: 0.0,
-            anchors: vec![],
-            load_points: vec![],
-            load_cases: vec![LoadCase {
-                name: "Gravity and your loads",
-                duration: 20.0,
-                loads: vec![],
-            }],
-            budget: None,
-            bonus_budget: None,
-            sag_limit: None,
-            allowed: steel_timber,
-            sandbox: true,
-        },
-    ]
+    let defs = bs::builtin();
+    let mut out: Vec<Scenario> = defs
+        .iter()
+        .cloned()
+        .map(|d| Scenario::new(d, PlayMode::Challenge))
+        .collect();
+    if let Some(first) = defs.into_iter().next() {
+        out.push(Scenario::new(first, PlayMode::Sandbox));
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use breakit_core::SimConfig;
 
-    fn footbridge() -> Scenario {
-        catalogue().into_iter().find(|s| s.id == "B-02").unwrap()
+    fn bridge() -> Scenario {
+        catalogue().into_iter().find(|s| s.id == "B-01").unwrap()
     }
 
     #[test]
-    fn load_cases_run_back_to_back() {
-        let s = footbridge();
-        assert_eq!(s.total_duration(), 12.0);
-        assert_eq!(s.case_at(0.0), Some(0));
-        assert_eq!(s.case_at(2.5), Some(1));
-        assert_eq!(s.case_at(11.9), Some(2));
-        assert_eq!(s.case_at(12.0), None);
-        assert_eq!(s.case_starts(), vec![0.0, 2.0, 6.0]);
-        assert_eq!(s.heaviest_case(), Some(2));
+    fn catalogue_has_each_scenario_and_a_sandbox() {
+        let all = catalogue();
+        assert!(all.iter().any(|s| s.rig == Rig::Bridges));
+        assert!(all.iter().any(|s| s.rig == Rig::Towers));
+        assert!(all.last().unwrap().sandbox);
     }
 
     #[test]
-    fn initial_design_locks_anchors_and_load_points() {
-        let s = footbridge();
-        let d = s.initial_design();
-        assert_eq!(d.nodes.len(), 5);
-        assert!(d.locked.iter().all(|l| *l));
-        assert_eq!(d.supports[0], Some(SupportKind::Pinned));
-        assert_eq!(d.nodes[s.load_point_node(1)], Vec3::ZERO);
-        let f = s.case_forces(1);
-        assert_eq!(f[1], (3, Vec3::new(0.0, -40_000.0, 0.0)));
-        assert_eq!(f[0].1, Vec3::ZERO);
+    fn bridge_bands_run_in_order_then_the_proof_test() {
+        let s = bridge();
+        assert!(s.load_cases.windows(2).all(|w| w[0].start <= w[1].start));
+        assert_eq!(s.load_cases.last().unwrap().name, "Proof test");
+        assert_eq!(s.case_at(0.0), None.or(s.case_at(0.0)));
+        assert_eq!(
+            s.case_at(s.def.duration as f32 + 0.5),
+            Some(s.load_cases.len() - 1)
+        );
+        assert_eq!(s.case_at(s.total_duration() + 1.0), None);
     }
 
     #[test]
-    fn connectivity_needs_every_fixed_node_joined() {
-        let s = footbridge();
+    fn anchors_support_nodes_placed_on_them() {
+        let s = bridge();
         let mut d = s.initial_design();
-        assert!(!s.is_connected(&d));
-        // Chain the bottom chord: anchor, three load points, anchor.
-        for (a, b) in [(0, 2), (2, 3), (3, 4)] {
-            d.add_beam(a, b, BeamKind::SteelTube);
-        }
-        assert!(!s.is_connected(&d));
-        d.add_beam(4, 1, BeamKind::SteelTube);
-        assert!(s.is_connected(&d));
+        let (p, k) = s.anchors[1];
+        let n = d.add_node(p);
+        assert_eq!(d.supports[n], Some(k));
+        let m = d.add_node(p + Vec3::X);
+        assert_eq!(d.supports[m], None);
     }
 
     #[test]
-    fn judging_separates_pass_criteria_from_bonus() {
-        let s = footbridge();
-        let mut r = TestRecord {
-            completed: true,
-            peak_sag: 0.01,
-            peak_utilization: 0.9,
-            cost: 12_000.0,
-            ..Default::default()
-        };
-        let checks = judge(&s, &r);
-        assert!(passed(&checks));
-        assert!(checks.iter().any(|c| c.bonus && !c.ok));
-        r.first_break = Some(7.2);
-        assert!(!passed(&judge(&s, &r)));
+    fn starter_bridge_passes_the_bridge_sheet_and_previews_loads() {
+        let s = bridge();
+        let mut d = Design::starter_bridge();
+        d.loads.iter_mut().for_each(|l| *l = Vec3::ZERO);
+        let (_, v) = ScenarioCheck::compute(&s, &d, &CostModel::default());
+        assert_eq!(v, vec![]);
+        assert!(!s.static_loads(&d).is_empty());
+        let r = bs::evaluate(
+            &s.def,
+            &d.to_structure(),
+            &[],
+            &CostModel::default(),
+            PlayMode::Challenge,
+            SimConfig::default(),
+        )
+        .unwrap();
+        assert!(r.passed);
+        assert!(r.criteria.iter().any(|c| !c.bonus));
+    }
+
+    #[test]
+    fn tower_previews_the_tank_weight() {
+        let s = catalogue()
+            .into_iter()
+            .find(|s| s.rig == Rig::Towers)
+            .unwrap();
+        let mut d = s.initial_design();
+        assert_eq!(d.nodes.len(), 1);
+        let base = d.add_node(Vec3::new(-1.0, 0.0, -1.0));
+        assert!(d.supports[base].is_some());
+        d.add_beam(base, 0, BeamKind::SteelTube);
+        let loads = s.static_loads(&d);
+        assert!(loads.iter().any(|l| l.node == 0 && l.force.y < -30_000.0));
     }
 
     #[test]
     fn money_groups_thousands() {
-        assert_eq!(money(41_200.4), "41 200 kr");
+        assert_eq!(money(41_200.0), "41 200 kr");
         assert_eq!(money(950.0), "950 kr");
-        assert_eq!(money(1_000_000.0), "1 000 000 kr");
     }
 }

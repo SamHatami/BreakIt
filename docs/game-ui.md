@@ -15,23 +15,33 @@ the structure below can stay while the look changes.
 `Mode` (Build or Simulate) is computed from `Screen`: Test and Report run
 the dynamic solver, the rest show the static solve.
 
-- **Register**: the test sheets. A sheet unlocks when the one before it
-  has a passed revision.
-- **Brief**: site drawing, load cases, criteria. F1 shows it again as an
-  overlay in build.
-- **Build**: the sheet's criteria checked live against the static solve,
-  cost meter, worst member, tool rail, member inspector, parts drawer, and
-  the RUN TEST button. Anchors and load points from the sheet are locked.
-- **Test**: load cases run in order (`scenario.rs` applies them). The chart
-  recorder plots worst-member utilisation over time. The first break drops
-  to 1/4 speed for 2.5 s; the test ends 3 s after it, or when the cases
-  finish.
-- **Report**: pass or fail stamp, each criterion measured against
-  required, the failure sequence, one sentence on why, and the revision
-  list. Failed members stay pinned in build after Revise.
+- **Register**: the test sheets, one tab per group (Bridges, Towers) and a
+  sandbox. The first sheet of each group is open; the next unlocks when
+  the one before it has a passed revision.
+- **Brief**: the scenario's brief, its load timeline, the hard limits
+  and what scores full marks. F1 shows it again as an overlay in build.
+- **Build**: what blocks the test (`check_limits`, in its own sentences),
+  cost and mass against the caps, the static check under the sheet's
+  heaviest moment, cost meter, worst member, tool rail, member inspector,
+  parts drawer and the RUN TEST button, which only runs when nothing
+  blocks. A node placed on an anchor gets that foundation's support;
+  payload points are locked nodes.
+- **Test**: a `breakit_scenario::TestRun` applies the loads and decides
+  the outcome, then runs the proof test after a pass. The chart recorder
+  plots worst-member utilisation with a band per event. The first break
+  drops to 1/4 speed for 2.5 s. The report opens once the outcome has
+  played out.
+- **Report**: pass or fail stamp, grade (stars, score, safety margin),
+  the proof test's reserve and warning time, the scenario report's
+  criterion rows, the failure sequence (or after a pass, what the proof
+  test broke first), one sentence on why, and the revision list. Those
+  members stay pinned in build after Revise.
 
-`scenario.rs` holds the sheets (B-01 to B-03 and a sandbox) until a
-`breakit-scenario` crate takes over.
+Scenarios, limits, loads and grading come from the engine-free
+`breakit-scenario` crate (`docs/scenarios.md`). `scenario.rs` here is the
+game's view of them: register tabs, anchors, load-case bands, the live
+check (`ScenarioCheck`) and the static preview loads. Cost everywhere is
+the scenario `CostModel`'s bill.
 
 ## Controls
 
@@ -78,6 +88,6 @@ colour-blind-safe one from the canvas. The member shader in
 
 ## Headless check
 
-`BREAKIT_CAPTURE=<dir>` walks the whole loop on sheet B-02 and saves
-`1-register.png` to `5-report.png`. `BREAKIT_TRUSS=weak` lays a bare
+`BREAKIT_CAPTURE=<dir>` walks the whole loop on sheet B-01 and saves
+`1-register.png` to `6-lab.png`. `BREAKIT_TRUSS=weak` lays a bare
 timber plank instead of a truss, to see the failure path.

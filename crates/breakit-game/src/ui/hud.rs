@@ -120,11 +120,12 @@ pub enum WorldTag {
 
 fn static_sag(v: &GameView) -> Option<f32> {
     let s = v.sheets.current();
-    if v.state.displacements.is_empty() || s.load_points.is_empty() {
+    if v.state.displacements.is_empty() {
         return None;
     }
-    (0..s.load_points.len())
-        .filter_map(|i| v.state.displacements.get(s.load_point_node(i)))
+    s.sag_nodes(&v.design)
+        .into_iter()
+        .filter_map(|i| v.state.displacements.get(i))
         .map(|d| -d.y)
         .reduce(f32::max)
 }
@@ -141,13 +142,14 @@ fn worst(v: &GameView) -> Option<(usize, f32)> {
 pub fn build_sheet_key(v: &GameView) -> String {
     let s = v.sheets.current();
     format!(
-        "{} {} {:?} {:.0} {} {}",
+        "{} {} {:?} {:.0} {} {} {:?}",
         v.sheets.current,
         s.is_connected(&v.design),
         static_sag(v).map(|x| (x * 1000.0).round()),
-        v.design.cost() / 10.0,
+        v.cost() / 10.0,
         v.revisions.of(s.id).len(),
-        v.state.error.is_some()
+        v.state.error.is_some(),
+        v.check.violations
     )
 }
 
@@ -200,36 +202,29 @@ pub fn build_sheet(p: &mut ChildSpawnerCommands, v: &GameView) {
                 ..default()
             },
         ));
-        let connected = s.is_connected(&v.design);
-        check_row(
-            b,
-            if connected {
-                Status::Ok
-            } else {
-                Status::Pending
-            },
-            &format!("Span {:.0} m, all fixed nodes joined", s.span),
-            if connected { "ok" } else { "open" },
-        );
+        // What blocks the test, in the scenario's own words.
+        if v.check.violations.is_empty() {
+            check_row(b, Status::Ok, "Build meets the sheet's limits", "ready");
+        }
+        for vio in v.check.violations.iter().take(4) {
+            check_row(b, Status::Failed, &vio.to_string(), "");
+        }
+        if v.check.violations.len() > 4 {
+            check_row(
+                b,
+                Status::Failed,
+                &format!("and {} more", v.check.violations.len() - 4),
+                "",
+            );
+        }
         check_row(
             b,
             Status::Pending,
-            &format!("Survive LC1 to LC{}", s.load_cases.len()),
+            &format!("Survive {:.1} s of loads", s.def.duration),
             "on test",
         );
-        if let Some(l) = s.sag_limit {
-            let (st, val) = match (static_sag(v), &v.state.error) {
-                (_, Some(_)) => (Status::Failed, "unstable".to_string()),
-                (Some(x), None) => (
-                    if x <= l { Status::Ok } else { Status::Failed },
-                    format!("{} static", mm(x)),
-                ),
-                (None, None) => (Status::Pending, "-".into()),
-            };
-            check_row(b, st, &format!("Sag under {}", mm(l)), &val);
-        }
         if let Some(budget) = s.budget {
-            let c = v.design.cost();
+            let c = v.cost();
             check_row(
                 b,
                 if c <= budget {
@@ -241,6 +236,30 @@ pub fn build_sheet(p: &mut ChildSpawnerCommands, v: &GameView) {
                 &money(c),
             );
         }
+        if let Some(max) = s.def.limits.max_mass {
+            let m = v.mass();
+            check_row(
+                b,
+                if m as f64 <= max {
+                    Status::Ok
+                } else {
+                    Status::Failed
+                },
+                &format!("Mass under {max:.0} kg"),
+                &format!("{m:.0} kg"),
+            );
+        }
+        if let Some(l) = s.sag_limit {
+            let (st, val) = match (static_sag(v), &v.state.error) {
+                (_, Some(_)) => (Status::Failed, "unstable".to_string()),
+                (Some(x), None) => (
+                    if x <= l { Status::Ok } else { Status::Pending },
+                    format!("{} static", mm(x)),
+                ),
+                (None, None) => (Status::Pending, "-".into()),
+            };
+            check_row(b, st, &format!("Bonus: sag under {}", mm(l)), &val);
+        }
         rule(b, Swatch::Ink);
         b.spawn(Node {
             justify_content: JustifyContent::SpaceBetween,
@@ -251,8 +270,9 @@ pub fn build_sheet(p: &mut ChildSpawnerCommands, v: &GameView) {
         })
         .with_children(|f| {
             let bonus = s.bonus_budget.map(money).unwrap_or_default();
+            let [lo, hi] = s.def.scoring.margin_band;
             f.spawn(text(
-                format!("Bonus: under {bonus}, no member over 80%"),
+                format!("Full marks: under {bonus}, safety margin {lo:.2} to {hi:.1}"),
                 TextRole::Label,
                 Swatch::Muted,
             ));
@@ -265,9 +285,9 @@ pub fn readouts_key(v: &GameView) -> String {
     let w = worst(v).map(|(i, u)| (i, (u * 100.0).round() as i32));
     format!(
         "{} {:?} {:.0} {:?} {:?}",
-        (v.design.cost() / 10.0).round(),
+        (v.cost() / 10.0).round(),
         w,
-        v.design.mass(),
+        v.mass(),
         v.state.error,
         v.sheets.current().budget
     )
@@ -275,7 +295,7 @@ pub fn readouts_key(v: &GameView) -> String {
 
 pub fn build_readouts(p: &mut ChildSpawnerCommands, v: &GameView) {
     let s = v.sheets.current();
-    let cost = v.design.cost();
+    let cost = v.cost();
     p.spawn(panel(Node {
         width: Val::Px(300.0),
         flex_direction: FlexDirection::Column,
@@ -319,11 +339,7 @@ pub fn build_readouts(p: &mut ChildSpawnerCommands, v: &GameView) {
         kv(
             b,
             "Mass",
-            text(
-                format!("{:.0} kg", v.design.mass()),
-                TextRole::Mono,
-                Swatch::Ink,
-            ),
+            text(format!("{:.0} kg", v.mass()), TextRole::Mono, Swatch::Ink),
         );
         let check = match &v.state.error {
             Some(_) => text(
@@ -490,7 +506,10 @@ pub fn build_inspector(p: &mut ChildSpawnerCommands, v: &GameView) {
             text(
                 format!(
                     "{} / {:.0} kg",
-                    money(len * beam.kind.cost_per_metre()),
+                    money(
+                        len * beam.kind.cost_per_metre(&v.sheets.costs)
+                            + 2.0 * v.sheets.costs.joints.bolted as f32
+                    ),
                     len * beam.kind.mass_per_metre()
                 ),
                 TextRole::Mono,
@@ -610,7 +629,7 @@ pub fn build_drawer(p: &mut ChildSpawnerCommands, v: &GameView) {
                     format!(
                         "{:.1} kg/m  {:.0} kr/m",
                         k.mass_per_metre(),
-                        k.cost_per_metre()
+                        k.cost_per_metre(&v.sheets.costs)
                     ),
                     TextRole::Mono,
                     Swatch::Muted,
@@ -687,7 +706,7 @@ pub fn build_footer(p: &mut ChildSpawnerCommands, v: &GameView) {
         });
         c.spawn(text(
             format!(
-                "LC1 to LC{}, {:.0} s",
+                "{} load cases, {:.1} s",
                 s.load_cases.len(),
                 s.total_duration()
             ),
@@ -762,7 +781,7 @@ pub fn test_sheet_key(v: &GameView) -> String {
         "{:?} {:?} {} {:.0}",
         current_case(&v.record),
         v.record.first_break,
-        v.record.completed,
+        v.record.events.len(),
         v.record.peak_sag * 1000.0
     )
 }
@@ -809,7 +828,7 @@ pub fn test_sheet(p: &mut ChildSpawnerCommands, v: &GameView) {
             check_row(
                 b,
                 st,
-                &format!("Sag under {}", mm(l)),
+                &format!("Bonus: sag under {}", mm(l)),
                 &format!("peak {}", mm(rec.peak_sag)),
             );
         }
@@ -832,14 +851,13 @@ pub fn test_log(p: &mut ChildSpawnerCommands, v: &GameView) {
                     format!("LC{} {}", case + 1, s.load_cases[*case].name),
                     false,
                 ),
-                TestEvent::FirstYield {
-                    member,
-                    utilization,
-                } => (
-                    format!("M{} first yield {}", member + 1, pct(*utilization)),
-                    false,
-                ),
+                TestEvent::FirstYield { member, state } => {
+                    (format!("M{} first damage: {}", member + 1, state), false)
+                }
                 TestEvent::Broke { member, cause } => (format!("M{} {}", member + 1, cause), true),
+                TestEvent::Collapse { reason } => (format!("Collapse: {reason}"), true),
+                TestEvent::Passed => ("Test passed".to_string(), false),
+                TestEvent::ProofHeld { factor } => (format!("Proof test held x{factor:.1}"), false),
             };
             rule(b, Swatch::Rule);
             b.spawn((
@@ -1062,7 +1080,7 @@ pub fn update_test_readouts(
         build_chart(&mut commands, area, s);
         return;
     }
-    let t = sim.map(|s| s.sim.time() as f32).unwrap_or(0.0);
+    let t = sim.map(|s| s.run().time() as f32).unwrap_or(0.0);
     for mut tx in &mut time_text {
         let v = format!("{t:05.2}");
         if tx.0 != v {
@@ -1093,6 +1111,8 @@ pub fn update_test_readouts(
 fn build_chart(commands: &mut Commands, area: Entity, s: &crate::scenario::Scenario) {
     commands.entity(area).with_children(|a| {
         // Load-case bands.
+        // Bands sit at their place in time; gaps are self weight only.
+        let total = s.total_duration().max(1e-3);
         a.spawn(Node {
             height: Val::Px(18.0),
             flex_shrink: 0.0,
@@ -1103,8 +1123,12 @@ fn build_chart(commands: &mut Commands, area: Entity, s: &crate::scenario::Scena
                 bands
                     .spawn((
                         Node {
-                            flex_grow: c.duration,
-                            flex_basis: Val::Px(0.0),
+                            position_type: PositionType::Absolute,
+                            left: Val::Percent(c.start.max(0.0) / total * 100.0),
+                            width: Val::Percent(
+                                (c.end - c.start.max(0.0)).max(0.0) / total * 100.0,
+                            ),
+                            height: Val::Percent(100.0),
                             padding: UiRect::axes(Val::Px(6.0), Val::Px(2.0)),
                             border: UiRect::right(Val::Px(1.0)),
                             overflow: Overflow::clip(),

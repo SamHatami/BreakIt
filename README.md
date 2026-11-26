@@ -11,7 +11,7 @@ Plan: https://claude.ai/artifact/LE9dveFS17PTMrkqGWwSvT
 - `crates/breakit-game`: the Bevy app (Bevy pinned to `=0.20.1`, Rust 1.97.1+).
   - `design`: the player's nodes, beams, supports and loads; `to_structure()` is the only hand-off to the solver.
   - `analysis`: `FrameState`, the one physics read-out the renderer uses. Static solve in build mode, `DynamicSim` in simulate mode, in `BreakitSet::Physics`.
-  - `flow`, `scenario`, `testrun`, `history`: screens and the play loop, test sheets and load cases, the test recorder and judging, undo/redo.
+  - `flow`, `scenario`, `testrun`, `guides`, `history`: screens and the play loop, the game's view of `breakit-scenario` sheets, the test on screen, scenario guides, undo/redo.
   - `camera`, `build`, `render`, `ui`: orbit camera, build tool, beam/node drawing coloured by utilisation, game UI on a swappable theme layer (`docs/game-ui.md`).
   - `capture`: `BREAKIT_CAPTURE=<dir>` walks the whole loop and screenshots each screen, then exits (for headless checks).
 

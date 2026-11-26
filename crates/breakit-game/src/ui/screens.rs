@@ -64,18 +64,9 @@ pub fn pct(u: f32) -> String {
     format!("{:.0}%", u * 100.0)
 }
 
-/// What a sheet loads, for the register and the brief: `3 x 40 kN`.
+/// What a sheet loads, for the register and the brief.
 fn load_summary(s: &Scenario) -> String {
-    let Some(c) = s.heaviest_case() else {
-        return if s.sandbox {
-            "your own".into()
-        } else {
-            "self weight".into()
-        };
-    };
-    let loads = &s.load_cases[c].loads;
-    let max = loads.iter().map(|l| l.1).fold(0.0, f32::max);
-    format!("{} x {}", loads.len(), kn(max))
+    s.load_summary()
 }
 
 pub fn register_key(v: &GameView) -> String {
@@ -216,7 +207,7 @@ pub fn build_register(p: &mut ChildSpawnerCommands, v: &GameView) {
         ..default()
     }))
     .with_children(|c| {
-        title_strip(c, cur.title, cur.id, Swatch::Panel, Swatch::Ink);
+        title_strip(c, &cur.title, cur.id, Swatch::Panel, Swatch::Ink);
         c.spawn(text(
             format!("  {} rig", cur.rig.label()),
             TextRole::Label,
@@ -355,9 +346,13 @@ pub fn build_brief(p: &mut ChildSpawnerCommands, v: &GameView, overlay: bool) {
                     TextRole::Label,
                     Swatch::Muted,
                 ));
-                c.spawn(text(s.title, TextRole::Title, Swatch::Ink));
+                c.spawn(text(s.title.clone(), TextRole::Title, Swatch::Ink));
             });
-            h.spawn(text(format!("sheet {sheet_no} of {of}"), TextRole::Mono, Swatch::Muted));
+            h.spawn(text(
+                format!("sheet {sheet_no} of {of}"),
+                TextRole::Mono,
+                Swatch::Muted,
+            ));
         });
         rule(b, Swatch::Ink);
         b.spawn(Node::default()).with_children(|cols| {
@@ -372,16 +367,12 @@ pub fn build_brief(p: &mut ChildSpawnerCommands, v: &GameView, overlay: bool) {
             .with_children(|l| {
                 l.spawn(text("Site", TextRole::Label, Swatch::Muted));
                 site_drawing(l, s);
+                l.spawn(text(s.def.brief.clone(), TextRole::Body, Swatch::Ink));
                 l.spawn(text(
-                    format!(
-                        "Span {:.1} m between pinned anchors. {} load point(s) on the deck line. Join them all.",
-                        s.span,
-                        s.load_points.len()
-                    ),
-                    TextRole::Body,
-                    Swatch::Ink,
+                    "Load cases, in test order",
+                    TextRole::Label,
+                    Swatch::Muted,
                 ));
-                l.spawn(text("Load cases, in test order", TextRole::Label, Swatch::Muted));
                 l.spawn(column(0.0)).with_children(|t| {
                     for (i, c) in s.load_cases.iter().enumerate() {
                         rule(t, Swatch::Rule);
@@ -391,15 +382,32 @@ pub fn build_brief(p: &mut ChildSpawnerCommands, v: &GameView, overlay: bool) {
                             ..default()
                         })
                         .with_children(|r| {
-                            r.spawn((text(format!("LC{}", i + 1), TextRole::Mono, Swatch::Muted), Node { width: Val::Px(40.0), ..default() }));
-                            r.spawn((text(c.name, TextRole::Body, Swatch::Ink), Node { width: Val::Px(200.0), ..default() }));
-                            let loads = if c.loads.is_empty() {
-                                "-".to_string()
-                            } else {
-                                format!("{} x {}", c.loads.len(), kn(c.loads[0].1))
-                            };
-                            r.spawn((text(loads, TextRole::Mono, Swatch::Ink), Node { width: Val::Px(110.0), ..default() }));
-                            r.spawn(text(format!("{:.0} s", c.duration), TextRole::Mono, Swatch::Muted));
+                            r.spawn((
+                                text(format!("LC{}", i + 1), TextRole::Mono, Swatch::Muted),
+                                Node {
+                                    width: Val::Px(40.0),
+                                    ..default()
+                                },
+                            ));
+                            r.spawn((
+                                text(c.name.as_str(), TextRole::Body, Swatch::Ink),
+                                Node {
+                                    width: Val::Px(200.0),
+                                    ..default()
+                                },
+                            ));
+                            r.spawn((
+                                text(c.load.as_str(), TextRole::Mono, Swatch::Ink),
+                                Node {
+                                    width: Val::Px(110.0),
+                                    ..default()
+                                },
+                            ));
+                            r.spawn(text(
+                                format!("{:.1} to {:.1} s", c.start, c.end),
+                                TextRole::Mono,
+                                Swatch::Muted,
+                            ));
                         });
                     }
                 });
@@ -415,6 +423,7 @@ pub fn build_brief(p: &mut ChildSpawnerCommands, v: &GameView, overlay: bool) {
             cols.spawn(Node {
                 flex_direction: FlexDirection::Column,
                 width: Val::Px(300.0),
+                flex_shrink: 0.0,
                 padding: UiRect::all(Val::Px(16.0)),
                 row_gap: Val::Px(6.0),
                 ..default()
@@ -422,23 +431,52 @@ pub fn build_brief(p: &mut ChildSpawnerCommands, v: &GameView, overlay: bool) {
             .with_children(|r| {
                 r.spawn(text("To pass", TextRole::Label, Swatch::Muted));
                 r.spawn(column(0.0)).with_children(|c| {
-                    check_row(c, Status::Pending, &format!("Survive LC1 to LC{}", s.load_cases.len()), "");
-                    if let Some(l) = s.sag_limit {
-                        check_row(c, Status::Pending, &format!("Sag under {}", mm(l)), "");
-                    }
+                    check_row(
+                        c,
+                        Status::Pending,
+                        &format!("Survive {:.1} s of loads", s.def.duration),
+                        "",
+                    );
                     if let Some(b) = s.budget {
                         check_row(c, Status::Pending, &format!("Cost under {}", money(b)), "");
                     }
+                    if let Some(m) = s.def.limits.max_mass {
+                        check_row(c, Status::Pending, &format!("Mass under {m:.0} kg"), "");
+                    }
                 });
-                r.spawn(Node { height: Val::Px(8.0), ..default() });
-                r.spawn(text("Bonus grade", TextRole::Label, Swatch::Muted));
+                r.spawn(Node {
+                    height: Val::Px(8.0),
+                    ..default()
+                });
+                r.spawn(text("Full marks", TextRole::Label, Swatch::Muted));
                 r.spawn(column(0.0)).with_children(|c| {
                     if let Some(b) = s.bonus_budget {
                         check_row(c, Status::Pending, &format!("Cost under {}", money(b)), "");
                     }
-                    check_row(c, Status::Pending, "No member over 80%", "");
+                    let sc = &s.def.scoring;
+                    check_row(
+                        c,
+                        Status::Pending,
+                        &format!("Mass under {:.0} kg", sc.target_mass),
+                        "",
+                    );
+                    check_row(
+                        c,
+                        Status::Pending,
+                        &format!(
+                            "Safety margin {:.2} to {:.1}",
+                            sc.margin_band[0], sc.margin_band[1]
+                        ),
+                        "",
+                    );
+                    for o in &s.def.objectives {
+                        check_row(c, Status::Pending, &crate::scenario::objective_label(o), "");
+                    }
                 });
-                r.spawn(Node { height: Val::Px(8.0), ..default() });
+                r.spawn(Node {
+                    height: Val::Px(8.0),
+                    ..default()
+                });
                 r.spawn(text("Parts allowed", TextRole::Label, Swatch::Muted));
                 r.spawn(text(parts_label(s), TextRole::Body, Swatch::Ink));
             });
@@ -452,11 +490,33 @@ pub fn build_brief(p: &mut ChildSpawnerCommands, v: &GameView, overlay: bool) {
         })
         .with_children(|f| {
             if overlay {
-                f.spawn(text("This sheet stays on F1.", TextRole::Body, Swatch::Muted));
-                button(f, "Close", Some("F1"), UiAction::CloseOverlay, ButtonKind::Secondary);
+                f.spawn(text(
+                    "This sheet stays on F1.",
+                    TextRole::Body,
+                    Swatch::Muted,
+                ));
+                button(
+                    f,
+                    "Close",
+                    Some("F1"),
+                    UiAction::CloseOverlay,
+                    ButtonKind::Secondary,
+                );
             } else {
-                button(f, "Back", Some("Esc"), UiAction::BackToRegister, ButtonKind::Secondary);
-                button(f, "START BUILD", Some("Enter"), UiAction::StartBuild, ButtonKind::Primary);
+                button(
+                    f,
+                    "Back",
+                    Some("Esc"),
+                    UiAction::BackToRegister,
+                    ButtonKind::Secondary,
+                );
+                button(
+                    f,
+                    "START BUILD",
+                    Some("Enter"),
+                    UiAction::StartBuild,
+                    ButtonKind::Primary,
+                );
             }
         });
     });
@@ -553,7 +613,7 @@ pub fn build_report(p: &mut ChildSpawnerCommands, v: &GameView) {
             })
             .with_children(|c| {
                 c.spawn(text("Test report", TextRole::Label, Swatch::Muted));
-                c.spawn(text(s.title, TextRole::Title, Swatch::Ink));
+                c.spawn(text(s.title.clone(), TextRole::Title, Swatch::Ink));
             });
             h.spawn(cell(110.0)).with_children(|c| {
                 c.spawn(text("Revision", TextRole::Label, Swatch::Muted));
@@ -584,16 +644,52 @@ pub fn build_report(p: &mut ChildSpawnerCommands, v: &GameView) {
                 } else {
                     ("FAILED", Swatch::Fail)
                 };
-                l.spawn((
-                    Node {
-                        padding: UiRect::axes(Val::Px(16.0), Val::Px(4.0)),
-                        align_self: AlignSelf::FlexStart,
-                        ..default()
-                    },
-                    Skin::boxed(Swatch::Clear, c, Weight::Strong).square(),
-                    UiTransform::from_rotation(Rot2::degrees(-4.0)),
-                ))
-                .with_child(text(word, TextRole::Stamp, c));
+                l.spawn(row(24.0)).with_children(|top| {
+                    top.spawn((
+                        Node {
+                            padding: UiRect::axes(Val::Px(16.0), Val::Px(4.0)),
+                            align_self: AlignSelf::FlexStart,
+                            ..default()
+                        },
+                        Skin::boxed(Swatch::Clear, c, Weight::Strong).square(),
+                        UiTransform::from_rotation(Rot2::degrees(-4.0)),
+                    ))
+                    .with_child(text(word, TextRole::Stamp, c));
+                    // Grade: score, stars, and the proof test's read-outs.
+                    if let Some(r) = last.report.as_ref().filter(|r| r.passed && r.ranked) {
+                        top.spawn(column(2.0)).with_children(|g| {
+                            g.spawn(text("Grade", TextRole::Label, Swatch::Muted));
+                            let stars: String = (0..3)
+                                .map(|i| if i < r.stars { '*' } else { '.' })
+                                .collect();
+                            g.spawn(text(
+                                format!("{stars}  {} / 1000", r.score),
+                                TextRole::Heading,
+                                Swatch::Ink,
+                            ));
+                            g.spawn(text(
+                                format!("safety margin {:.2}", r.safety_margin),
+                                TextRole::Mono,
+                                Swatch::Muted,
+                            ));
+                        });
+                        if let Some(f) = r.reserve_factor {
+                            top.spawn(column(2.0)).with_children(|g| {
+                                g.spawn(text("Proof test", TextRole::Label, Swatch::Muted));
+                                g.spawn(text(
+                                    format!("held to x{f:.1}"),
+                                    TextRole::Heading,
+                                    Swatch::Ink,
+                                ));
+                                let warn = r
+                                    .warning_time
+                                    .map(|w| format!("{w:.1} s warning before collapse"))
+                                    .unwrap_or_else(|| "no warning before collapse".into());
+                                g.spawn(text(warn, TextRole::Mono, Swatch::Muted));
+                            });
+                        }
+                    }
+                });
                 l.spawn(text(
                     "Criteria, measured against required",
                     TextRole::Label,
@@ -624,7 +720,19 @@ pub fn build_report(p: &mut ChildSpawnerCommands, v: &GameView) {
                         );
                     }
                 });
-                l.spawn(text("Failure sequence", TextRole::Label, Swatch::Muted));
+                // The test's own failures; after a pass, how the proof test
+                // broke it.
+                let test_end = s.def.duration as f32;
+                let in_proof = last.passed;
+                l.spawn(text(
+                    if in_proof {
+                        "Proof test: what gave way first"
+                    } else {
+                        "Failure sequence"
+                    },
+                    TextRole::Label,
+                    Swatch::Muted,
+                ));
                 l.spawn(Node {
                     column_gap: Val::Px(6.0),
                     flex_wrap: FlexWrap::Wrap,
@@ -636,11 +744,16 @@ pub fn build_report(p: &mut ChildSpawnerCommands, v: &GameView) {
                         .events
                         .iter()
                         .filter(|e| !matches!(e.event, TestEvent::CaseStarted { .. }))
+                        .filter(|e| (e.time > test_end) == in_proof)
                         .take(5)
                         .collect();
                     if steps.is_empty() {
                         seq.spawn(text(
-                            "Nothing yielded or broke.",
+                            if in_proof {
+                                "Nothing gave way."
+                            } else {
+                                "Nothing yielded or broke."
+                            },
                             TextRole::Body,
                             Swatch::Ink,
                         ));
@@ -653,7 +766,8 @@ pub fn build_report(p: &mut ChildSpawnerCommands, v: &GameView) {
                             TestEvent::Broke { member, cause } => {
                                 (format!("M{} {}", member + 1, cause), Swatch::Fail)
                             }
-                            TestEvent::CaseStarted { .. } => continue,
+                            TestEvent::Collapse { .. } => ("collapse".to_string(), Swatch::Fail),
+                            _ => continue,
                         };
                         let fg = if swatch == Swatch::Fail {
                             Swatch::OnFail
@@ -729,7 +843,17 @@ pub fn build_report(p: &mut ChildSpawnerCommands, v: &GameView) {
                         });
                     }
                 });
-                let broken = rec.broken_members();
+                let test_end = s.def.duration as f32;
+                let broken: Vec<usize> = rec
+                    .events
+                    .iter()
+                    .filter_map(|e| match e.event {
+                        TestEvent::Broke { member, .. } if (e.time > test_end) == last.passed => {
+                            Some(member)
+                        }
+                        _ => None,
+                    })
+                    .collect();
                 if !broken.is_empty() {
                     r.spawn(Node {
                         height: Val::Px(10.0),
@@ -834,15 +958,18 @@ fn report_row(p: &mut ChildSpawnerCommands, cells: [&str; 4], color: Swatch, rol
 fn why(v: &GameView) -> String {
     let s = v.sheets.current();
     let rec = &v.last.record;
+    let test_end = s.def.duration as f32;
     let first = rec.events.iter().find_map(|e| match &e.event {
-        TestEvent::Broke { member, cause } => Some((e.time, *member, cause.clone())),
+        TestEvent::Broke { member, cause } if e.time <= test_end && !v.last.passed => {
+            Some((e.time, *member, cause.clone()))
+        }
         _ => None,
     });
     if let Some((t, m, cause)) = first {
         let case = s
             .case_at(t)
-            .map(|c| s.load_cases[c].name)
-            .unwrap_or("the test");
+            .map(|c| s.load_cases[c].name.clone())
+            .unwrap_or_else(|| "the test".into());
         let kind = v
             .design
             .beams
@@ -863,10 +990,16 @@ fn why(v: &GameView) -> String {
             );
         }
     }
-    if v.last.passed {
-        "It held. Try a cheaper revision for the bonus grade.".into()
-    } else {
-        "Over budget. Same structure with lighter members?".into()
+    let report = v.last.report.as_ref();
+    if let Some(f) = report.and_then(|r| r.failure.as_ref()) {
+        return format!("Why: {f}. Stiffen the structure or give the load another path.");
+    }
+    match report {
+        Some(r) if r.passed && r.stars < 3 => {
+            "It held. A lighter, cheaper revision that still holds scores higher.".into()
+        }
+        Some(r) if r.passed => "It held, and nothing to spare. Well judged.".into(),
+        _ => "It did not pass.".into(),
     }
 }
 

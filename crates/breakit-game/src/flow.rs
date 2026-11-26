@@ -10,7 +10,7 @@ use bevy::prelude::*;
 use crate::build::{BuildTool, Tool};
 use crate::design::{BeamKind, Design};
 use crate::history::History;
-use crate::scenario::{judge, passed, Check, Rig, Sheets, TestRecord};
+use crate::scenario::{Check, Report, Rig, ScenarioCheck, Sheets, TestOutcome, TestRecord};
 use crate::Mode;
 
 #[derive(States, Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -147,6 +147,9 @@ pub fn unlocked(sheets: &Sheets, revisions: &Revisions, i: usize) -> bool {
 #[derive(Resource, Default, Debug)]
 pub struct LastTest {
     pub record: TestRecord,
+    /// The scenario run's graded report.
+    pub report: Option<Report>,
+    /// The report's criterion rows.
     pub checks: Vec<Check>,
     pub passed: bool,
     pub letter: char,
@@ -172,7 +175,9 @@ impl Plugin for FlowPlugin {
             .init_resource::<Revisions>()
             .init_resource::<LastTest>()
             .init_resource::<FailurePins>()
+            .init_resource::<ScenarioCheck>()
             .add_systems(Startup, load_first_sheet)
+            .add_systems(Update, (update_check, sync_table))
             .add_systems(PreUpdate, keyboard_actions)
             .add_systems(Update, apply_flow_actions)
             .add_systems(OnEnter(Screen::Report), finish_test)
@@ -202,6 +207,33 @@ pub fn open_sheet(
     *design = d;
     history.reset(design);
     tool.reset_for(sheets.current());
+}
+
+/// Keeps the pre-test check (bill and blocking limits) current.
+fn update_check(design: Res<Design>, sheets: Res<Sheets>, mut check: ResMut<ScenarioCheck>) {
+    let key = (design.revision, sheets.current);
+    if check.key == Some(key) {
+        return;
+    }
+    let (bill, violations) = ScenarioCheck::compute(sheets.current(), &design, &sheets.costs);
+    *check = ScenarioCheck {
+        bill,
+        violations,
+        key: Some(key),
+    };
+}
+
+/// Puts the sheet's play table in the lab.
+fn sync_table(
+    sheets: Res<Sheets>,
+    mut table: ResMut<breakit_lab::PlayTable>,
+    mut shown: Local<Option<Rig>>,
+) {
+    let rig = sheets.current().rig;
+    if *shown != Some(rig) {
+        *shown = Some(rig);
+        *table = breakit_lab::PlayTable::builtin(rig.table());
+    }
 }
 
 fn close_overlay(mut overlay: ResMut<Overlay>) {
@@ -349,6 +381,7 @@ fn apply_flow_actions(
     mut history: ResMut<History>,
     mut tool: ResMut<BuildTool>,
     mut themes: ResMut<crate::ui::theme::Themes>,
+    check: Res<ScenarioCheck>,
 ) {
     let screen = *screen.get();
     for a in actions.read() {
@@ -399,24 +432,31 @@ fn apply_flow_actions(
                 next.set(Screen::Register);
             }
             (UiAction::RunTest, Screen::Build) => {
-                if !design.beams.is_empty() {
+                // The build HUD lists what blocks the test.
+                if !design.beams.is_empty() && !check.blocks_test() {
                     next.set(Screen::Test);
                 }
             }
             (UiAction::AbortTest, Screen::Test) => next.set(Screen::Build),
             (UiAction::Revise, Screen::Report) => {
+                // Pin what broke in the test, or after a pass what the
+                // proof test broke first.
+                let test_end = sheets.current().def.duration as f32;
                 pins.pins = last
                     .record
                     .broken_members()
                     .into_iter()
                     .filter_map(|m| {
                         let t = last.record.events.iter().find_map(|e| match e.event {
-                            crate::scenario::TestEvent::Broke { member, .. } if member == m => {
+                            crate::scenario::TestEvent::Broke { member, .. }
+                                if member == m && (e.time > test_end) == last.passed =>
+                            {
                                 Some(e.time)
                             }
                             _ => None,
                         })?;
-                        Some((m, format!("{}: broke {:.1} s", last.letter, t)))
+                        let when = if t > test_end { "proof" } else { "broke" };
+                        Some((m, format!("{}: {when} {:.1} s", last.letter, t)))
                     })
                     .collect();
                 pins.beam_count = design.beams.len();
@@ -463,28 +503,36 @@ fn toggle(cur: Overlay, to: Overlay) -> Overlay {
 }
 
 /// Judges the run that just ended and files it as a revision.
-fn finish_test(
+pub fn finish_test(
     sheets: Res<Sheets>,
     record: Res<TestRecord>,
+    outcome: Res<TestOutcome>,
     mut revisions: ResMut<Revisions>,
     mut last: ResMut<LastTest>,
 ) {
     let s = sheets.current();
-    let checks = judge(s, &record);
-    let ok = passed(&checks);
+    let report = outcome.0.clone();
+    let ok = report.as_ref().is_some_and(|r| r.passed);
+    if let Some(r) = &report {
+        info!("test report\n{}", r.summary());
+    }
     let letter = revisions.next_letter(s.id);
     revisions.push(
         s.id,
         Revision {
             letter,
             passed: ok,
-            held: record.first_break.unwrap_or(s.total_duration()),
+            held: record.first_break.unwrap_or(s.def.duration as f32),
             cost: record.cost,
         },
     );
     *last = LastTest {
         record: record.clone(),
-        checks,
+        checks: report
+            .as_ref()
+            .map(|r| r.criteria.clone())
+            .unwrap_or_default(),
+        report,
         passed: ok,
         letter,
     };
@@ -496,10 +544,20 @@ mod tests {
 
     #[test]
     fn later_sheets_unlock_when_the_one_before_passes() {
-        let sheets = Sheets::default();
+        let mut sheets = Sheets::default();
+        // A second bridge sheet after the first.
+        let mut second = sheets.all[0].clone();
+        second.id = "B-02";
+        sheets.all.insert(1, second);
         let mut revs = Revisions::default();
         assert!(unlocked(&sheets, &revs, 0));
         assert!(!unlocked(&sheets, &revs, 1));
+        let tower = sheets
+            .all
+            .iter()
+            .position(|s| s.rig == Rig::Towers)
+            .unwrap();
+        assert!(unlocked(&sheets, &revs, tower));
         let sandbox = sheets.all.iter().position(|s| s.sandbox).unwrap();
         assert!(unlocked(&sheets, &revs, sandbox));
         revs.push(

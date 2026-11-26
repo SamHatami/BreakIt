@@ -42,6 +42,33 @@ fn settled_cantilever_matches_static_solve() {
 }
 
 #[test]
+fn point_mass_weighs_like_a_static_tip_load() {
+    let (s, ids) = cantilever(2.0, 10, Material::steel());
+    let tip = *ids.last().unwrap();
+    let kg = 50.0;
+    let mut loads = s.self_weight_loads(9.81);
+    loads.push(NodeLoad::force(tip, Vec3::new(0.0, -kg * 9.81, 0.0)));
+    let stat = solve_static(&s, &loads).unwrap();
+    let mut sim = DynamicSim::new(
+        &s,
+        SimConfig {
+            damping: 8.0,
+            plasticity: false,
+            ..Default::default()
+        },
+    );
+    let before = sim.node_mass(tip);
+    sim.add_point_mass(tip, kg);
+    assert!((sim.node_mass(tip) - before - kg).abs() < 1e-9);
+    // Fixed nodes stay fixed.
+    sim.add_point_mass(ids[0], kg);
+    assert_eq!(sim.node_mass(ids[0]), 0.0);
+    assert!(sim.settle(10.0, 1e-6));
+    let (d, e) = (sim.displacement(tip).y, stat.displacements[tip].y);
+    assert!(rel_err(d, e) < 0.01, "point mass {d:e} vs static {e:e}");
+}
+
+#[test]
 fn self_weight_matches_static_solve() {
     let (s, ids) = cantilever(3.0, 12, Material::steel());
     let tip = *ids.last().unwrap();

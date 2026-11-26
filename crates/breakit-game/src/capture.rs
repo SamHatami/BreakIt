@@ -1,6 +1,6 @@
 //! Scripted capture for headless checks: set `BREAKIT_CAPTURE=<dir>` and
 //! the game walks the whole loop on its own (register, brief, build a
-//! truss on sheet B-02, test, report), saves a screenshot of each screen,
+//! truss on sheet B-01, test, report), saves a screenshot of each screen,
 //! pulls the camera back for a shot of the lab and exits. Used by agents and CI to see the game without a person at
 //! the screen, e.g. `xvfb-run cargo run -p breakit-game`.
 //!
@@ -18,7 +18,7 @@ use crate::analysis::Simulation;
 use crate::build::BuildTool;
 use crate::camera::OrbitCamera;
 use crate::design::{BeamKind, Design};
-use crate::flow::{Revision, Revisions, Screen, UiAction};
+use crate::flow::{Screen, UiAction};
 use crate::scenario::{Sheets, TestRecord};
 use crate::ui::theme::Themes;
 
@@ -59,7 +59,6 @@ fn capture_script(
     mut s: Local<Script>,
     screen: Res<State<Screen>>,
     sheets: Res<Sheets>,
-    mut revisions: ResMut<Revisions>,
     mut design: ResMut<Design>,
     mut tool: ResMut<BuildTool>,
     rec: Res<TestRecord>,
@@ -83,17 +82,9 @@ fn capture_script(
     match s.step {
         // Shaders compile on the first frames.
         0 if waited >= 90 => {
-            // Pretend B-01 passed so B-02 is open, and select it.
-            revisions.push(
-                sheets.all[0].id,
-                Revision {
-                    letter: 'A',
-                    passed: true,
-                    held: 7.0,
-                    cost: 3_900.0,
-                },
-            );
-            actions.write(UiAction::SelectSheet(1));
+            // The first bridge sheet; select it in case another is open.
+            let i = sheets.all.iter().position(|s| s.id == "B-01").unwrap_or(0);
+            actions.write(UiAction::SelectSheet(i));
             advance(&mut s);
         }
         1 if waited >= 20 => {
@@ -131,10 +122,12 @@ fn capture_script(
             advance(&mut s);
         }
         7 => {
-            let t = sim.map(|s| s.sim.time()).unwrap_or(0.0);
+            let t = sim.map(|s| s.run().time()).unwrap_or(0.0);
             let after_break = rec.first_break.is_some_and(|b| t > b as f64 + 0.15);
             if *screen.get() == Screen::Test && (after_break || t > 7.0) {
                 shot(&mut commands, "4-test.png");
+                // Play the rest (and the proof test) fast.
+                actions.write(UiAction::SimFaster);
                 advance(&mut s);
             }
         }
@@ -160,7 +153,7 @@ fn capture_script(
     }
 }
 
-/// A Warren truss over sheet B-02's 6 m span: `chord` top and bottom,
+/// A Warren truss over sheet B-01's 6 m span: `chord` top and bottom,
 /// `web` diagonals.
 fn build_truss(d: &mut Design, chord: BeamKind, web: BeamKind) {
     let bottom: Vec<usize> = (-3..=3)

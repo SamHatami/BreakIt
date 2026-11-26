@@ -64,23 +64,12 @@ impl BeamKind {
         (self.section().area * self.material().density) as f32
     }
 
-    /// Price per kilogram of material.
-    pub fn price_per_kg(self) -> f32 {
-        match self {
-            BeamKind::SteelTube => 30.0,
-            BeamKind::Timber => 25.0,
-        }
-    }
-
-    /// Price per metre of member.
-    pub fn cost_per_metre(self) -> f32 {
-        self.mass_per_metre() * self.price_per_kg()
+    /// Price per metre of member under a scenario cost model (joints not
+    /// included).
+    pub fn cost_per_metre(self, costs: &breakit_scenario::CostModel) -> f32 {
+        self.mass_per_metre() * costs.price_per_kg(self.material().kind.into()) as f32
     }
 }
-
-/// Price of each joint (node) the player places. Fixed scenario nodes are
-/// free.
-pub const NODE_COST: f32 = 150.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Beam {
@@ -113,9 +102,11 @@ pub struct Design {
     pub supports: Vec<Option<SupportKind>>,
     /// Applied point load per node, in newtons (world frame).
     pub loads: Vec<Vec3>,
-    /// Nodes the scenario placed (anchors, load points). They can't be
+    /// Nodes the scenario placed (payload points). They can't be
     /// moved, deleted or have their support changed.
     pub locked: Vec<bool>,
+    /// The sheet's foundations: a node placed on one gets its support.
+    pub anchors: Vec<(Vec3, SupportKind)>,
     /// Bumped on every edit so systems can react to changes cheaply.
     pub revision: u64,
 }
@@ -161,7 +152,8 @@ impl Design {
             return i;
         }
         self.nodes.push(p);
-        self.supports.push(None);
+        let anchor = self.anchors.iter().find(|(a, _)| a.distance(p) <= 0.05);
+        self.supports.push(anchor.map(|(_, k)| *k));
         self.loads.push(Vec3::ZERO);
         self.locked.push(false);
         self.touch();
@@ -278,23 +270,6 @@ impl Design {
         self.nodes[m.a].distance(self.nodes[m.b])
     }
 
-    /// Price of the design: members by mass, plus each joint the player
-    /// placed.
-    pub fn cost(&self) -> f32 {
-        let members: f32 = (0..self.beams.len())
-            .map(|i| self.beam_length(i) * self.beams[i].kind.cost_per_metre())
-            .sum();
-        let joints = self.locked.iter().filter(|l| !**l).count() as f32 * NODE_COST;
-        members + joints
-    }
-
-    /// Total member mass, kg.
-    pub fn mass(&self) -> f32 {
-        (0..self.beams.len())
-            .map(|i| self.beam_length(i) * self.beams[i].kind.mass_per_metre())
-            .sum()
-    }
-
     pub fn total_length(&self) -> f32 {
         self.beams
             .iter()
@@ -386,18 +361,12 @@ mod tests {
     }
 
     #[test]
-    fn cost_counts_member_mass_and_player_joints() {
-        let mut d = Design::default();
-        let a = d.add_locked_node(Vec3::ZERO, Some(SupportKind::Pinned));
-        let b = d.add_node(Vec3::X * 2.0);
-        d.add_beam(a, b, BeamKind::SteelTube);
+    fn member_mass_and_price_per_metre() {
         let steel = BeamKind::SteelTube;
         // Tube 50 mm radius, 5 mm wall: about 11.7 kg/m.
         assert!((steel.mass_per_metre() - 11.7).abs() < 0.1);
-        let expected = 2.0 * steel.cost_per_metre() + NODE_COST;
-        assert!((d.cost() - expected).abs() < 1e-3);
-        d.set_beam_kind(0, BeamKind::Timber);
-        assert!(d.cost() < expected);
+        let costs = breakit_scenario::CostModel::default();
+        assert!(BeamKind::Timber.cost_per_metre(&costs) < steel.cost_per_metre(&costs));
     }
 
     #[test]

@@ -1,0 +1,12 @@
+[package]
+name = "breakit-scenario"
+version = "0.1.0"
+description = "BreakIt scenarios: data-driven test briefs (limits, anchors, loads, objectives), the test run that drives breakit-core, and scoring. No engine dependency."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+breakit-core = { path = "../breakit-core" }
+ron = "0.12"
+serde = { version = "1", features = ["derive"] }

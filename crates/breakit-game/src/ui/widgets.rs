@@ -14,7 +14,23 @@ use crate::flow::UiAction;
 
 /// A text node.
 pub fn text(s: impl Into<String>, role: TextRole, color: Swatch) -> impl Bundle {
-    (Text::new(s), Ink::new(role, color))
+    (Text::new(plain(s.into())), Ink::new(role, color))
+}
+
+/// The built-in font only has ASCII: spell out the symbols other crates'
+/// text uses (report rows, limit sentences).
+pub fn plain(s: String) -> String {
+    if s.is_ascii() {
+        return s;
+    }
+    s.replace('\u{2264}', "<=")
+        .replace('\u{2265}', ">=")
+        .replace('\u{00d7}', "x")
+        .replace(['\u{2013}', '\u{2014}'], "-")
+        .replace('\u{00b2}', "2")
+        .chars()
+        .map(|c| if c.is_ascii() { c } else { '?' })
+        .collect()
 }
 
 /// A panel: theme panel ground, strong ink border, keeps clicks off the

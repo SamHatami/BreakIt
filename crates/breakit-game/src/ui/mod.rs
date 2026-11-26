@@ -39,7 +39,10 @@ impl Plugin for GameUiPlugin {
             .add_systems(OnEnter(Screen::Brief), screens::spawn_brief)
             .add_systems(OnEnter(Screen::Build), hud::spawn_build_hud)
             .add_systems(OnEnter(Screen::Test), hud::spawn_test_hud)
-            .add_systems(OnEnter(Screen::Report), screens::spawn_report)
+            .add_systems(
+                OnEnter(Screen::Report),
+                screens::spawn_report.after(crate::flow::finish_test),
+            )
             .add_systems(
                 PostUpdate,
                 (
@@ -72,6 +75,19 @@ pub struct GameView<'w> {
     pub overlay: Res<'w, Overlay>,
     pub scale: Res<'w, DeflectionScale>,
     pub theme: Res<'w, theme::Themes>,
+    pub check: Res<'w, crate::scenario::ScenarioCheck>,
+}
+
+impl GameView<'_> {
+    /// The design's cost from the scenario cost model.
+    pub fn cost(&self) -> f32 {
+        self.check.bill.total() as f32
+    }
+
+    /// The design's mass, kg.
+    pub fn mass(&self) -> f32 {
+        self.check.bill.mass as f32
+    }
 }
 
 /// A panel rebuilt from game state.
