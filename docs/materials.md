@@ -1,12 +1,16 @@
 # Material models (2026-11-26)
 
-Every member is still a corotational beam in the solver. Once per substep the
-material model (`src/damage.rs`) reads the member's stretch and end rotations
-and adjusts its rest shape (axial offset, plastic hinge rotations) and its
-stiffness so the internal forces follow the material law. Stiffness only goes
-down, so a factorisation the direct solver reuses for a few substeps
-over-estimates stiffness and stays stable. Strengths are characteristic
-values without safety factors.
+Every member is still a corotational beam in the solver. The solver does the
+plastic return itself (inside the substep solve, with the tangent stiffness,
+see `docs/solver-spike.md`) against yield caps that the material model in
+`src/damage.rs` sets: an axial yield force for tension and for compression and
+a plastic moment per bending axis, plus a separate axial stiffness in tension
+for cracked concrete. After every substep the model reads the committed forces
+and plastic increments, books damage, checks brittle limits (cracking,
+splintering, fibre rupture, shear) and sets stiffness and caps for the next
+substep. Stiffness only goes down, except that cracked concrete is stiffer in
+compression than in tension. Strengths are characteristic values without
+safety factors.
 
 | Material | Constructor | Warning before failure | Failure modes (`BreakCause`) |
 | --- | --- | --- | --- |
@@ -40,8 +44,17 @@ values without safety factors.
 
 ## Performance
 
-Material update per 60 Hz frame on the 1,565-member bench bridge: steel 1.6 ms, reinforced concrete 2.7 ms, timber 2.2 ms, CFRP 2.1 ms (frames 14 to 17 ms total, single thread). Concrete laws are shared between members with the same material and section, and the interaction curve is sampled at 64 even steps in N for O(1) lookup; per-member tables made concrete 13.5 ms from cache misses.
+Frame times with every member of the `bench` cases switched to one material (default config, 4 substeps, mean elastic / mean collapsing, ms, shared 4-core machine so ±20 %):
+
+| Case | Members | Steel | Reinforced concrete | Timber | CFRP |
+| --- | --- | --- | --- | --- | --- |
+| tower 3x3x8 | 368 | 1.4 / 2.1 | 1.5 / 2.6 | 1.8 / 2.6 | 1.5 / 2.8 |
+| bridge 20 panels | 488 | 1.8 / 2.8 | 1.9 / 3.1 | 1.7 / 2.8 | 2.0 / 2.5 |
+| tower 5x5x12 | 1,272 | 6.5 / 10.8 | 6.3 / 8.8 | 6.6 / 11.0 | 5.3 / 12.5 |
+| bridge 60 panels | 2,172 | 10.5 / 15.6 | 10.6 / 16.5 | 10.3 / 15.8 | 9.6 / 13.4 |
+
+Concrete laws are shared between members with the same material and section, and the interaction curve is sampled at 64 even steps in N for O(1) lookup; per-member tables cost 13.5 ms per frame in cache misses on a 1,565-member bridge.
 
 ## Simplifications
 
-Biaxial bending axes yield independently. No links (stirrups) in concrete, no tension stiffening, no confinement. Symmetric corner reinforcement only. Damaged bending stiffness does not recover when cracks close. Timber grain angle is fixed per material. Composite delamination happens once per plane.
+Biaxial bending axes yield independently. No links (stirrups) in concrete, no tension stiffening, no confinement. Symmetric corner reinforcement only. Damaged bending stiffness does not recover when cracks close. Timber grain angle is fixed per material. Composite delamination happens once per plane. Timber crushing and concrete yield/crushing flow at the solver's viscoplastic rate (`plastic_relaxation`), so a slight overload takes a few frames to crush through. The Gauss-Seidel solver ignores the cracked tension stiffness.

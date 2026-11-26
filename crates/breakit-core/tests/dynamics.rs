@@ -280,3 +280,142 @@ fn short_stiff_members_survive_a_sudden_heavy_load() {
     let (d, e) = (sim.displacement(ids[8]).y, stat.displacements[ids[8]].y);
     assert!(rel_err(d, e) < 0.01, "xpbd {d:e} vs static {e:e}");
 }
+
+fn with_substeps(substeps: usize, plasticity: bool) -> SimConfig {
+    SimConfig {
+        substeps,
+        ..quiet(plasticity)
+    }
+}
+
+#[test]
+fn buckled_column_ends_in_the_same_place_at_any_substep_count() {
+    // Above the Euler load the column folds right over: fast, large rotations,
+    // which is where a reused factorisation used to diverge.
+    let mat = Material::steel().elastic_only();
+    let sec = tube();
+    let l = 3.0;
+    let p_cr = PI * PI * 210e9 * sec.iz / (4.0 * l * l);
+    let tip = |substeps: usize, refactor_every: usize| {
+        let mut s = Structure::new();
+        let ids = s.add_line(Vec3::zeros(), Vec3::new(0.0, l, 0.0), 12, &mat, &sec);
+        s.add_support(Support::fixed(ids[0]));
+        let mut sim = DynamicSim::new(
+            &s,
+            SimConfig {
+                damping: 2.0,
+                refactor_every,
+                ..with_substeps(substeps, false)
+            },
+        );
+        ramp_load(
+            &mut sim,
+            ids[12],
+            Vec3::new(0.001 * p_cr, -1.2 * p_cr, 0.0),
+            2.0,
+            8.0,
+        );
+        sim.displacement(ids[12])
+    };
+    let reference = tip(16, 1);
+    assert!(reference.x > 1.0 && reference.x < l, "tip {reference:?}");
+    for (substeps, refactor_every) in [(8, 4), (4, 4), (2, 16), (1, 16)] {
+        let d = tip(substeps, refactor_every);
+        assert!(
+            (d - reference).norm() < 0.01 * reference.norm(),
+            "{substeps} substeps: {d:?} vs {reference:?}"
+        );
+    }
+}
+
+#[test]
+fn plastic_flow_rate_does_not_depend_on_substeps() {
+    // A tie held at 110% of its yield force stretches at a rate set by
+    // `plastic_relaxation`, not by how often the solver runs.
+    let rupture_time = |substeps: usize| {
+        let mut s = Structure::new();
+        let ids = s.add_line(
+            Vec3::zeros(),
+            Vec3::new(0.0, -2.0, 0.0),
+            2,
+            &Material::steel(),
+            &tube(),
+        );
+        s.add_support(Support::fixed(ids[0]));
+        let ny = 355e6 * tube().area;
+        let mut sim = DynamicSim::new(&s, with_substeps(substeps, true));
+        sim.set_force(ids[2], Vec3::new(0.0, -1.1 * ny, 0.0));
+        for _ in 0..240 {
+            sim.step(1.0 / 60.0);
+        }
+        let ev = sim.break_events();
+        assert!(!ev.is_empty(), "{substeps} substeps: no rupture");
+        assert_eq!(ev[0].cause, BreakCause::Rupture);
+        ev[0].time
+    };
+    let reference = rupture_time(64);
+    for substeps in [16, 4, 2, 1] {
+        let t = rupture_time(substeps);
+        assert!(
+            rel_err(t, reference) < 0.05,
+            "{substeps} substeps: rupture at {t} s vs {reference} s"
+        );
+    }
+}
+
+#[test]
+fn taut_slender_tie_sways_like_a_string() {
+    // A thin tie pinned at one end and pulled to 90% of yield at the other:
+    // its sideways stiffness is almost all geometric (T/L). Without that term
+    // in the solver matrix this case blew up even at 16 substeps.
+    let sec = Section::tube(0.006, 0.002);
+    let (l, n) = (4.0, 16);
+    let (tension, side) = (0.9 * 355e6 * sec.area, 10.0);
+    for substeps in [16, 4, 1] {
+        let mut s = Structure::new();
+        let mat = Material::steel().elastic_only();
+        let ids = s.add_line(Vec3::zeros(), Vec3::new(l, 0.0, 0.0), n, &mat, &sec);
+        s.add_support(Support::pinned(ids[0]));
+        let mut sim = DynamicSim::new(&s, with_substeps(substeps, false));
+        ramp_load(&mut sim, ids[n], Vec3::new(tension, -side, 0.0), 1.0, 6.0);
+        assert!(sim.max_speed() < 1e-6, "{substeps} substeps: not at rest");
+        // The tie lines up with the resultant force: y/L = side/tension.
+        let (d, e) = (sim.displacement(ids[n]).y, -side * l / tension);
+        assert!(
+            rel_err(d, e) < 0.02,
+            "{substeps} substeps: {d:e} vs string {e:e}"
+        );
+        let st = sim.solver_stats();
+        assert_eq!(
+            st.backtracks, 0,
+            "{substeps} substeps: the plain step should be good enough"
+        );
+    }
+}
+
+#[test]
+fn both_linear_backends_match_the_static_solve() {
+    use breakit_core::linsolve::Backend;
+    let (s, ids) = cantilever(2.0, 10, Material::steel());
+    let tip = *ids.last().unwrap();
+    let f = Vec3::new(0.0, -1000.0, 300.0);
+    let e = solve_static(&s, &[NodeLoad::force(tip, f)])
+        .unwrap()
+        .displacements[tip];
+    for backend in [Backend::Cholesky, Backend::BlockJacobi] {
+        let mut sim = DynamicSim::new(
+            &s,
+            SimConfig {
+                linear_backend: backend,
+                ..quiet(false)
+            },
+        );
+        sim.set_force(tip, f);
+        assert!(sim.settle(10.0, 1e-6), "{backend:?} did not settle");
+        let d = sim.displacement(tip);
+        assert!(
+            (d - e).norm() < 0.01 * e.norm(),
+            "{backend:?}: {d:?} vs static {e:?}"
+        );
+    }
+}
