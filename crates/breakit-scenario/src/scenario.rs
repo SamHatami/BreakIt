@@ -189,9 +189,30 @@ pub struct Payload {
     /// Losing it fails the test.
     #[serde(default)]
     pub critical: bool,
+    /// Drag coefficient on its `size` box facing the wind (1.8 for a
+    /// sign board, about 1.2 for a cabinet). No `size`, no wind on it.
+    #[serde(default = "default_drag")]
+    pub drag: f64,
+}
+
+fn default_drag() -> f64 {
+    1.2
 }
 
 impl Payload {
+    /// Area of its `size` box facing a horizontal wind along `dir`, m².
+    pub fn wind_area(&self, dir: [f64; 3]) -> f64 {
+        let Some([sx, sy, sz]) = self.size else {
+            return 0.0;
+        };
+        let (dx, dz) = (dir[0], dir[2]);
+        let n = (dx * dx + dz * dz).sqrt();
+        if n < 1e-12 {
+            return 0.0;
+        }
+        sy * ((dx / n).abs() * sz + (dz / n).abs() * sx)
+    }
+
     /// Rough contact radius, m: half the largest drawn size, else half the
     /// footprint span, else 0.3 m.
     pub fn radius(&self) -> f64 {
@@ -302,6 +323,79 @@ pub enum Event {
         #[serde(default = "default_ramp")]
         fade: f64,
     },
+    /// The fan wall blows: drag on every member (core `Wind`, with gusts,
+    /// shielding and vortex shedding) and on payloads with a `size`.
+    Wind {
+        name: String,
+        start: f64,
+        /// s; `None` blows to the end of the test.
+        #[serde(default)]
+        duration: Option<f64>,
+        /// Spin-up and spin-down time, s.
+        #[serde(default = "default_ramp")]
+        ramp: f64,
+        /// Mean speed in the jet core, m/s.
+        speed: f64,
+        /// Direction the wind blows towards (horizontal, normalised on
+        /// use). The fan wall stands upstream of the table.
+        direction: [f64; 3],
+        /// Along-wind turbulence intensity σ/U; 0 is a steady wind.
+        #[serde(default)]
+        gusts: f64,
+        /// The fan wall's jet: centre and half sizes across and up, m.
+        /// `None` is a uniform wind over the whole table.
+        #[serde(default)]
+        jet: Option<Jet>,
+    },
+    /// Water in the flume (core `Water`): the level, a current and a wave.
+    /// The flume bed is the lowest anchor's level.
+    Water {
+        name: String,
+        start: f64,
+        #[serde(default)]
+        duration: Option<f64>,
+        /// Fill / drain ramp, s.
+        #[serde(default = "default_ramp")]
+        ramp: f64,
+        /// Flume bed, absolute y, m.
+        bed: f64,
+        /// Still water level, absolute y, m.
+        level: f64,
+        /// Current, m/s (horizontal).
+        #[serde(default)]
+        current: [f64; 3],
+        #[serde(default)]
+        wave: Option<Wave>,
+        /// Rest position of the paddle along the wave direction, m.
+        #[serde(default = "default_paddle")]
+        paddle: f64,
+    },
+}
+
+fn default_paddle() -> f64 {
+    -13.6
+}
+
+/// The fan wall's jet.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Jet {
+    pub center: [f64; 3],
+    pub half_width: f64,
+    pub half_height: f64,
+}
+
+/// A wave made by the flume's paddle.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Wave {
+    /// One solitary wave (a tsunami-like surge) of crest `height` above
+    /// still water, m, travelling along `direction` from the paddle.
+    Surge { height: f64, direction: [f64; 3] },
+    /// Regular waves, crest to trough `height` m, `period` s.
+    Regular {
+        height: f64,
+        period: f64,
+        direction: [f64; 3],
+    },
 }
 
 impl Event {
@@ -309,7 +403,9 @@ impl Event {
         match self {
             Event::Convoy { name, .. }
             | Event::DeckLoad { name, .. }
-            | Event::GroundShake { name, .. } => name,
+            | Event::GroundShake { name, .. }
+            | Event::Wind { name, .. }
+            | Event::Water { name, .. } => name,
         }
     }
 }

@@ -7,6 +7,8 @@
 //! of mass `height` above the feet: sideways inertia H acting there is a
 //! moment h ŷ × H about the footprint, which goes on the feet as the
 //! smallest set of vertical forces with that moment. The foot reactions
+//! An outside force on the body (wind on a sign) acts at the same height and
+//! is added to the feet with its couple. The foot reactions
 //! then say whether a resting item lifts a foot (tips) or out-pulls its
 //! friction (slides), and whether bolts are pulled out or sheared.
 //!
@@ -40,6 +42,10 @@ pub struct Equipment {
     /// Vertical force per foot from the overturning couple, N (applied to
     /// the structure, + up).
     couple: Vec<f64>,
+    /// Outside force on the body this frame (wind), N, acting `height`
+    /// above the feet. Set before each step; it goes to the structure
+    /// through the feet with its overturning couple.
+    pub wind: Vec3,
     pub peak_tilt: f64,
     pub peak_sag: f64,
     pub peak_drift: f64,
@@ -72,6 +78,7 @@ impl Equipment {
             unstable: 0.0,
             prev_velocity: None,
             couple: vec![0.0; n],
+            wind: Vec3::zeros(),
             peak_tilt: 0.0,
             peak_sag: 0.0,
             peak_drift: 0.0,
@@ -141,7 +148,7 @@ impl Equipment {
         self.prev_velocity = Some(v);
 
         // Inertial force on the body in the table frame, horizontal part.
-        let mut h = -(ground + a_rel) * self.mass;
+        let mut h = -(ground + a_rel) * self.mass + self.wind;
         h.y = 0.0;
         let moment = (Vec3::y() * self.height).cross(&h);
         self.couple = self.couple_for(moment);
@@ -240,8 +247,10 @@ impl Equipment {
         if self.lost {
             return;
         }
+        let share = Vec3::new(self.wind.x, 0.0, self.wind.z) / self.feet.len() as f64;
         for (&n, s) in self.feet.iter().zip(&self.couple) {
             forces[n].y += s;
+            forces[n] += share;
         }
     }
 }
@@ -269,6 +278,7 @@ mod tests {
             unstable: 0.0,
             prev_velocity: None,
             couple: vec![0.0; n],
+            wind: Vec3::zeros(),
             peak_tilt: 0.0,
             peak_sag: 0.0,
             peak_drift: 0.0,
