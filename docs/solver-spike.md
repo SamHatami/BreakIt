@@ -18,7 +18,7 @@ Probe: 2 m steel tube cantilever (r 50 mm, t 5 mm), 10 elements, 1 kN tip load, 
 
 ## Fixed since the first push
 
-All 17 tests pass (7 static, 10 dynamic).
+All 17 solver tests pass (7 static, 10 dynamic). Material models and their 15 tests: `docs/materials.md`.
 
 - Damping was applied to the external-force velocity increment, making every settled deflection about 1.7% too small. Damping now applies before forces are added.
 - Suddenly applied loads overshoot to about 2x their static effect, which made the "safe" plastic and buckling cases fail. Tests now ramp loads (`ramp_load`); the game should ramp scenario loads too.

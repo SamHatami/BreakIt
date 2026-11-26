@@ -19,6 +19,8 @@
 //! added at that end so the moment stays at capacity. Axial yield adds plastic
 //! elongation the same way. Members break when accumulated plastic deformation
 //! passes the material's capacity, or at first yield for brittle materials.
+//! The yield caps, stiffness changes and failure rules per material live in
+//! [`crate::damage`].
 //!
 //! Axial force reduces the plastic moment, Mp,N = Mp (1 − (N/Ny)²).
 //! Simplifications for now: the two bending planes yield independently,
@@ -27,6 +29,7 @@
 
 use nalgebra::{Quaternion, UnitQuaternion};
 
+use crate::damage::{self, Committed, Law, LawCache, MatState, Mech, MemberDamage};
 use crate::frame::member_axes;
 use crate::linsolve::{tri, LinSolver, Policy, Stats, BLOCK_NNZ};
 use crate::{Structure, Vec3};
@@ -113,21 +116,16 @@ impl Default for SimConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BreakCause {
-    /// Axial plastic strain passed the rupture strain.
-    Rupture,
-    /// A plastic hinge rotated past its capacity.
-    Hinge,
-    /// A brittle member reached its strength.
-    Brittle,
-}
+pub use crate::damage::BreakCause;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct BreakEvent {
     pub member: usize,
     pub time: f64,
     pub cause: BreakCause,
+    /// Where along the member it failed: 0 = end a, 1 = end b, 0.5 for
+    /// failures spread along the member (axial rupture, shear splits).
+    pub position: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -156,28 +154,29 @@ struct Beam {
     tb: Vec3,
     na: Vec3,
     nb: Vec3,
+    /// Axial stiffness EA/L in compression, and in tension until cracked.
     k_axial: f64,
+    /// Axial stiffness in tension (lower once concrete cracks through).
+    k_tension: f64,
     k_torsion: f64,
     /// EI/L about local y and local z.
     ei_l: [f64; 2],
-    n_yield: f64,
-    /// Plastic moments about local y and z.
-    m_plastic: [f64; 2],
-    /// Plastic moments reduced by the axial force of the previous substep,
-    /// held fixed while a substep is solved.
+    /// Axial yield force [tension, compression] set by the material for this
+    /// substep; infinite where the material does not yield.
+    n_cap: [f64; 2],
+    /// Plastic moments about local y and z for this substep (reduced by the
+    /// previous substep's axial force); infinite for no hinges.
     mp_now: [f64; 2],
     /// Which yield conditions were active at the last material update.
     yield_mask: u8,
     plastic_elongation: f64,
     /// Plastic hinge rotations [axis][end], axis 0 = y, 1 = z.
     hinge: [[f64; 2]; 2],
-    plastic_strain: f64,
-    hinge_rotation: f64,
-    brittle: bool,
-    rupture_strain: f64,
-    hinge_capacity: f64,
     broken: bool,
-    utilization: f64,
+    /// Material law, its history and the damage reported to renderers.
+    law: Law,
+    mat: MatState,
+    damage: MemberDamage,
     /// Accumulated XPBD multipliers for this substep, one per constraint.
     lambda: [f64; 6],
 }
@@ -348,6 +347,7 @@ impl DynamicSim {
         let mut mass = vec![0.0; s.nodes.len()];
         let mut inertia = vec![0.0; s.nodes.len()];
         let mut beams = Vec::with_capacity(s.members.len());
+        let mut laws = LawCache::default();
         for (i, m) in s.members.iter().enumerate() {
             let l = s.member_length(i);
             let mm = m.material.density * m.section.area * l;
@@ -356,12 +356,11 @@ impl DynamicSim {
                 inertia[n] += mm * l * l / 24.0;
             }
             let (x, y, _z) = member_axes(&s.nodes[m.a], &s.nodes[m.b]);
-            let (e, g, fy) = (
-                m.material.youngs_modulus,
-                m.material.shear_modulus,
-                m.material.yield_strength,
-            );
+            let (e, g) = (m.material.youngs_modulus, m.material.shear_modulus);
             let sec = &m.section;
+            let (k_axial, ei_l) = (e * sec.area / l, [e * sec.iy / l, e * sec.iz / l]);
+            let law = laws.get(&m.material, sec);
+            let mech = Mech::new(&law, k_axial, ei_l, config.plasticity);
             beams.push(Beam {
                 a: m.a,
                 b: m.b,
@@ -370,22 +369,19 @@ impl DynamicSim {
                 tb: x,
                 na: y,
                 nb: y,
-                k_axial: e * sec.area / l,
+                k_axial,
+                k_tension: mech.k_tension,
                 k_torsion: g * sec.j / l,
-                ei_l: [e * sec.iy / l, e * sec.iz / l],
-                n_yield: fy * sec.area,
-                m_plastic: [fy * sec.zy, fy * sec.zz],
-                mp_now: [fy * sec.zy, fy * sec.zz],
+                ei_l,
+                n_cap: mech.n_cap,
+                mp_now: mech.mp,
                 yield_mask: 0,
                 plastic_elongation: 0.0,
                 hinge: [[0.0; 2]; 2],
-                plastic_strain: 0.0,
-                hinge_rotation: 0.0,
-                brittle: m.material.brittle,
-                rupture_strain: m.material.rupture_strain,
-                hinge_capacity: m.material.hinge_rotation_capacity,
                 broken: false,
-                utilization: 0.0,
+                mat: MatState::new(k_axial, ei_l),
+                damage: MemberDamage::new(m.material.kind),
+                law,
                 lambda: [0.0; 6],
             });
         }
@@ -462,13 +458,22 @@ impl DynamicSim {
     pub fn is_broken(&self, member: usize) -> bool {
         self.beams[member].broken
     }
-    /// Utilisation from the last substep: (N/Ny)² + My/Mpy + Mz/Mpz (1.0 = yield).
+    /// Utilisation from the last substep, 1.0 = at capacity. For steel,
+    /// (N/Ny)² + My/Mpy + Mz/Mpz; other materials see [`crate::damage`].
     pub fn utilization(&self, member: usize) -> f64 {
-        self.beams[member].utilization
+        self.beams[member].damage.utilization
     }
-    /// Accumulated plastic hinge rotation of a member, rad.
+    /// Accumulated plastic hinge rotation of a member over both ends, rad.
     pub fn hinge_rotation(&self, member: usize) -> f64 {
-        self.beams[member].hinge_rotation
+        self.beams[member].mat.hinge_rotation
+    }
+    /// Damage state of one member, for drawing it.
+    pub fn damage(&self, member: usize) -> &MemberDamage {
+        &self.beams[member].damage
+    }
+    /// Damage state of every member, in member order.
+    pub fn damage_all(&self) -> impl ExactSizeIterator<Item = &MemberDamage> + '_ {
+        self.beams.iter().map(|b| &b.damage)
     }
     pub fn break_events(&self) -> &[BreakEvent] {
         &self.events
@@ -653,16 +658,19 @@ impl DynamicSim {
     /// an elastic response.
     fn response(&self, i: usize, st: &Strains, r: Option<f64>) -> Response {
         let bm = &self.beams[i];
-        let r = r.filter(|_| !bm.brittle);
+        // Tension and compression may differ in stiffness (cracked concrete)
+        // and yield force; the energy stays continuous through zero.
+        let sense = if st.axial > 0.0 { 0 } else { 1 };
+        let k = if sense == 0 { bm.k_tension } else { bm.k_axial };
         let (fy, rr) = (
             if r.is_some() {
-                bm.n_yield
+                bm.n_cap[sense]
             } else {
                 f64::INFINITY
             },
             r.unwrap_or(0.0),
         );
-        let (n, kt_axial, mut energy, dp_axial) = return_1d(bm.k_axial, st.axial, fy, rr);
+        let (n, kt_axial, mut energy, dp_axial) = return_1d(k, st.axial, fy, rr);
         energy += 0.5 * bm.k_torsion * st.twist * st.twist;
         let mut out = Response {
             n,
@@ -1000,56 +1008,50 @@ impl DynamicSim {
         let r = self.plastic_ratio(h).1;
         let resp = self.response(i, &st, plastic.then_some(r));
         let bm = &mut self.beams[i];
-        let mut cause = None;
-
-        if plastic && bm.brittle && resp.n.abs() > bm.n_yield {
-            cause = Some(BreakCause::Brittle);
-        }
-        if resp.dp_axial != 0.0 {
-            bm.plastic_elongation += resp.dp_axial;
-            bm.plastic_strain += resp.dp_axial.abs() / bm.l0;
-            if bm.plastic_strain > bm.rupture_strain {
-                cause = Some(BreakCause::Rupture);
-            }
-        }
-
-        // Axial force reduces the plastic moment: Mp,N = Mp (1 - n²),
-        // exact for a rectangle and close for tubes.
-        let ratio = (resp.n.abs() / bm.n_yield).min(1.0);
-        let reduce = (1.0 - ratio * ratio).max(0.05);
-        let mut util = ratio * ratio;
+        bm.plastic_elongation += resp.dp_axial;
         for axis in 0..2 {
-            let mut mmax: f64 = 0.0;
             for end in 0..2 {
-                let m = resp.m[axis][end];
-                if plastic && bm.brittle && m.abs() > bm.m_plastic[axis] * reduce {
-                    cause = Some(BreakCause::Brittle);
-                }
-                let d = resp.dp[axis][end];
-                if d != 0.0 {
-                    bm.hinge[axis][end] += d;
-                    bm.hinge_rotation += d.abs();
-                    if bm.hinge_rotation > bm.hinge_capacity {
-                        cause = Some(BreakCause::Hinge);
-                    }
-                }
-                mmax = mmax.max(m.abs());
+                bm.hinge[axis][end] += resp.dp[axis][end];
             }
-            util += mmax / bm.m_plastic[axis];
-            bm.mp_now[axis] = bm.m_plastic[axis] * reduce;
         }
-        bm.utilization = util;
-        if bm.yield_mask != resp.yield_mask {
-            bm.yield_mask = resp.yield_mask;
-        }
-        let bm = &mut self.beams[i];
+        bm.yield_mask = resp.yield_mask;
+        let mut mech = Mech {
+            k_axial: bm.k_axial,
+            k_tension: bm.k_tension,
+            ei_l: bm.ei_l,
+            n_cap: bm.n_cap,
+            mp: bm.mp_now,
+        };
+        let committed = Committed {
+            n: resp.n,
+            m: resp.m,
+            dp_axial: resp.dp_axial,
+            dp: resp.dp,
+            hinge: bm.hinge,
+            l0: bm.l0,
+            len: gm.len,
+        };
+        let failure = damage::update(
+            &bm.law,
+            &mut bm.mat,
+            &mut bm.damage,
+            &mut mech,
+            &committed,
+            plastic,
+        );
+        bm.k_axial = mech.k_axial;
+        bm.k_tension = mech.k_tension;
+        bm.ei_l = mech.ei_l;
+        bm.n_cap = mech.n_cap;
+        bm.mp_now = mech.mp;
 
-        if let Some(cause) = cause {
+        if let Some((cause, position)) = failure {
             bm.broken = true;
             self.events.push(BreakEvent {
                 member: i,
                 time: self.time,
                 cause,
+                position,
             });
         }
     }
