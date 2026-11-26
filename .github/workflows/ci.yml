@@ -35,3 +35,4 @@ jobs:
       - run: cargo check -p breakit-game --all-targets
       - run: cargo check -p breakit-render --all-targets
       - run: cargo test -p breakit-game
+      - run: cargo test -p breakit-lab
