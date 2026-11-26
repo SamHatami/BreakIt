@@ -1,0 +1,14 @@
+[package]
+name = "breakit-render"
+version = "0.1.0"
+description = "Bevy renderer for BreakIt members: GPU beam-curve deformation, procedural materials and damage, fracture debris and particles."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+breakit-core = { path = "../breakit-core" }
+breakit-mesh = { path = "../breakit-mesh" }
+# Same pin as breakit-game; upgrade both together.
+bevy = { version = "=0.20.1", default-features = false, features = ["3d", "ui"] }

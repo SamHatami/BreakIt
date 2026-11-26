@@ -1,0 +1,12 @@
+[package]
+name = "breakit-mesh"
+version = "0.1.0"
+description = "Engine-free procedural geometry for BreakIt: parametric member profiles, beam-curve deformation, fracture pieces, debris and particles."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+breakit-core = { path = "../breakit-core" }
+glam = { version = "0.33", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
