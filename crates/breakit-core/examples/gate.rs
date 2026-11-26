@@ -32,12 +32,12 @@ use std::time::Instant;
 /// under what was measured (see `docs/solver-spike.md`) so that only a
 /// kernel that stopped vectorising trips them. Assembly is mostly scalar
 /// material response and memory traffic: its ratio swings between 1.03 and
-/// 1.2 from run to run on the same machine, so it is only held to "not
-/// slower".
+/// 1.2 from run to run on the same machine and came out at 1.00 on a CI
+/// runner, so it is only held to "not clearly slower".
 const SIMD_GATES: [(&str, f64); 3] = [
     ("block Cholesky factorisation, tower 5x5x12", 1.3),
     ("block Jacobi solve, tower 8x8x16", 1.05),
-    ("element assembly, 20 frames of bridge 120 panels", 1.0),
+    ("element assembly, 20 frames of bridge 120 panels", 0.9),
 ];
 
 /// Threaded time over single-thread time may not exceed this where threads
