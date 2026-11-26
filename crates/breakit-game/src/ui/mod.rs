@@ -34,7 +34,7 @@ impl Plugin for GameUiPlugin {
                 PreUpdate,
                 pointer::pointer_system.after(crate::flow::keyboard_actions),
             )
-            .add_systems(Startup, spawn_overlay_layer)
+            .add_systems(Startup, (theme::load_fonts, spawn_overlay_layer))
             .add_systems(OnEnter(Screen::Register), screens::spawn_register)
             .add_systems(OnEnter(Screen::Brief), screens::spawn_brief)
             .add_systems(OnEnter(Screen::Build), hud::spawn_build_hud)
@@ -129,8 +129,9 @@ impl View {
             View::BuildSheet => hud::build_sheet_key(v),
             View::BuildReadouts => hud::readouts_key(v),
             View::BuildTools => format!(
-                "{:?} {} {} {}",
+                "{:?} {:?} {} {} {}",
                 v.tool.tool,
+                v.tool.plane,
                 v.tool.loads_allowed,
                 v.history.can_undo(),
                 v.history.can_redo()
@@ -199,6 +200,13 @@ fn refresh_views(
 
 /// The overlay layer lives for the whole game, above every screen.
 fn spawn_overlay_layer(mut commands: Commands) {
+    // Soft gradients along the screen edges, under every screen's UI.
+    for (edge, h) in [
+        (theme::EdgeScrim::Top, 260.0),
+        (theme::EdgeScrim::Bottom, 280.0),
+    ] {
+        commands.spawn((edge.node(h), edge, GlobalZIndex(-10), Pickable::IGNORE));
+    }
     commands.spawn((
         widgets::layer(),
         GlobalZIndex(10),

@@ -2,8 +2,8 @@
 //! spawns a small subtree; none of them choose colours or sizes, which come
 //! from the theme through [`Skin`] and [`Ink`].
 //!
-//! Text is plain ASCII on purpose: Bevy's built-in font is a subset, and
-//! symbols like check marks or arrows may be missing from it.
+//! Text goes through [`plain`], which keeps only what the bundled font
+//! draws.
 
 use bevy::ecs::hierarchy::ChildSpawnerCommands;
 use bevy::prelude::*;
@@ -17,38 +17,60 @@ pub fn text(s: impl Into<String>, role: TextRole, color: Swatch) -> impl Bundle 
     (Text::new(plain(s.into())), Ink::new(role, color))
 }
 
-/// The built-in font only has ASCII: spell out the symbols other crates'
-/// text uses (report rows, limit sentences).
+/// The bundled UI font covers Latin text and the few symbols other
+/// crates' strings use (<=, >=, x, dashes, superscript 2). Anything else is
+/// replaced so it never renders as a missing glyph.
 pub fn plain(s: String) -> String {
     if s.is_ascii() {
         return s;
     }
-    s.replace('\u{2264}', "<=")
-        .replace('\u{2265}', ">=")
-        .replace('\u{00d7}', "x")
-        .replace(['\u{2013}', '\u{2014}'], "-")
-        .replace('\u{00b2}', "2")
-        .chars()
-        .map(|c| if c.is_ascii() { c } else { '?' })
+    s.chars()
+        .map(|c| {
+            if c.is_ascii() || KNOWN.contains(&c) || c.is_alphabetic() {
+                c
+            } else {
+                '?'
+            }
+        })
         .collect()
 }
 
-/// A panel: theme panel ground, strong ink border, keeps clicks off the
-/// scene.
+const KNOWN: [char; 9] = [
+    '\u{2264}', '\u{2265}', '\u{00d7}', '\u{2013}', '\u{2014}', '\u{00b2}', '\u{00b7}', '\u{2192}',
+    '\u{00b0}',
+];
+
+/// A group of read-outs on the theme's panel ground (clear in Hairline,
+/// so the type sits on the scene). Keeps clicks off the scene.
 pub fn panel(node: Node) -> impl Bundle {
-    (
-        node,
-        Skin::boxed(Swatch::Panel, Swatch::Ink, Weight::Strong),
-        BlocksPointer,
-    )
+    (node, Skin::fill(Swatch::Panel), BlocksPointer)
 }
 
 /// Same as [`panel`] in the instrument's colours.
 pub fn instrument(node: Node) -> impl Bundle {
+    (node, Skin::fill(Swatch::Instrument), BlocksPointer)
+}
+
+/// The head of a sheet: a small accent kicker (ID, revision) over a
+/// light title.
+pub fn sheet_head(p: &mut ChildSpawnerCommands, kicker: &str, title: &str) {
+    p.spawn(Node {
+        flex_direction: FlexDirection::Column,
+        row_gap: Val::Px(2.0),
+        margin: UiRect::bottom(Val::Px(12.0)),
+        ..default()
+    })
+    .with_children(|h| {
+        h.spawn(caps(kicker, Swatch::Accent));
+        h.spawn(text(title, TextRole::Title, Swatch::Ink));
+    });
+}
+
+/// Small tracked capitals: section labels, key hints.
+pub fn caps(s: &str, color: Swatch) -> impl Bundle {
     (
-        node,
-        Skin::boxed(Swatch::Instrument, Swatch::Ink, Weight::Strong),
-        BlocksPointer,
+        text(s.to_uppercase(), TextRole::Label, color),
+        bevy::text::LetterSpacing::Px(1.4),
     )
 }
 
@@ -95,70 +117,73 @@ pub fn at(left: Option<f32>, top: Option<f32>, right: Option<f32>, bottom: Optio
     }
 }
 
-/// A title strip across the top of a panel: heading on the left, an ID
-/// or value on the right.
+/// A title line in a panel: heading on the left, a quiet ID or value on
+/// the right.
 pub fn title_strip(p: &mut ChildSpawnerCommands, left: &str, right: &str, bg: Swatch, fg: Swatch) {
+    let muted = if fg == Swatch::Ink { Swatch::Muted } else { fg };
     p.spawn((
         Node {
             justify_content: JustifyContent::SpaceBetween,
-            align_items: AlignItems::Center,
-            padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
+            align_items: AlignItems::Baseline,
+            padding: UiRect::new(Val::Px(0.0), Val::Px(0.0), Val::Px(2.0), Val::Px(8.0)),
             column_gap: Val::Px(12.0),
             ..default()
         },
-        Skin::fill(bg).square(),
+        Skin::fill(if bg == Swatch::Panel {
+            Swatch::Clear
+        } else {
+            bg
+        })
+        .square(),
     ))
     .with_children(|s| {
         s.spawn(text(left, TextRole::Heading, fg));
-        s.spawn(text(right, TextRole::Mono, fg));
+        s.spawn(caps(right, muted));
     });
-    rule(p, Swatch::Ink);
 }
 
-/// A horizontal rule.
+/// A horizontal hairline.
 pub fn rule(p: &mut ChildSpawnerCommands, color: Swatch) {
     p.spawn((
         Node {
             height: Val::Px(1.0),
             width: Val::Percent(100.0),
+            margin: UiRect::vertical(Val::Px(6.0)),
             ..default()
         },
-        Skin::fill(color).square(),
+        Skin::fill(if color == Swatch::Ink {
+            Swatch::Rule
+        } else {
+            color
+        })
+        .square(),
     ));
 }
 
-/// A label / value row with a rule above it.
+/// A label / value row.
 pub fn kv(p: &mut ChildSpawnerCommands, label: &str, value: impl Bundle) {
-    rule(p, Swatch::Rule);
     p.spawn(Node {
         justify_content: JustifyContent::SpaceBetween,
         align_items: AlignItems::Center,
-        padding: UiRect::axes(Val::Px(10.0), Val::Px(4.0)),
-        column_gap: Val::Px(12.0),
+        padding: UiRect::vertical(Val::Px(3.0)),
+        column_gap: Val::Px(16.0),
         ..default()
     })
     .with_children(|r| {
-        r.spawn(text(label, TextRole::Body, Swatch::Ink));
+        r.spawn(text(label, TextRole::Body, Swatch::Muted));
         r.spawn(value);
     });
 }
 
-/// A key cap: `Space`, `F1`.
+/// A key hint: `SPACE`, `F1`. Quiet text, no cap.
 pub fn key_cap(p: &mut ChildSpawnerCommands, key: &str) {
-    p.spawn((
-        Node {
-            padding: UiRect::axes(Val::Px(5.0), Val::Px(1.0)),
-            ..default()
-        },
-        Skin::boxed(Swatch::Raised, Swatch::Ink, Weight::Thin),
-    ))
-    .with_child(text(key, TextRole::Mono, Swatch::Ink));
+    p.spawn(caps(key, Swatch::Muted));
 }
 
 /// How a button looks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ButtonKind {
-    /// The one primary action on screen: accent fill.
+    /// The one primary action on screen: accent pill.
     Primary,
     Secondary,
     /// Selected state of a toggle or tab.
@@ -174,27 +199,25 @@ pub fn button(
     action: UiAction,
     kind: ButtonKind,
 ) -> Entity {
-    let (bg, fg, w) = match kind {
-        ButtonKind::Primary => (Swatch::Accent, Swatch::OnAccent, Weight::Strong),
-        ButtonKind::Secondary => (Swatch::Raised, Swatch::Ink, Weight::Thin),
-        ButtonKind::Selected => (Swatch::Ink, Swatch::Panel, Weight::Thin),
-        ButtonKind::Disabled => (Swatch::Panel, Swatch::Muted, Weight::Thin),
-    };
-    let border = if kind == ButtonKind::Disabled {
-        Swatch::Rule
-    } else {
-        Swatch::Ink
+    let (skin, fg) = match kind {
+        ButtonKind::Primary => (Skin::fill(Swatch::Accent).pill(), Swatch::OnAccent),
+        ButtonKind::Secondary => (Skin::fill(Swatch::Raised), Swatch::Ink),
+        ButtonKind::Selected => (
+            Skin::boxed(Swatch::Raised, Swatch::Accent, Weight::Thin),
+            Swatch::Ink,
+        ),
+        ButtonKind::Disabled => (Skin::fill(Swatch::Clear), Swatch::Muted),
     };
     let mut e = p.spawn((
         Node {
-            padding: UiRect::axes(Val::Px(12.0), Val::Px(7.0)),
-            column_gap: Val::Px(10.0),
+            padding: UiRect::axes(Val::Px(14.0), Val::Px(7.0)),
+            column_gap: Val::Px(12.0),
             align_items: AlignItems::Center,
             justify_content: JustifyContent::SpaceBetween,
-            min_height: Val::Px(34.0),
+            min_height: Val::Px(32.0),
             ..default()
         },
-        Skin::boxed(bg, border, w),
+        skin,
         Clickable(action),
         Outline::new(Val::Px(2.0), Val::Px(1.0), Color::NONE),
     ));
@@ -209,28 +232,34 @@ pub fn button(
         };
         b.spawn(text(label, role, fg));
         if let Some(k) = key {
-            key_cap(b, k);
+            let c = if kind == ButtonKind::Primary {
+                Swatch::OnAccent
+            } else {
+                Swatch::Muted
+            };
+            b.spawn(caps(k, c));
         }
     });
     e.id()
 }
 
-/// A small filled or empty box used as a checkbox read-out.
+/// A small dot used as a status read-out.
 pub fn status_box(p: &mut ChildSpawnerCommands, state: Status) {
-    let skin = match state {
-        Status::Ok => Skin::fill(Swatch::Ok).square(),
-        Status::Pending => Skin::boxed(Swatch::Clear, Swatch::Ink, Weight::Thin).square(),
-        Status::Running => Skin::fill(Swatch::Accent).square(),
-        Status::Failed => Skin::fill(Swatch::Fail).square(),
+    let c = match state {
+        Status::Ok => Swatch::Ok,
+        Status::Pending => Swatch::Rule,
+        Status::Running => Swatch::Accent,
+        Status::Failed => Swatch::Fail,
     };
     p.spawn((
         Node {
-            width: Val::Px(10.0),
-            height: Val::Px(10.0),
+            width: Val::Px(6.0),
+            height: Val::Px(6.0),
             flex_shrink: 0.0,
+            margin: UiRect::right(Val::Px(4.0)),
             ..default()
         },
-        skin,
+        Skin::fill(c).pill(),
     ));
 }
 
@@ -242,9 +271,8 @@ pub enum Status {
     Failed,
 }
 
-/// A criterion row: status box, label, value on the right.
+/// A criterion row: status dot, label, value on the right.
 pub fn check_row(p: &mut ChildSpawnerCommands, status: Status, label: &str, value: &str) {
-    rule(p, Swatch::Rule);
     let (lc, vc) = if status == Status::Failed {
         (Swatch::Fail, Swatch::Fail)
     } else {
@@ -252,7 +280,7 @@ pub fn check_row(p: &mut ChildSpawnerCommands, status: Status, label: &str, valu
     };
     p.spawn(Node {
         align_items: AlignItems::Center,
-        padding: UiRect::axes(Val::Px(10.0), Val::Px(4.0)),
+        padding: UiRect::vertical(Val::Px(3.0)),
         column_gap: Val::Px(8.0),
         ..default()
     })
@@ -262,60 +290,47 @@ pub fn check_row(p: &mut ChildSpawnerCommands, status: Status, label: &str, valu
             text(label, TextRole::Body, lc),
             Node {
                 flex_grow: 1.0,
+                flex_shrink: 1.0,
                 ..default()
             },
         ));
-        r.spawn(text(value, TextRole::Mono, vc));
+        r.spawn(text(value, TextRole::Body, vc));
     });
 }
 
-/// The utilisation legend: four bands with their limits.
+/// The utilisation legend: four thin bands and their limits in one line.
 pub fn ramp_legend(p: &mut ChildSpawnerCommands, width: f32) {
-    p.spawn(column(2.0)).with_children(|c| {
-        c.spawn(Node {
+    p.spawn(row(14.0)).with_children(|r| {
+        r.spawn(Node {
             width: Val::Px(width),
-            height: Val::Px(8.0),
+            height: Val::Px(3.0),
+            column_gap: Val::Px(2.0),
             ..default()
         })
         .with_children(|bar| {
-            for (i, grow) in [(0u8, 50.0), (1, 30.0), (2, 20.0), (3, 22.0)] {
+            for i in 0u8..4 {
                 bar.spawn((
                     Node {
-                        flex_grow: grow,
+                        flex_grow: 1.0,
                         ..default()
                     },
                     Skin::fill(Swatch::Ramp(i)).square(),
                 ));
             }
         });
-        c.spawn(Node {
-            width: Val::Px(width),
-            ..default()
-        })
-        .with_children(|l| {
-            for (label, grow) in [("0", 50.0), ("50", 30.0), ("80", 20.0), ("100%", 22.0)] {
-                l.spawn((
-                    text(label, TextRole::Label, Swatch::SceneText),
-                    Node {
-                        flex_grow: grow,
-                        flex_basis: Val::Px(0.0),
-                        ..default()
-                    },
-                ));
-            }
-        });
+        r.spawn(caps("Utilisation 0 / 50 / 80 / 100%", Swatch::Muted));
     });
 }
 
-/// Fills `p` with a horizontal bar at `fraction` of its width.
+/// A 2 px bar at `fraction` of its width, with an optional tick.
 pub fn meter(p: &mut ChildSpawnerCommands, fraction: f32, fill: Swatch, marker: Option<f32>) {
     p.spawn((
         Node {
-            height: Val::Px(10.0),
-            margin: UiRect::axes(Val::Px(10.0), Val::Px(4.0)),
+            height: Val::Px(2.0),
+            margin: UiRect::vertical(Val::Px(8.0)),
             ..default()
         },
-        Skin::boxed(Swatch::Raised, Swatch::Ink, Weight::Strong).square(),
+        Skin::fill(Swatch::Rule).square(),
     ))
     .with_children(|m| {
         m.spawn((
@@ -333,10 +348,10 @@ pub fn meter(p: &mut ChildSpawnerCommands, fraction: f32, fill: Swatch, marker: 
                     left: Val::Percent(x.clamp(0.0, 1.0) * 100.0),
                     top: Val::Px(-4.0),
                     bottom: Val::Px(-4.0),
-                    width: Val::Px(2.0),
+                    width: Val::Px(1.0),
                     ..default()
                 },
-                Skin::fill(Swatch::Muted).square(),
+                Skin::fill(Swatch::Accent).square(),
             ));
         }
     });

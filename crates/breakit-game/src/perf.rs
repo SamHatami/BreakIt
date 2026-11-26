@@ -1,4 +1,4 @@
-//! Frame-time read-out, top edge between the sheet and the read-outs. F3 hides and shows it.
+//! Frame-time read-out, top edge between the sheet and the read-outs. Hidden by default; F3 shows and hides it.
 //!
 //! Shows the average and worst frame over the last two seconds, the CPU
 //! time of physics and of the member visuals, and what the lab costs. Set
@@ -19,7 +19,7 @@ pub struct PerfPlugin;
 impl Plugin for PerfPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(Perf {
-            visible: true,
+            visible: false,
             log: std::env::var_os("BREAKIT_PERF_LOG").is_some(),
             ..default()
         })

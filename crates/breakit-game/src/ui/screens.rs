@@ -102,15 +102,11 @@ pub fn build_register(p: &mut ChildSpawnerCommands, v: &GameView) {
         })
         .with_children(|h| {
             h.spawn(column(2.0)).with_children(|c| {
-                c.spawn(text(
-                    "BreakIt structures lab",
-                    TextRole::Label,
-                    Swatch::Muted,
-                ));
+                c.spawn(caps("BreakIt structures lab", Swatch::Accent));
                 c.spawn(text("Test register", TextRole::Title, Swatch::Ink));
             });
             h.spawn(column(2.0)).with_children(|c| {
-                c.spawn(text("Passed", TextRole::Label, Swatch::Muted));
+                c.spawn(caps("Passed", Swatch::Muted));
                 c.spawn(text(
                     format!("{passed} / {total}"),
                     TextRole::Heading,
@@ -173,7 +169,7 @@ pub fn build_register(p: &mut ChildSpawnerCommands, v: &GameView) {
             sheet_row(
                 s,
                 [sc.id, &title, &span, &best, &revs.len().to_string()],
-                if selected { Swatch::OnAccent } else { color },
+                color,
                 Some((UiAction::SelectSheet(i), selected)),
                 TextRole::Body,
             );
@@ -208,10 +204,12 @@ pub fn build_register(p: &mut ChildSpawnerCommands, v: &GameView) {
     }))
     .with_children(|c| {
         title_strip(c, &cur.title, cur.id, Swatch::Panel, Swatch::Ink);
-        c.spawn(text(
-            format!("  {} rig", cur.rig.label()),
-            TextRole::Label,
-            Swatch::Muted,
+        c.spawn((
+            caps(&format!("{} rig", cur.rig.label()), Swatch::Muted),
+            Node {
+                margin: UiRect::bottom(Val::Px(8.0)),
+                ..default()
+            },
         ));
         let span = if cur.sandbox {
             "free".into()
@@ -254,9 +252,9 @@ pub fn build_register(p: &mut ChildSpawnerCommands, v: &GameView) {
             };
             f.spawn(text(note, TextRole::Mono, Swatch::Muted));
             let (label, kind) = match (open, cur.sandbox) {
-                (false, _) => ("LOCKED", ButtonKind::Disabled),
-                (true, true) => ("OPEN BENCH", ButtonKind::Primary),
-                (true, false) => ("OPEN BRIEF", ButtonKind::Primary),
+                (false, _) => ("Locked", ButtonKind::Disabled),
+                (true, true) => ("Open bench", ButtonKind::Primary),
+                (true, false) => ("Open brief", ButtonKind::Primary),
             };
             button(f, label, Some("Enter"), UiAction::OpenBrief, kind);
         });
@@ -290,15 +288,15 @@ fn sheet_row(
             super::pointer::Clickable(a),
             Outline::new(Val::Px(2.0), Val::Px(-2.0), Color::NONE),
             if selected {
-                Skin::fill(Swatch::Accent).square()
+                Skin::fill(Swatch::Raised)
             } else {
-                Skin::fill(Swatch::Clear).square()
+                Skin::fill(Swatch::Clear)
             },
         ));
     }
     e.with_children(|r| {
         for (i, c) in cells.iter().enumerate() {
-            let role = if i == 0 || i >= 2 {
+            let role = if i == 0 && role != TextRole::Label {
                 TextRole::Mono
             } else {
                 role
@@ -341,10 +339,9 @@ pub fn build_brief(p: &mut ChildSpawnerCommands, v: &GameView, overlay: bool) {
         })
         .with_children(|h| {
             h.spawn(column(2.0)).with_children(|c| {
-                c.spawn(text(
-                    format!("{}  |  {} rig", s.id, s.rig.label()),
-                    TextRole::Label,
-                    Swatch::Muted,
+                c.spawn(caps(
+                    &format!("{}  /  {} rig", s.id, s.rig.label()),
+                    Swatch::Accent,
                 ));
                 c.spawn(text(s.title.clone(), TextRole::Title, Swatch::Ink));
             });
@@ -365,14 +362,10 @@ pub fn build_brief(p: &mut ChildSpawnerCommands, v: &GameView, overlay: bool) {
                 ..default()
             })
             .with_children(|l| {
-                l.spawn(text("Site", TextRole::Label, Swatch::Muted));
+                l.spawn(caps("Site", Swatch::Muted));
                 site_drawing(l, s);
                 l.spawn(text(s.def.brief.clone(), TextRole::Body, Swatch::Ink));
-                l.spawn(text(
-                    "Load cases, in test order",
-                    TextRole::Label,
-                    Swatch::Muted,
-                ));
+                l.spawn(caps("Load cases, in test order", Swatch::Muted));
                 l.spawn(column(0.0)).with_children(|t| {
                     for (i, c) in s.load_cases.iter().enumerate() {
                         rule(t, Swatch::Rule);
@@ -417,7 +410,7 @@ pub fn build_brief(p: &mut ChildSpawnerCommands, v: &GameView, overlay: bool) {
                     width: Val::Px(1.0),
                     ..default()
                 },
-                Skin::fill(Swatch::Ink).square(),
+                Skin::fill(Swatch::Rule).square(),
             ));
             // Right: what passes.
             cols.spawn(Node {
@@ -429,7 +422,7 @@ pub fn build_brief(p: &mut ChildSpawnerCommands, v: &GameView, overlay: bool) {
                 ..default()
             })
             .with_children(|r| {
-                r.spawn(text("To pass", TextRole::Label, Swatch::Muted));
+                r.spawn(caps("To pass", Swatch::Muted));
                 r.spawn(column(0.0)).with_children(|c| {
                     check_row(
                         c,
@@ -448,7 +441,7 @@ pub fn build_brief(p: &mut ChildSpawnerCommands, v: &GameView, overlay: bool) {
                     height: Val::Px(8.0),
                     ..default()
                 });
-                r.spawn(text("Full marks", TextRole::Label, Swatch::Muted));
+                r.spawn(caps("Full marks", Swatch::Muted));
                 r.spawn(column(0.0)).with_children(|c| {
                     if let Some(b) = s.bonus_budget {
                         check_row(c, Status::Pending, &format!("Cost under {}", money(b)), "");
@@ -477,7 +470,7 @@ pub fn build_brief(p: &mut ChildSpawnerCommands, v: &GameView, overlay: bool) {
                     height: Val::Px(8.0),
                     ..default()
                 });
-                r.spawn(text("Parts allowed", TextRole::Label, Swatch::Muted));
+                r.spawn(caps("Parts allowed", Swatch::Muted));
                 r.spawn(text(parts_label(s), TextRole::Body, Swatch::Ink));
             });
         });
@@ -512,7 +505,7 @@ pub fn build_brief(p: &mut ChildSpawnerCommands, v: &GameView, overlay: bool) {
                 );
                 button(
                     f,
-                    "START BUILD",
+                    "Start build",
                     Some("Enter"),
                     UiAction::StartBuild,
                     ButtonKind::Primary,
@@ -605,18 +598,16 @@ pub fn build_report(p: &mut ChildSpawnerCommands, v: &GameView) {
                 row_gap: Val::Px(2.0),
                 ..default()
             };
-            h.spawn(cell(90.0))
-                .with_child(text(s.id, TextRole::Heading, Swatch::Ink));
             h.spawn(Node {
                 flex_grow: 1.0,
                 ..cell(0.0)
             })
             .with_children(|c| {
-                c.spawn(text("Test report", TextRole::Label, Swatch::Muted));
+                c.spawn(caps(&format!("{}  test report", s.id), Swatch::Accent));
                 c.spawn(text(s.title.clone(), TextRole::Title, Swatch::Ink));
             });
             h.spawn(cell(110.0)).with_children(|c| {
-                c.spawn(text("Revision", TextRole::Label, Swatch::Muted));
+                c.spawn(caps("Revision", Swatch::Muted));
                 c.spawn(text(
                     last.letter.to_string(),
                     TextRole::Heading,
@@ -624,8 +615,8 @@ pub fn build_report(p: &mut ChildSpawnerCommands, v: &GameView) {
                 ));
             });
             h.spawn(cell(140.0)).with_children(|c| {
-                c.spawn(text("Cost", TextRole::Label, Swatch::Muted));
-                c.spawn(text(money(rec.cost), TextRole::Mono, Swatch::Ink));
+                c.spawn(caps("Cost", Swatch::Muted));
+                c.spawn(text(money(rec.cost), TextRole::Heading, Swatch::Ink));
             });
         });
         rule(b, Swatch::Ink);
@@ -640,42 +631,61 @@ pub fn build_report(p: &mut ChildSpawnerCommands, v: &GameView) {
             .with_children(|l| {
                 // Stamp.
                 let (word, c) = if last.passed {
-                    ("PASSED", Swatch::Ink)
+                    ("Passed", Swatch::Ok)
                 } else {
-                    ("FAILED", Swatch::Fail)
+                    ("Failed", Swatch::Fail)
                 };
-                l.spawn(row(24.0)).with_children(|top| {
-                    top.spawn((
-                        Node {
-                            padding: UiRect::axes(Val::Px(16.0), Val::Px(4.0)),
-                            align_self: AlignSelf::FlexStart,
-                            ..default()
-                        },
-                        Skin::boxed(Swatch::Clear, c, Weight::Strong).square(),
-                        UiTransform::from_rotation(Rot2::degrees(-4.0)),
-                    ))
-                    .with_child(text(word, TextRole::Stamp, c));
+                l.spawn(Node {
+                    column_gap: Val::Px(40.0),
+                    align_items: AlignItems::FlexStart,
+                    ..default()
+                })
+                .with_children(|top| {
+                    top.spawn(column(2.0)).with_children(|g| {
+                        g.spawn(caps("Result", Swatch::Muted));
+                        g.spawn(text(word, TextRole::Stamp, c));
+                    });
                     // Grade: score, stars, and the proof test's read-outs.
                     if let Some(r) = last.report.as_ref().filter(|r| r.passed && r.ranked) {
                         top.spawn(column(2.0)).with_children(|g| {
-                            g.spawn(text("Grade", TextRole::Label, Swatch::Muted));
-                            let stars: String = (0..3)
-                                .map(|i| if i < r.stars { '*' } else { '.' })
-                                .collect();
-                            g.spawn(text(
-                                format!("{stars}  {} / 1000", r.score),
-                                TextRole::Heading,
-                                Swatch::Ink,
-                            ));
+                            g.spawn(caps("Grade", Swatch::Muted));
+                            g.spawn(row(6.0)).with_children(|st| {
+                                for i in 0..3 {
+                                    st.spawn((
+                                        Node {
+                                            width: Val::Px(10.0),
+                                            height: Val::Px(10.0),
+                                            ..default()
+                                        },
+                                        Skin::fill(if i < r.stars {
+                                            Swatch::Accent
+                                        } else {
+                                            Swatch::Rule
+                                        })
+                                        .pill(),
+                                    ));
+                                }
+                                st.spawn((
+                                    text(
+                                        format!("{} / 1000", r.score),
+                                        TextRole::Heading,
+                                        Swatch::Ink,
+                                    ),
+                                    Node {
+                                        margin: UiRect::left(Val::Px(8.0)),
+                                        ..default()
+                                    },
+                                ));
+                            });
                             g.spawn(text(
                                 format!("safety margin {:.2}", r.safety_margin),
-                                TextRole::Mono,
+                                TextRole::Body,
                                 Swatch::Muted,
                             ));
                         });
                         if let Some(f) = r.reserve_factor {
                             top.spawn(column(2.0)).with_children(|g| {
-                                g.spawn(text("Proof test", TextRole::Label, Swatch::Muted));
+                                g.spawn(caps("Proof test", Swatch::Muted));
                                 g.spawn(text(
                                     format!("held to x{f:.1}"),
                                     TextRole::Heading,
@@ -685,16 +695,11 @@ pub fn build_report(p: &mut ChildSpawnerCommands, v: &GameView) {
                                     .warning_time
                                     .map(|w| format!("{w:.1} s warning before collapse"))
                                     .unwrap_or_else(|| "no warning before collapse".into());
-                                g.spawn(text(warn, TextRole::Mono, Swatch::Muted));
+                                g.spawn(text(warn, TextRole::Body, Swatch::Muted));
                             });
                         }
                     }
                 });
-                l.spawn(text(
-                    "Criteria, measured against required",
-                    TextRole::Label,
-                    Swatch::Muted,
-                ));
                 l.spawn(column(0.0)).with_children(|t| {
                     report_row(
                         t,
@@ -703,7 +708,13 @@ pub fn build_report(p: &mut ChildSpawnerCommands, v: &GameView) {
                         TextRole::Label,
                     );
                     for c in &last.checks {
-                        let mark = if c.ok { "OK" } else { "X" };
+                        let mark = if c.ok {
+                            "ok"
+                        } else if c.bonus {
+                            "-"
+                        } else {
+                            "no"
+                        };
                         let col = if c.ok {
                             Swatch::Ink
                         } else if c.bonus {
@@ -711,7 +722,6 @@ pub fn build_report(p: &mut ChildSpawnerCommands, v: &GameView) {
                         } else {
                             Swatch::Fail
                         };
-                        rule(t, Swatch::Rule);
                         report_row(
                             t,
                             [&c.label, &c.measured, &c.required, mark],
@@ -724,17 +734,16 @@ pub fn build_report(p: &mut ChildSpawnerCommands, v: &GameView) {
                 // broke it.
                 let test_end = s.def.duration as f32;
                 let in_proof = last.passed;
-                l.spawn(text(
+                l.spawn(caps(
                     if in_proof {
                         "Proof test: what gave way first"
                     } else {
                         "Failure sequence"
                     },
-                    TextRole::Label,
                     Swatch::Muted,
                 ));
                 l.spawn(Node {
-                    column_gap: Val::Px(6.0),
+                    column_gap: Val::Px(28.0),
                     flex_wrap: FlexWrap::Wrap,
                     row_gap: Val::Px(6.0),
                     ..default()
@@ -770,20 +779,16 @@ pub fn build_report(p: &mut ChildSpawnerCommands, v: &GameView) {
                             _ => continue,
                         };
                         let fg = if swatch == Swatch::Fail {
-                            Swatch::OnFail
+                            Swatch::Fail
                         } else {
                             Swatch::Ink
                         };
-                        seq.spawn((
-                            Node {
-                                flex_direction: FlexDirection::Column,
-                                padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
-                                ..default()
-                            },
-                            Skin::boxed(swatch, Swatch::Ink, Weight::Thin),
-                        ))
-                        .with_children(|c| {
-                            c.spawn(text(format!("{:.2} s", e.time), TextRole::Mono, fg));
+                        seq.spawn(column(1.0)).with_children(|c| {
+                            c.spawn(text(
+                                format!("{:.2} s", e.time),
+                                TextRole::Label,
+                                Swatch::Muted,
+                            ));
                             c.spawn(text(what, TextRole::Body, fg));
                         });
                     }
@@ -795,7 +800,7 @@ pub fn build_report(p: &mut ChildSpawnerCommands, v: &GameView) {
                     width: Val::Px(1.0),
                     ..default()
                 },
-                Skin::fill(Swatch::Ink).square(),
+                Skin::fill(Swatch::Rule).square(),
             ));
             cols.spawn(Node {
                 flex_direction: FlexDirection::Column,
@@ -805,31 +810,29 @@ pub fn build_report(p: &mut ChildSpawnerCommands, v: &GameView) {
                 ..default()
             })
             .with_children(|r| {
-                r.spawn(text("Revisions", TextRole::Label, Swatch::Muted));
+                r.spawn(caps("Revisions", Swatch::Muted));
                 r.spawn(column(0.0)).with_children(|t| {
                     for rev in v.revisions.of(s.id) {
-                        rule(t, Swatch::Rule);
                         let current = rev.letter == last.letter;
                         t.spawn((
                             Node {
                                 justify_content: JustifyContent::SpaceBetween,
-                                padding: UiRect::axes(Val::Px(6.0), Val::Px(4.0)),
+                                padding: UiRect::axes(Val::Px(8.0), Val::Px(5.0)),
                                 ..default()
                             },
                             Skin::fill(if current {
-                                Swatch::Accent
+                                Swatch::Raised
                             } else {
                                 Swatch::Clear
-                            })
-                            .square(),
+                            }),
                         ))
                         .with_children(|row| {
-                            let fg = if current {
-                                Swatch::OnAccent
-                            } else {
-                                Swatch::Ink
-                            };
-                            row.spawn(text(rev.letter.to_string(), TextRole::Mono, fg));
+                            let fg = if current { Swatch::Ink } else { Swatch::Muted };
+                            row.spawn(text(
+                                rev.letter.to_string(),
+                                TextRole::Body,
+                                if current { Swatch::Accent } else { fg },
+                            ));
                             row.spawn(text(
                                 if rev.passed {
                                     "passed".to_string()
@@ -839,7 +842,7 @@ pub fn build_report(p: &mut ChildSpawnerCommands, v: &GameView) {
                                 TextRole::Body,
                                 fg,
                             ));
-                            row.spawn(text(money(rev.cost), TextRole::Mono, fg));
+                            row.spawn(text(money(rev.cost), TextRole::Body, fg));
                         });
                     }
                 });
@@ -859,11 +862,7 @@ pub fn build_report(p: &mut ChildSpawnerCommands, v: &GameView) {
                         height: Val::Px(10.0),
                         ..default()
                     });
-                    r.spawn(text(
-                        "Revise pins these in build",
-                        TextRole::Label,
-                        Swatch::Muted,
-                    ));
+                    r.spawn(caps("Revise pins these in build", Swatch::Muted));
                     for m in broken.iter().take(4) {
                         let kind = v
                             .design
@@ -872,7 +871,7 @@ pub fn build_report(p: &mut ChildSpawnerCommands, v: &GameView) {
                             .map(|b| b.kind.label())
                             .unwrap_or("member");
                         r.spawn(text(
-                            format!("M{} {}", m + 1, kind),
+                            format!("Member {} {}", m + 1, kind),
                             TextRole::Body,
                             Swatch::Fail,
                         ));
@@ -906,7 +905,7 @@ pub fn build_report(p: &mut ChildSpawnerCommands, v: &GameView) {
             } else {
                 (ButtonKind::Primary, ButtonKind::Disabled)
             };
-            button(f, "REVISE", Some("R"), UiAction::Revise, revise);
+            button(f, "Revise", Some("R"), UiAction::Revise, revise);
             button(
                 f,
                 "Replay",
@@ -931,17 +930,18 @@ pub fn build_report(p: &mut ChildSpawnerCommands, v: &GameView) {
 }
 
 fn report_row(p: &mut ChildSpawnerCommands, cells: [&str; 4], color: Swatch, role: TextRole) {
-    let widths = [220.0, 160.0, 210.0, 36.0];
+    let widths = [200.0, 170.0, 250.0, 30.0];
     p.spawn(Node {
-        padding: UiRect::axes(Val::Px(0.0), Val::Px(4.0)),
+        padding: UiRect::axes(Val::Px(0.0), Val::Px(3.0)),
+        column_gap: Val::Px(12.0),
         ..default()
     })
     .with_children(|r| {
         for (i, c) in cells.iter().enumerate() {
-            let role = if i == 0 || role == TextRole::Label {
-                role
+            let color = if i > 0 && i < 3 && role != TextRole::Label {
+                Swatch::Muted
             } else {
-                TextRole::Mono
+                color
             };
             r.spawn((
                 text(*c, role, color),
@@ -1042,7 +1042,7 @@ pub fn build_overlay(p: &mut ChildSpawnerCommands, v: &GameView) {
                 .with_children(|c| {
                     button(
                         c,
-                        "RESUME",
+                        "Resume",
                         Some("Esc"),
                         UiAction::CloseOverlay,
                         ButtonKind::Primary,

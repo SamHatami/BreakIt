@@ -27,7 +27,6 @@ pub enum Swatch {
     OnAccent,
     /// Failure only.
     Fail,
-    OnFail,
     /// A met criterion.
     Ok,
     /// Instrument housing (test run read-outs).
@@ -66,7 +65,6 @@ pub enum TextRole {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Weight {
     Thin,
-    Strong,
 }
 
 #[derive(Clone, Debug)]
@@ -80,7 +78,6 @@ pub struct UiTheme {
     pub accent: Color,
     pub on_accent: Color,
     pub fail: Color,
-    pub on_fail: Color,
     pub ok: Color,
     pub instrument: Color,
     pub chart: Color,
@@ -89,55 +86,64 @@ pub struct UiTheme {
     pub scene_text: Color,
     pub scrim: Color,
     pub ramp: [Color; 4],
-    /// Border widths, logical px.
+    /// Border width, logical px.
     pub thin: f32,
-    pub strong: f32,
     /// Corner radius of panels and buttons, logical px.
     pub radius: f32,
     /// Text sizes per [`TextRole`], logical px, in the enum's order.
     pub sizes: [f32; 7],
-    /// Optional font per role: `None` uses Bevy's built-in font.
+    /// Font weight per [`TextRole`], 100..900, in the enum's order.
+    pub weights: [u16; 7],
+    /// Colour of the soft gradients along the top and bottom edges that
+    /// keep text over the scene readable; `None` for no gradients.
+    pub edge: Option<Color>,
+    /// Text shadow colour, for text that sits on the scene.
+    pub shadow: Option<Color>,
+    /// The UI font (a variable-weight face). `None` uses Bevy's built-in
+    /// font; [`Themes`] fills it with the bundled Inter Tight.
     pub font: Option<Handle<Font>>,
 }
 
 impl UiTheme {
-    /// "Test sheet": drafting paper panels, ink rules, square corners,
-    /// safety-yellow accent. The concept shown in the UI mock-ups.
-    pub fn drafting() -> Self {
+    /// "Hairline": no panels. Type sits straight on the scene over soft
+    /// top and bottom scrims, values in light weights, a single warm
+    /// accent for the active tool, the primary action and the playhead.
+    pub fn hairline() -> Self {
+        let paper = Color::srgb_u8(0xF4, 0xF2, 0xEE);
         Self {
-            name: "Test sheet",
-            panel: hex(0xEEEBE3),
-            raised: hex(0xF7F5F0),
-            ink: hex(0x1B1F23),
-            muted: hex(0x4A5058),
-            rule: hex(0xC9C4B8),
-            accent: hex(0xE0A526),
-            on_accent: hex(0x1B1F23),
-            fail: hex(0xB8322A),
-            on_fail: hex(0xFFFFFF),
-            ok: hex(0x1B1F23),
-            instrument: hex(0x23282D),
-            chart: hex(0xE9E2C9),
-            instrument_ink: hex(0xE9E2C9),
-            instrument_muted: hex(0xB7B2A6),
-            scene_text: hex(0xD9D5CA),
-            scrim: Color::srgba(0.05, 0.06, 0.07, 0.62),
+            name: "Hairline",
+            panel: Color::NONE,
+            raised: paper.with_alpha(0.08),
+            ink: paper,
+            muted: paper.with_alpha(0.58),
+            rule: paper.with_alpha(0.18),
+            accent: hex(0xFF8A3D),
+            on_accent: hex(0x17120E),
+            fail: hex(0xFF7A66),
+            ok: hex(0x7BC67E),
+            instrument: Color::NONE,
+            chart: Color::NONE,
+            instrument_ink: paper,
+            instrument_muted: paper.with_alpha(0.55),
+            scene_text: paper,
+            scrim: Color::srgba(0.03, 0.035, 0.045, 0.80),
             ramp: RAMP,
             thin: 1.0,
-            strong: 1.5,
-            radius: 0.0,
-            sizes: [24.0, 15.0, 13.0, 10.0, 12.0, 28.0, 30.0],
+            radius: 6.0,
+            sizes: [26.0, 16.0, 14.0, 11.0, 13.0, 56.0, 30.0],
+            weights: [400, 500, 400, 500, 400, 300, 500],
+            edge: Some(Color::srgba(0.03, 0.035, 0.045, 0.6)),
+            shadow: Some(Color::srgba(0.0, 0.0, 0.0, 0.45)),
             font: None,
         }
     }
 
-    /// A deliberately different look on the same layout, to prove the
-    /// screens don't depend on the drafting style: dark slate panels,
-    /// rounded corners, cyan accent.
+    /// The same layout on opaque dark cards, to keep the screens honest
+    /// about not depending on one look.
     pub fn slate() -> Self {
         Self {
             name: "Slate",
-            panel: hex(0x1E2329),
+            panel: hex(0x1E2329).with_alpha(0.92),
             raised: hex(0x2A3038),
             ink: hex(0xE6E9ED),
             muted: hex(0x9AA3AD),
@@ -145,79 +151,20 @@ impl UiTheme {
             accent: hex(0x4CC3D9),
             on_accent: hex(0x0E1418),
             fail: hex(0xE0564A),
-            on_fail: hex(0x16090A),
             ok: hex(0x7BD389),
-            instrument: hex(0x15191D),
+            instrument: hex(0x15191D).with_alpha(0.92),
             chart: hex(0x1B2127),
             instrument_ink: hex(0xE6E9ED),
             instrument_muted: hex(0x8A939C),
             scene_text: hex(0xC9D1D9),
-            scrim: Color::srgba(0.0, 0.0, 0.0, 0.55),
+            scrim: Color::srgba(0.0, 0.0, 0.0, 0.65),
             ramp: RAMP,
             thin: 1.0,
-            strong: 1.0,
             radius: 6.0,
-            sizes: [24.0, 15.0, 13.0, 11.0, 12.0, 28.0, 30.0],
-            font: None,
-        }
-    }
-
-    /// "Blueprint": cyanotype panels, white linework, hairline rules,
-    /// square corners. Reads like the engineer's own drawing set.
-    pub fn blueprint() -> Self {
-        Self {
-            name: "Blueprint",
-            panel: hex(0x163A5F),
-            raised: hex(0x1D4A78),
-            ink: hex(0xF2F6FA),
-            muted: hex(0xA9C1DA),
-            rule: hex(0x3E6893),
-            accent: hex(0xF2F6FA),
-            on_accent: hex(0x163A5F),
-            fail: hex(0xFF7A66),
-            on_fail: hex(0x1A0D0A),
-            ok: hex(0xF2F6FA),
-            instrument: hex(0x0F2A45),
-            chart: hex(0x12324F),
-            instrument_ink: hex(0xF2F6FA),
-            instrument_muted: hex(0x8FAAC6),
-            scene_text: hex(0xE4ECF4),
-            scrim: Color::srgba(0.03, 0.10, 0.18, 0.62),
-            ramp: RAMP,
-            thin: 1.0,
-            strong: 1.0,
-            radius: 0.0,
-            sizes: [24.0, 15.0, 13.0, 10.0, 12.0, 28.0, 30.0],
-            font: None,
-        }
-    }
-
-    /// "Hangar": the lab's own signage. Black plates, heavy borders,
-    /// hazard-yellow accent, larger type for reading at a glance.
-    pub fn hangar() -> Self {
-        Self {
-            name: "Hangar",
-            panel: hex(0x111111),
-            raised: hex(0x1E1E1E),
-            ink: hex(0xF5F5F0),
-            muted: hex(0xA8A8A0),
-            rule: hex(0x3A3A36),
-            accent: hex(0xFFC400),
-            on_accent: hex(0x111111),
-            fail: hex(0xFF4D2E),
-            on_fail: hex(0x111111),
-            ok: hex(0xF5F5F0),
-            instrument: hex(0x0A0A0A),
-            chart: hex(0x171717),
-            instrument_ink: hex(0xFFC400),
-            instrument_muted: hex(0x9A9A92),
-            scene_text: hex(0xF5F5F0),
-            scrim: Color::srgba(0.0, 0.0, 0.0, 0.7),
-            ramp: RAMP,
-            thin: 2.0,
-            strong: 3.0,
-            radius: 2.0,
-            sizes: [26.0, 16.0, 13.0, 11.0, 13.0, 30.0, 34.0],
+            sizes: [24.0, 15.0, 13.0, 11.0, 12.0, 44.0, 30.0],
+            weights: [600, 600, 400, 500, 400, 400, 700],
+            edge: None,
+            shadow: None,
             font: None,
         }
     }
@@ -232,7 +179,6 @@ impl UiTheme {
             Swatch::Accent => self.accent,
             Swatch::OnAccent => self.on_accent,
             Swatch::Fail => self.fail,
-            Swatch::OnFail => self.on_fail,
             Swatch::Ok => self.ok,
             Swatch::Instrument => self.instrument,
             Swatch::Chart => self.chart,
@@ -246,22 +192,16 @@ impl UiTheme {
     }
 
     pub fn size(&self, r: TextRole) -> f32 {
-        let i = match r {
-            TextRole::Title => 0,
-            TextRole::Heading => 1,
-            TextRole::Body => 2,
-            TextRole::Label => 3,
-            TextRole::Mono => 4,
-            TextRole::MonoLarge => 5,
-            TextRole::Stamp => 6,
-        };
-        self.sizes[i]
+        self.sizes[role_index(r)]
+    }
+
+    pub fn weight(&self, r: TextRole) -> u16 {
+        self.weights[role_index(r)]
     }
 
     pub fn border(&self, w: Weight) -> f32 {
         match w {
             Weight::Thin => self.thin,
-            Weight::Strong => self.strong,
         }
     }
 }
@@ -286,6 +226,18 @@ pub fn ramp_band(u: f32) -> u8 {
     }
 }
 
+fn role_index(r: TextRole) -> usize {
+    match r {
+        TextRole::Title => 0,
+        TextRole::Heading => 1,
+        TextRole::Body => 2,
+        TextRole::Label => 3,
+        TextRole::Mono => 4,
+        TextRole::MonoLarge => 5,
+        TextRole::Stamp => 6,
+    }
+}
+
 fn hex(v: u32) -> Color {
     Color::srgb_u8((v >> 16) as u8, (v >> 8) as u8, v as u8)
 }
@@ -300,12 +252,7 @@ pub struct Themes {
 impl Default for Themes {
     fn default() -> Self {
         Self {
-            presets: vec![
-                UiTheme::drafting(),
-                UiTheme::slate(),
-                UiTheme::blueprint(),
-                UiTheme::hangar(),
-            ],
+            presets: vec![UiTheme::hairline(), UiTheme::slate()],
             active: 0,
         }
     }
@@ -321,14 +268,35 @@ impl Themes {
     }
 }
 
+/// Inter Tight (SIL Open Font License, see `fonts/OFL.txt`), a variable
+/// face, so one file covers every weight the themes ask for.
+const UI_FONT: &[u8] = include_bytes!("../../fonts/InterTight.ttf");
+
+/// Loads the bundled UI font into every preset.
+pub fn load_fonts(mut fonts: ResMut<Assets<Font>>, mut themes: ResMut<Themes>) {
+    let h = fonts.add(Font::from_bytes(UI_FONT.to_vec()));
+    for t in &mut themes.presets {
+        t.font = Some(h.clone());
+    }
+}
+
+/// How a node's corners are rounded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Corners {
+    Square,
+    /// The theme's radius.
+    Theme,
+    /// Fully round: pills and dots.
+    Pill,
+}
+
 /// Background and border of a node, as swatches.
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
 #[require(BackgroundColor, BorderColor)]
 pub struct Skin {
     pub bg: Swatch,
     pub border: Option<(Swatch, Weight)>,
-    /// Round the corners by the theme's radius.
-    pub rounded: bool,
+    pub corners: Corners,
 }
 
 impl Skin {
@@ -336,7 +304,7 @@ impl Skin {
         Self {
             bg,
             border: None,
-            rounded: true,
+            corners: Corners::Theme,
         }
     }
 
@@ -344,19 +312,24 @@ impl Skin {
         Self {
             bg,
             border: Some((border, w)),
-            rounded: true,
+            corners: Corners::Theme,
         }
     }
 
     pub const fn square(mut self) -> Self {
-        self.rounded = false;
+        self.corners = Corners::Square;
+        self
+    }
+
+    pub const fn pill(mut self) -> Self {
+        self.corners = Corners::Pill;
         self
     }
 }
 
 /// Text role and colour.
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
-#[require(TextFont, TextColor)]
+#[require(TextFont, TextColor, TextShadow)]
 pub struct Ink {
     pub role: TextRole,
     pub color: Swatch,
@@ -368,14 +341,44 @@ impl Ink {
     }
 }
 
-/// Resolves [`Skin`] and [`Ink`] against the active theme: for new or
-/// changed components every frame, and for everything when the theme
-/// changes.
+/// A soft gradient along the top or bottom edge of the screen, behind the
+/// UI, so text over the scene stays readable. Themes without an edge
+/// colour leave it clear.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+#[require(BackgroundGradient)]
+pub enum EdgeScrim {
+    Top,
+    Bottom,
+}
+
+impl EdgeScrim {
+    /// The scrim node: full width, `height` px, pinned to its edge.
+    pub fn node(self, height: f32) -> Node {
+        let (top, bottom) = match self {
+            EdgeScrim::Top => (Val::Px(0.0), Val::Auto),
+            EdgeScrim::Bottom => (Val::Auto, Val::Px(0.0)),
+        };
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(0.0),
+            right: Val::Px(0.0),
+            top,
+            bottom,
+            height: Val::Px(height),
+            ..default()
+        }
+    }
+}
+
+/// Resolves [`Skin`], [`Ink`] and [`EdgeScrim`] against the active theme:
+/// for new or changed components every frame, and for everything when the
+/// theme changes.
 #[allow(clippy::type_complexity)]
 pub fn apply_theme(
     themes: Res<Themes>,
     mut skins: Query<(Ref<Skin>, &mut BackgroundColor, &mut BorderColor, &mut Node)>,
-    mut inks: Query<(Ref<Ink>, &mut TextFont, &mut TextColor)>,
+    mut inks: Query<(Ref<Ink>, &mut TextFont, &mut TextColor, &mut TextShadow)>,
+    mut edges: Query<(Ref<EdgeScrim>, &mut BackgroundGradient)>,
 ) {
     let all = themes.is_changed();
     let t = themes.current();
@@ -393,30 +396,50 @@ pub fn apply_theme(
         if node.border != width {
             node.border = width;
         }
-        let radius = if skin.rounded { t.radius } else { 0.0 };
-        let r = BorderRadius::all(Val::Px(radius));
+        let r = match skin.corners {
+            Corners::Square => BorderRadius::ZERO,
+            Corners::Theme => BorderRadius::all(Val::Px(t.radius)),
+            Corners::Pill => BorderRadius::MAX,
+        };
         if node.border_radius != r {
             node.border_radius = r;
         }
     }
-    for (ink, mut font, mut color) in &mut inks {
+    for (ink, mut font, mut color, mut shadow) in &mut inks {
         if !(all || ink.is_changed()) {
             continue;
         }
         color.0 = t.color(ink.color);
-        let mut f = TextFont::from_font_size(FontSize::Px(t.size(ink.role)));
-        if matches!(
-            ink.role,
-            TextRole::Title | TextRole::Heading | TextRole::Stamp
-        ) {
-            f = f.with_font_weight(FontWeight::BOLD);
-        }
+        let mut f = TextFont::from_font_size(FontSize::Px(t.size(ink.role)))
+            .with_font_weight(FontWeight(t.weight(ink.role)));
         if let Some(h) = &t.font {
             f = f.with_font(h.clone());
         }
         if *font != f {
             *font = f;
         }
+        let s = TextShadow {
+            offset: Vec2::new(0.0, 1.0),
+            color: t.shadow.unwrap_or(Color::NONE),
+        };
+        if *shadow != s {
+            *shadow = s;
+        }
+    }
+    for (edge, mut grad) in &mut edges {
+        if !(all || edge.is_changed()) {
+            continue;
+        }
+        let c = t.edge.unwrap_or(Color::NONE);
+        let stops = vec![
+            ColorStop::new(c, Val::Percent(0.0)),
+            ColorStop::new(c.with_alpha(0.0), Val::Percent(100.0)),
+        ];
+        let g = match *edge {
+            EdgeScrim::Top => LinearGradient::to_bottom(stops),
+            EdgeScrim::Bottom => LinearGradient::to_top(stops),
+        };
+        *grad = BackgroundGradient::from(g);
     }
 }
 

@@ -3,8 +3,11 @@
 The concept canvas (wireframes, high-fidelity screens, flows, input map,
 stress colours): https://claude.ai/artifact/Mr17fNnWSXoMxXciR6Yy65
 
-The look is not settled. Everything visual goes through one theme layer, so
-the structure below can stay while the look changes.
+The look is "Hairline", picked by Sam from three mock-ups
+(`/mnt/project-files/ui-directions/`): no panels, type straight on the
+scene over soft top and bottom gradients, light weights for values, one
+warm accent (active tool, primary action, playhead). The 3D lab stays the
+hero. Everything visual still goes through one theme layer.
 
 ## Loop
 
@@ -61,7 +64,7 @@ and clicks (`ui/pointer.rs`) write the same actions.
 | D | exaggerate deflection |
 | C | clear to the sheet's start |
 | T | next play table (until sheets choose their own) |
-| F3 | frame-time read-out |
+| F3 | frame-time read-out (hidden by default) |
 | Space | run test; in a test, pause |
 | , . | test slower / faster |
 | H | stress heatmap during a test |
@@ -76,11 +79,16 @@ and clicks (`ui/pointer.rs`) write the same actions.
 (`TextRole` and `Swatch`). `apply_theme` resolves those against the active
 `UiTheme` whenever the theme or the node changes.
 
-A new look is a new `UiTheme` preset: colours per swatch, text sizes per
-role, corner radius. Four exist to compare directions: `drafting` (paper
-and ink), `slate` (dark, rounded, cyan), `blueprint` (cyanotype, white
-linework) and `hangar` (black plates, heavy borders, hazard yellow). F10
-cycles them; `BREAKIT_THEME=<n>` starts on preset n.
+A look is a `UiTheme` preset: colours per swatch, text size and weight per
+role, corner radius, the edge-gradient colour (`EdgeScrim`) and a text
+shadow for type over the scene. `hairline` is the default; `slate` puts the
+same layout on opaque dark cards and is there to keep screens from
+depending on one look. F10 cycles them; `BREAKIT_THEME=<n>` starts on
+preset n.
+
+The font is Inter Tight (SIL Open Font License, `crates/breakit-game/fonts/`),
+a variable face embedded in the binary, so every weight comes from one
+file. Labels and key hints are tracked capitals (`widgets::caps`).
 
 The stress ramp in the UI (blue, amber, orange, red at 50/80/100%) is the
 colour-blind-safe one from the canvas. The member shader in
