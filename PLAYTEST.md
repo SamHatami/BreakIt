@@ -100,5 +100,8 @@ $env:BREAKIT_PERF_LOG=1; .\BreakIt.exe
 git tag v0.1.0 && git push origin v0.1.0
 ```
 
+Or, without pushing a tag: Actions tab, **Release**, **Run workflow** on
+`main` with `release_tag` set to `v0.1.0`. The workflow then creates the tag.
+
 The workflow builds Windows and Linux zips with `cargo build --profile dist`
 (about 20 to 30 minutes on a cold cache) and publishes the release.

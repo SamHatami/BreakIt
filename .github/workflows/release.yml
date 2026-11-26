@@ -7,8 +7,10 @@ name: Release
 # - Every push to main: the rolling `nightly` pre-release is rebuilt, so
 #   https://github.com/SamHatami/BreakIt/releases/tag/nightly is always
 #   the newest main. Only the newest push builds; older runs are cancelled.
-# - Run it by hand from the Actions tab (workflow_dispatch) to rebuild
-#   nightly without a push.
+# - Run it by hand from the Actions tab (workflow_dispatch) on main. With
+#   `release_tag` empty it rebuilds nightly; with e.g. `v0.1.0` it creates
+#   that tag on main and publishes the numbered release (same as pushing
+#   the tag, for when pushing tags is not possible).
 # - Pull requests that change this file build the zips (kept as workflow
 #   artifacts for 7 days) but publish nothing.
 
@@ -19,14 +21,22 @@ on:
   pull_request:
     paths: [".github/workflows/release.yml"]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Numbered release to tag and publish from main (e.g. v0.1.0). Empty rebuilds nightly."
+        required: false
+        default: ""
 
 concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  group: release-${{ github.ref }}-${{ inputs.release_tag }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') && !inputs.release_tag }}
 
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  # Set for a numbered release (pushed v* tag, or the dispatch input); empty
+  # for nightly and pull requests.
+  RELEASE_TAG: ${{ inputs.release_tag || (startsWith(github.ref, 'refs/tags/v') && github.ref_name) || '' }}
 
 jobs:
   build:
@@ -55,9 +65,15 @@ jobs:
         id: name
         shell: bash
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            version="$GITHUB_REF_NAME"
-            tag="$GITHUB_REF_NAME"
+          if [[ -n "$RELEASE_TAG" ]]; then
+            if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::release tag '$RELEASE_TAG' is not like v1.2.3"; exit 1
+            fi
+            if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF" != refs/heads/main ]]; then
+              echo "::error::numbered releases are only made from main"; exit 1
+            fi
+            version="$RELEASE_TAG"
+            tag="$RELEASE_TAG"
           else
             version="nightly-$(date -u +%Y-%m-%d)"
             tag="nightly"
@@ -126,10 +142,12 @@ jobs:
         run: |
           ls -l dist
           short="${GITHUB_SHA::7}"
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            notes="Playtest build $GITHUB_REF_NAME ($short). Download the zip for your system, unpack it and run BreakIt. How to play, what to test and how to report: PLAYTEST.md in the zip, or https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/PLAYTEST.md"
-            gh release create "$GITHUB_REF_NAME" dist/*.zip \
-              --title "BreakIt $GITHUB_REF_NAME" --notes "$notes" --generate-notes
+          if [[ -n "$RELEASE_TAG" ]]; then
+            notes="Playtest build $RELEASE_TAG ($short). Download the zip for your system, unpack it and run BreakIt. How to play, what to test and how to report: PLAYTEST.md in the zip, or https://github.com/$GITHUB_REPOSITORY/blob/$RELEASE_TAG/PLAYTEST.md"
+            # --target creates the tag at this commit when it does not exist
+            # yet (dispatch); a pushed tag already points here.
+            gh release create "$RELEASE_TAG" dist/*.zip --target "$GITHUB_SHA" \
+              --title "BreakIt $RELEASE_TAG" --notes "$notes" --generate-notes
           else
             notes="Rolling build of main at $short, built $(date -u '+%Y-%m-%d %H:%M UTC'). Newer than the latest tagged release, and less tested. See PLAYTEST.md in the zip."
             # Recreate it so the tag moves to this commit and old zips go.
