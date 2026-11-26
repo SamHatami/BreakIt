@@ -12,6 +12,7 @@ use breakit_render::{BreakitRenderPlugin, MemberFrame, RenderSettings, Structure
 use crate::analysis::{BreakitSet, FrameState, Simulation};
 use crate::build::BuildTool;
 use crate::design::Design;
+use crate::testrun::Heatmap;
 use crate::Mode;
 
 pub struct VisualsPlugin;
@@ -33,6 +34,7 @@ fn feed_renderer(
     mode: Res<State<Mode>>,
     sim: Option<Res<Simulation>>,
     tool: Res<BuildTool>,
+    heat: Res<Heatmap>,
     visual: Option<ResMut<StructureVisual>>,
     mut frame: ResMut<MemberFrame>,
     mut settings: ResMut<RenderSettings>,
@@ -53,7 +55,7 @@ fn feed_renderer(
     let mut fresh = None;
     if *built_for != Some(key) || visual.is_none() {
         let styles: Vec<MemberStyle> = design.beams.iter().map(|b| b.kind.style()).collect();
-        fresh = Some(StructureVisual::new(&design.to_structure(), &styles));
+        fresh = Some(StructureVisual::jointed(&design.to_structure(), &styles));
         *built_for = Some(key);
     }
     let mut existing = visual;
@@ -76,15 +78,16 @@ fn feed_renderer(
         }
     };
 
-    let stress_view = !simulating;
-    let highlighted: Vec<usize> = match tool.hovered {
-        Some(h) if !simulating => design
+    let stress_view = !simulating || heat.0;
+    let highlighted: Vec<usize> = match (tool.hovered, tool.hovered_beam.or(tool.selected_beam)) {
+        (Some(h), _) if !simulating => design
             .beams
             .iter()
             .enumerate()
             .filter(|(_, b)| b.a == h || b.b == h)
             .map(|(i, _)| i)
             .collect(),
+        (None, Some(b)) if !simulating => vec![b],
         _ => Vec::new(),
     };
     if settings.stress_view != stress_view || settings.highlighted != highlighted {

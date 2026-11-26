@@ -196,3 +196,55 @@ fn catalog_parts_build_structures_both_solvers_agree_on() {
         );
     }
 }
+
+#[test]
+fn every_part_is_a_standard_size_with_a_designation() {
+    let c = Catalog::standard();
+    for p in &c.parts {
+        let (f, size, grade) = c
+            .family_of(&p.choice)
+            .unwrap_or_else(|| panic!("{} is not in any family", p.id));
+        assert_eq!(f.choice(size, grade).profile, p.choice.profile);
+        assert_eq!(c.part_of(&p.choice).map(|q| &q.id), Some(&p.id));
+        for j in p.choice.joints {
+            assert!(c.joints_for(&p.choice).contains(&j), "{}: {j:?}", p.id);
+        }
+    }
+    let ipe = c.part("steel-ibeam-m").unwrap();
+    assert_eq!(c.designation(&ipe.choice), "IPE 200 S355");
+    let mut custom = ipe.choice;
+    custom.profile = ProfileSpec::I {
+        h: 210.0,
+        b: 100.0,
+        tw: 6.0,
+        tf: 9.0,
+    };
+    assert_eq!(c.designation(&custom), "I 210x100 S355");
+    let rc = c.part("rc-beam").unwrap();
+    assert_eq!(c.designation(&rc.choice), "300x500 C30/37");
+}
+
+#[test]
+fn automatic_joints_follow_material_and_neighbours() {
+    use breakit_core::MaterialKind::*;
+    let c = Catalog::standard();
+    let pick = |id: &str, others: &[breakit_core::MaterialKind]| {
+        let p = c.part(id).unwrap();
+        auto_joint(&p.choice, others, &c.joints_for(&p.choice))
+    };
+    assert_eq!(pick("steel-tube-m", &[Steel, Steel]), JointSpec::Bolted);
+    assert_eq!(pick("steel-tube-m", &[]), JointSpec::Bolted);
+    assert_eq!(pick("steel-tube-m", &[Timber]), JointSpec::Bolted);
+    assert_eq!(pick("timber-joist", &[Timber]), JointSpec::Dowelled);
+    assert_eq!(pick("timber-joist", &[Steel]), JointSpec::Bolted);
+    assert_eq!(pick("rc-beam", &[Concrete]), JointSpec::Monolithic);
+    assert_eq!(pick("rc-beam", &[Steel]), JointSpec::Pinned);
+    assert_eq!(pick("steel-rod", &[Steel]), JointSpec::Pinned);
+    // Every automatic pick suits its material.
+    for p in &c.parts {
+        for others in [&[][..], &[Steel], &[Timber], &[Concrete], &[Composite]] {
+            let j = auto_joint(&p.choice, others, &c.joints_for(&p.choice));
+            assert!(j.kind().suits(p.choice.material.kind()), "{} {j:?}", p.id);
+        }
+    }
+}

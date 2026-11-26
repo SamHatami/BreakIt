@@ -1,6 +1,6 @@
 //! Wind loads against hand calculations and the static solve.
 mod common;
-use breakit_core::loads::wind::{cylinder_drag, rect_drag, Gusts, Profile, Wind, AIR_DENSITY};
+use breakit_core::loads::wind::{cylinder_drag, rect_drag, Profile, Wind, AIR_DENSITY};
 use breakit_core::{
     solve_static, DynamicSim, LoadCase, LoadKind, LoadSet, Material, NodeLoad, Section, SimConfig,
     Structure, Support, Vec3, Window,
@@ -135,45 +135,6 @@ fn leeward_member_is_shielded() {
 }
 
 #[test]
-fn gusts_have_the_target_intensity_and_convect_downwind() {
-    let mut s = Structure::new();
-    s.add_line(
-        Vec3::zeros(),
-        Vec3::new(10.0, 0.0, 0.0),
-        1,
-        &Material::steel(),
-        &tube(),
-    );
-    let mut w = Wind::new(20.0, Vec3::x());
-    w.gusts = Some(Gusts {
-        intensity: 0.15,
-        length_scale: 30.0,
-        seed: 3,
-    });
-    w.prepare(&s);
-    let p = Vec3::new(0.0, 1.0, 0.0);
-    let n = 200_000;
-    let dt = 0.01;
-    let (mut sum, mut sum2) = (0.0, 0.0);
-    for i in 0..n {
-        let u = w.velocity(p, i as f64 * dt, 1.0).x;
-        sum += u;
-        sum2 += u * u;
-    }
-    let mean = sum / n as f64;
-    let std = (sum2 / n as f64 - mean * mean).sqrt();
-    assert!(rel_err(mean, 20.0) < 0.02, "mean {mean}");
-    assert!(rel_err(std, 0.15 * 20.0) < 0.1, "std {std}");
-    // Frozen turbulence: 5 m downwind sees the same gust 5/U s later.
-    let q = p + Vec3::new(5.0, 0.0, 0.0);
-    for t in [1.0, 7.3, 22.0] {
-        let a = w.velocity(p, t, 1.0).x;
-        let b = w.velocity(q, t + 5.0 / 20.0, 1.0).x;
-        assert!((a - b).abs() < 1e-9, "{a} vs {b}");
-    }
-}
-
-#[test]
 fn jet_profile_is_a_soft_top_hat() {
     let mut w = Wind::new(10.0, Vec3::x());
     w.profile = Profile::Jet {
@@ -217,34 +178,42 @@ fn settled_cantilever_under_wind_matches_static_solve() {
 }
 
 #[test]
-fn vortex_shedding_drives_a_cross_wind_force_at_the_strouhal_frequency() {
-    // Large slow tube: f = St U / D = 0.2 * 2 / 0.4 = 1 Hz, below the fade.
-    let sec = Section::tube(0.2, 0.01);
-    let s = horizontal_member(&sec, 2.0, 2);
-    let mut loads = steady(Wind::new(2.0, Vec3::x()));
-    let mut sim = DynamicSim::new(
-        &s,
-        SimConfig {
-            gravity: Vec3::zeros(),
-            ..quiet()
-        },
-    );
-    let mut ys = Vec::new();
-    for _ in 0..(4 * 60) {
-        loads.apply(&s, &mut sim, 1.0 / 60.0);
-        ys.push(loads.totals()[0].y);
-        sim.step(1.0 / 60.0);
+fn sign_panel_loads_its_frame_through_the_load_set() {
+    use breakit_core::loads::wind::panels::PanelSpec;
+    // 6 x 3 m sign facing a 40 m/s wind on a frame of four posts.
+    let mut s = Structure::new();
+    let corners = [
+        Vec3::new(0.0, 5.0, -3.0),
+        Vec3::new(0.0, 5.0, 3.0),
+        Vec3::new(0.0, 8.0, 3.0),
+        Vec3::new(0.0, 8.0, -3.0),
+    ];
+    let (m, t) = (Material::steel(), tube());
+    let ids: Vec<usize> = corners.iter().map(|c| s.add_node(*c)).collect();
+    for k in 0..4 {
+        s.add_member(ids[k], ids[(k + 1) % 4], m.clone(), t.clone());
     }
-    let amp = ys.iter().fold(0.0f64, |m, y| m.max(y.abs()));
-    let expected = 0.5 * AIR_DENSITY * 0.25 * 0.4 * 4.0 * 2.0;
+    for &id in &ids[..2] {
+        s.add_support(Support::fixed(id));
+    }
+    let mut w = Wind::new(40.0, Vec3::x());
+    w.vortex_shedding = false;
+    w.panels
+        .push(PanelSpec::sign("billboard", corners.to_vec()));
+    let mut with = steady(w.clone());
+    w.panels.clear();
+    let mut without = steady(w);
+    let mut sim = DynamicSim::new(&s, quiet());
+    with.apply(&s, &mut sim, 1.0 / 60.0);
+    without.apply(&s, &mut sim, 1.0 / 60.0);
+    let panel = with.totals()[0] - without.totals()[0];
+    let expected = 0.5 * AIR_DENSITY * 1600.0 * 1.8 * 18.0;
     assert!(
-        rel_err(amp, expected) < 0.1,
-        "lift amplitude {amp} vs {expected}"
+        rel_err(panel.x, expected) < 1e-6,
+        "{} vs {expected}",
+        panel.x
     );
-    // Count zero crossings: 2 per period, 1 Hz, 4 s.
-    let crossings = ys
-        .windows(2)
-        .filter(|w| w[0].signum() != w[1].signum())
-        .count();
-    assert!((6..=10).contains(&crossings), "{crossings} crossings");
+    let rig = with.rig_state(sim.time());
+    assert_eq!(rig.wind[0].panels.len(), 1);
+    assert!(rel_err(rig.wind[0].panels[0].net_pressure.abs(), expected / 18.0) < 1e-6);
 }

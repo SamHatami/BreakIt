@@ -7,11 +7,14 @@
 
 use serde::{Deserialize, Serialize};
 
+use breakit_core::loads::traffic::VehicleRig;
+use breakit_core::loads::{LoadKind, LoadSet, RigState};
 use breakit_core::{DamageState, DynamicSim, NodeLoad, SimConfig, Structure, Vec3};
 
 use crate::cost::{Bill, CostModel};
+use crate::equipment::{Equipment, EquipmentEvent};
 use crate::limits::{check_limits, PlayMode, Violation};
-use crate::loads::{event_window, Binding, VehiclePose};
+use crate::loads::{event_window, Binding};
 use crate::report::Report;
 use crate::scenario::Scenario;
 
@@ -54,6 +57,23 @@ pub enum Happening {
     ProofTestHeld {
         factor: f64,
     },
+    /// A bolted item tore its bolts out and now rests on friction.
+    BoltsFailed {
+        payload: usize,
+        name: String,
+    },
+    /// An item tipped or slid off. Its mass has left the structure; it is
+    /// at `position` (centre of mass) moving at `velocity`.
+    PayloadLost {
+        payload: usize,
+        name: String,
+        /// kg.
+        mass: f64,
+        /// Contact radius for a falling-object impactor, m.
+        radius: f64,
+        position: [f64; 3],
+        velocity: [f64; 3],
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,8 +93,10 @@ pub struct Measured {
     pub peak_utilization: f64,
     /// Largest downward deck displacement, m.
     pub peak_deck_sag: Option<f64>,
-    /// Largest displacement of each payload's node, m.
+    /// Largest movement of each payload's footprint centre, m (same as
+    /// `payloads[k].drift`).
     pub payload_drift: Vec<f64>,
+    pub payloads: Vec<PayloadMeasured>,
     pub first_damage: Option<f64>,
     pub first_break: Option<(f64, usize, String)>,
     pub broken: usize,
@@ -90,6 +112,21 @@ pub struct Measured {
     pub proof_collapse: Option<f64>,
 }
 
+/// Read-outs for one payload over the test (not the proof test).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PayloadMeasured {
+    pub tilt_deg: f64,
+    /// Largest downward movement of a foot, m.
+    pub sag: f64,
+    /// Largest movement of the footprint centre, m.
+    pub drift: f64,
+    /// Smallest foot reaction over its static share; below 0 a foot lifted.
+    pub min_reaction: f64,
+    pub bolts_failed: bool,
+    /// Test time it came off.
+    pub lost: Option<f64>,
+}
+
 /// Seconds of physics kept running after the outcome, for the collapse to
 /// play out on screen.
 pub const AFTERMATH: f64 = 3.0;
@@ -99,7 +136,11 @@ pub struct TestRun {
     pub mode: PlayMode,
     pub bill: Bill,
     sim: DynamicSim,
+    structure: Structure,
     binding: Binding,
+    /// The scenario's traffic and ground motion as core load cases, in
+    /// solver time.
+    loads: LoadSet,
     watched: Vec<usize>,
     gravity: Vec3,
     clock: f64,
@@ -109,6 +150,8 @@ pub struct TestRun {
     timeline: Vec<TimelineEntry>,
     seen_breaks: usize,
     event_live: Vec<(bool, bool)>,
+    /// Per payload, in scenario order.
+    equipment: Vec<Equipment>,
 }
 
 impl TestRun {
@@ -130,10 +173,13 @@ impl TestRun {
         let gravity = config.gravity;
         let mut sim = DynamicSim::new(structure, config);
         let mut binding = Binding::new(scenario, structure);
-        for (p, n) in scenario.payloads.iter().zip(&binding.payload_nodes) {
-            if let Some(n) = *n {
-                sim.add_point_mass(n, p.mass);
+        let mut equipment = Vec::new();
+        for (p, feet) in scenario.payloads.iter().zip(&binding.payload_feet) {
+            let feet = feet.clone().expect("limits check attaches every payload");
+            for &n in &feet {
+                sim.add_point_mass(n, p.mass / feet.len() as f64);
             }
+            equipment.push(Equipment::new(p, feet, &sim));
         }
         binding.node_mass = (0..structure.nodes.len())
             .map(|i| sim.node_mass(i))
@@ -142,10 +188,9 @@ impl TestRun {
             binding.extra = extra.iter().map(|l| (l.node, l.force)).collect();
         }
         let mut watched: Vec<usize> = binding
-            .deck
-            .iter()
-            .flat_map(|d| d.nodes())
-            .chain(binding.payload_nodes.iter().flatten().copied())
+            .deck_nodes()
+            .into_iter()
+            .chain(binding.payload_feet.iter().flatten().flatten().copied())
             .filter(|&n| binding.node_mass[n] > 0.0)
             .collect();
         if watched.is_empty() {
@@ -158,15 +203,21 @@ impl TestRun {
         let measured = Measured {
             peak_deck_sag: binding.deck.as_ref().map(|_| 0.0),
             payload_drift: vec![0.0; scenario.payloads.len()],
+            payloads: vec![PayloadMeasured::default(); scenario.payloads.len()],
             ..Default::default()
         };
         let settle = scenario.settle.max(0.0);
-        let mut run = Self {
+        let mut loads = Binding::load_set(scenario, settle);
+        loads.prepare(structure);
+        sim.config.gravity = if settle > 0.0 { Vec3::zeros() } else { gravity };
+        Ok(Self {
             scenario: scenario.clone(),
             mode,
             bill,
             sim,
+            structure: structure.clone(),
             binding,
+            loads,
             watched,
             gravity,
             clock: -settle,
@@ -180,9 +231,8 @@ impl TestRun {
             timeline: Vec::new(),
             seen_breaks: 0,
             event_live: vec![(false, false); scenario.events.len()],
-        };
-        run.apply_loads();
-        Ok(run)
+            equipment,
+        })
     }
 
     pub fn sim(&self) -> &DynamicSim {
@@ -190,6 +240,12 @@ impl TestRun {
     }
     pub fn binding(&self) -> &Binding {
         &self.binding
+    }
+    /// The core load cases driving the run. Their times are solver time
+    /// ([`DynamicSim::time`]), which runs `settle` seconds ahead of
+    /// [`Self::time`].
+    pub fn loads(&self) -> &LoadSet {
+        &self.loads
     }
     /// Test time, s. Negative while settling.
     pub fn time(&self) -> f64 {
@@ -208,8 +264,19 @@ impl TestRun {
     pub fn load_factor(&self) -> f64 {
         Binding::factor_at(&self.scenario, self.clock)
     }
-    pub fn vehicles(&self) -> Vec<VehiclePose> {
-        self.binding.vehicles_at(&self.scenario, self.clock)
+    /// Every vehicle of the scenario's convoys as it is now, for drawing.
+    pub fn vehicles(&self) -> Vec<VehicleRig> {
+        self.loads.rig_state(self.sim.time()).vehicles
+    }
+    /// Every rig (vehicles, shake table, fan wall, flume, impactors) as it
+    /// is now, for drawing.
+    pub fn rig_state(&self) -> RigState {
+        self.loads.rig_state(self.sim.time())
+    }
+    /// Shake table displacement now, m: add it to every simulated position
+    /// (and to the table) when drawing.
+    pub fn table_offset(&self) -> Vec3 {
+        self.loads.table_offset(self.sim.time())
     }
     /// The outcome is known (the run may still be playing out).
     pub fn is_decided(&self) -> bool {
@@ -224,7 +291,7 @@ impl TestRun {
         Report::new(self)
     }
 
-    fn apply_loads(&mut self) {
+    fn apply_loads(&mut self, dt: f64) {
         let settle = self.scenario.settle;
         let g = if self.clock < 0.0 && settle > 0.0 {
             (1.0 + self.clock / settle).clamp(0.0, 1.0)
@@ -236,7 +303,32 @@ impl TestRun {
             // Loads stay as they were at the moment of the outcome.
             return;
         }
-        let f = self.binding.forces_at(&self.scenario, self.clock);
+        // The proof test swaps the traffic for a uniform stand-in (in
+        // `deck_forces`) and raises everything by the load factor.
+        let proof = self.scenario.overload.is_some() && self.clock > self.scenario.duration;
+        self.loads.factor = self.load_factor();
+        for c in &mut self.loads.cases {
+            if matches!(c.kind, LoadKind::Traffic(_)) {
+                c.factor = if proof { 0.0 } else { 1.0 };
+            }
+        }
+        let centres: Vec<Vec3> = self
+            .equipment
+            .iter()
+            .map(|e| e.centre(&self.sim) + Vec3::y() * e.height)
+            .collect();
+        let wind = Binding::payload_wind(&self.scenario, &self.loads, &centres, self.sim.time());
+        for (e, w) in self.equipment.iter_mut().zip(wind) {
+            e.wind = if e.lost { Vec3::zeros() } else { w };
+        }
+        self.loads.apply(&self.structure, &mut self.sim, dt);
+        let mut f = self.binding.deck_forces(&self.scenario, self.clock);
+        for (a, b) in f.iter_mut().zip(self.loads.forces()) {
+            *a += b;
+        }
+        for e in &self.equipment {
+            e.add_forces(&mut f);
+        }
         for (n, f) in f.into_iter().enumerate() {
             self.sim.set_force(n, f);
         }
@@ -244,9 +336,10 @@ impl TestRun {
 
     /// Advances one physics frame.
     pub fn step(&mut self, dt: f64) {
-        self.apply_loads();
+        self.apply_loads(dt);
         self.sim.step(dt);
         self.clock += dt;
+        self.update_equipment(dt);
         if self.phase == Phase::Decided {
             return;
         }
@@ -255,6 +348,101 @@ impl TestRun {
         }
         self.track_events();
         self.record();
+    }
+
+    fn update_equipment(&mut self, dt: f64) {
+        let ground = Binding::ground_accel(&self.loads, self.sim.time());
+        let g = self.sim.config.gravity;
+        let measuring = matches!(self.phase, Phase::Settling | Phase::Test);
+        for k in 0..self.equipment.len() {
+            let built: Vec<Vec3> = self.equipment[k]
+                .feet
+                .iter()
+                .map(|&n| self.structure.nodes[n])
+                .collect();
+            let peaks = (
+                self.equipment[k].peak_tilt,
+                self.equipment[k].peak_sag,
+                self.equipment[k].peak_drift,
+            );
+            let events = self.equipment[k].update(&mut self.sim, &built, ground, g, dt);
+            let e = &mut self.equipment[k];
+            if !measuring {
+                // Read-outs cover the test proper, not the proof test.
+                (e.peak_tilt, e.peak_sag, e.peak_drift) = peaks;
+            }
+            let pm = &mut self.measured.payloads[k];
+            pm.tilt_deg = e.peak_tilt.to_degrees();
+            pm.sag = e.peak_sag;
+            pm.drift = e.peak_drift;
+            pm.min_reaction = e.min_reaction;
+            self.measured.payload_drift[k] = e.peak_drift;
+            let name = self.scenario.payloads[k].name.clone();
+            for ev in events {
+                match ev {
+                    EquipmentEvent::BoltsFailed => {
+                        self.measured.payloads[k].bolts_failed = true;
+                        self.push(Happening::BoltsFailed {
+                            payload: k,
+                            name: name.clone(),
+                        });
+                    }
+                    EquipmentEvent::Lost { position, velocity } => {
+                        self.measured.payloads[k].lost = Some(self.clock);
+                        for &n in &self.equipment[k].feet {
+                            self.binding.node_mass[n] = self.sim.node_mass(n);
+                        }
+                        let p = &self.scenario.payloads[k];
+                        let (mass, radius) = (p.mass, p.radius());
+                        self.push(Happening::PayloadLost {
+                            payload: k,
+                            name: name.clone(),
+                            mass,
+                            radius,
+                            position: [position.x, position.y, position.z],
+                            velocity: [velocity.x, velocity.y, velocity.z],
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    /// The first critical payload lost, or strict limit broken, as a
+    /// failure reason. `at_end` also checks the strict limits.
+    fn payload_failure(&self, at_end: bool) -> Option<String> {
+        for (p, m) in self.scenario.payloads.iter().zip(&self.measured.payloads) {
+            if p.critical && m.lost.is_some() {
+                return Some(format!("the {} came off", p.name));
+            }
+            if !(at_end && p.limits.strict) {
+                continue;
+            }
+            let l = &p.limits;
+            if let Some(t) = l.tilt_deg.filter(|&t| m.tilt_deg > t) {
+                return Some(format!(
+                    "the {} tilted {:.1}° (limit {t:.1}°)",
+                    p.name, m.tilt_deg
+                ));
+            }
+            if let Some(d) = l.sag.filter(|&d| m.sag > d) {
+                return Some(format!(
+                    "the {} sank {:.0} mm (limit {:.0} mm)",
+                    p.name,
+                    m.sag * 1000.0,
+                    d * 1000.0
+                ));
+            }
+            if let Some(d) = l.drift.filter(|&d| m.drift > d) {
+                return Some(format!(
+                    "the {} moved {:.0} mm (limit {:.0} mm)",
+                    p.name,
+                    m.drift * 1000.0,
+                    d * 1000.0
+                ));
+            }
+        }
+        None
     }
 
     /// Steps until decided or `max_time` of test time passes.
@@ -284,7 +472,7 @@ impl TestRun {
     }
 
     fn track_events(&mut self) {
-        let deck_len = self.binding.deck.as_ref().map_or(0.0, |d| d.length);
+        let deck_len = self.binding.deck_length;
         let in_test = self.phase == Phase::Test;
         for i in 0..self.scenario.events.len() {
             let (a, b) = event_window(&self.scenario.events[i], deck_len);
@@ -362,22 +550,19 @@ impl TestRun {
             }
         }
         if !proof {
-            if let (Some(sag), Some(deck)) = (&mut self.measured.peak_deck_sag, &self.binding.deck)
-            {
-                for n in deck.nodes() {
+            if let Some(sag) = &mut self.measured.peak_deck_sag {
+                for n in self.binding.deck_nodes() {
                     *sag = sag.max(-self.sim.displacement(n).y);
-                }
-            }
-            for (k, n) in self.binding.payload_nodes.iter().enumerate() {
-                if let Some(n) = *n {
-                    let d = self.sim.displacement(n).norm();
-                    self.measured.payload_drift[k] = self.measured.payload_drift[k].max(d);
                 }
             }
         }
         let broken_frac = self.measured.broken as f64 / n_members.max(1) as f64;
         if collapse.is_none() && broken_frac > self.scenario.collapse.max_broken_fraction {
             collapse = Some(format!("{:.0}% of members broke", broken_frac * 100.0));
+        }
+
+        if collapse.is_none() && !proof {
+            collapse = self.payload_failure(false);
         }
 
         if let Some(reason) = collapse {
@@ -397,6 +582,16 @@ impl TestRun {
         }
 
         if self.phase == Phase::Test && self.clock >= self.scenario.duration {
+            if let Some(reason) = self.payload_failure(true) {
+                self.push(Happening::Collapse {
+                    reason: reason.clone(),
+                });
+                self.measured.passed = Some(false);
+                self.measured.failure = Some(reason);
+                self.measured.collapse_time = Some(self.clock);
+                self.decide();
+                return;
+            }
             self.measured.passed = Some(true);
             self.push(Happening::Passed);
             match self.scenario.overload {

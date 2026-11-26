@@ -1,0 +1,7 @@
+# One compiler for CI and every agent container, so clippy's lint set (and
+# `-D warnings`) does not change under us when a new stable ships.
+# Upgrade deliberately in its own PR, and fix the new warnings in that PR.
+[toolchain]
+channel = "1.100.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

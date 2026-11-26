@@ -1,9 +1,11 @@
-//! Frame-time read-out, top right. F3 hides and shows it.
+//! Frame-time read-out, top edge between the sheet and the read-outs. Hidden by default; F3 shows and hides it.
 //!
 //! Shows the average and worst frame over the last two seconds, the CPU
 //! time of physics and of the member visuals, and what the lab costs. Set
 //! `BREAKIT_PERF_LOG=1` to also print it once a second (for runs without a
-//! screen, and for pasting into an issue).
+//! screen, and for pasting into an issue). It goes to the log file too.
+//! The first line is the build's version, so screenshots say what they
+//! were taken on.
 
 use std::collections::VecDeque;
 use std::time::Instant;
@@ -19,7 +21,7 @@ pub struct PerfPlugin;
 impl Plugin for PerfPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(Perf {
-            visible: true,
+            visible: false,
             log: std::env::var_os("BREAKIT_PERF_LOG").is_some(),
             ..default()
         })
@@ -70,8 +72,8 @@ fn spawn_readout(mut commands: Commands) {
         BackgroundColor(Color::srgba(0.05, 0.06, 0.07, 0.55)),
         Node {
             position_type: PositionType::Absolute,
-            top: px(8),
-            right: px(8),
+            top: px(2),
+            left: px(370),
             padding: UiRect::axes(px(8), px(5)),
             ..default()
         },
@@ -117,7 +119,8 @@ fn update_readout(
     };
     let visuals = render.map(|r| r.scene_update_ms).unwrap_or(0.0);
     let s = format!(
-        "{:.1} ms  {:.0} fps  worst {:.1} ms\nphysics {:.2} ms  visuals {:.2} ms\nlab {}k tris  {} meshes  {} lamps  table: {}",
+        "{}\n{:.1} ms  {:.0} fps  worst {:.1} ms\nphysics {:.2} ms  visuals {:.2} ms\nlab {}k tris  {} meshes  {} lamps  table: {}\nquality: {} (F4)",
+        crate::release::version_line(),
         avg,
         1000.0 / avg.max(1e-3),
         worst,
@@ -127,11 +130,12 @@ fn update_readout(
         lab.hall_meshes + lab.table_meshes,
         lab.point_lights,
         lab.table_name,
+        lab.quality,
     );
     perf.since_log += dt;
     if perf.log && perf.since_log >= 1.0 {
         perf.since_log = 0.0;
-        println!("perf: {}", s.replace('\n', "  |  "));
+        info!("perf: {}", s.replace('\n', "  |  "));
     }
     let (t, vis) = &mut *text;
     let want = if perf.visible {

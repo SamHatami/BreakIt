@@ -5,6 +5,7 @@ description = "Bevy renderer for BreakIt members: GPU beam-curve deformation, pr
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 publish = false
 
 [dependencies]
@@ -12,3 +13,6 @@ breakit-core = { path = "../breakit-core" }
 breakit-mesh = { path = "../breakit-mesh" }
 # Same pin as breakit-game; upgrade both together.
 bevy = { version = "=0.20.1", default-features = false, features = ["3d", "ui"] }
+
+[lints]
+workspace = true

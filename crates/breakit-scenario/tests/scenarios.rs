@@ -202,7 +202,7 @@ fn bridge_trusses_either_side_of_the_lane_share_the_traffic() {
     let b = Binding::new(&s, &st);
     let deck = b.deck.as_ref().unwrap();
     assert_eq!(deck.stations.len(), 7);
-    assert!(deck.stations.iter().all(|st| st.nodes.len() == 2));
+    assert!(deck.stations.iter().all(|st| st.others.len() == 1));
     let cost = CostModel::default().estimate(&st);
     let s_free = Scenario {
         limits: Limits {
@@ -312,4 +312,135 @@ fn joint_kinds_change_the_price() {
     let pinned = c.estimate_with_joints(&st, &vec![[JointClass::Pinned; 2]; st.members.len()]);
     assert!((bolted.joints - 2.0 * pinned.joints).abs() < 1e-9);
     assert_eq!(bolted.materials, pinned.materials);
+}
+
+fn plant() -> Scenario {
+    builtin()
+        .into_iter()
+        .find(|s| s.id == "plant_platform")
+        .unwrap()
+}
+
+#[test]
+fn a_braced_platform_keeps_the_pump_on() {
+    let s = plant();
+    let r = grade(&s, &common::platform(0.04, 0.004, true));
+    print!("{}", r.summary());
+    assert!(r.passed, "{:?}", r.failure);
+    let (_, pump) = &r.payloads[0];
+    assert!(pump.lost.is_none());
+    assert!(pump.sag > 0.001 && pump.tilt_deg < 0.5);
+    assert!(r
+        .criteria
+        .iter()
+        .any(|c| c.label == "pump skid stays on" && c.ok && !c.bonus));
+}
+
+#[test]
+fn a_swaying_platform_shakes_the_pump_off_and_fails() {
+    let s = plant();
+    let r = grade(&s, &common::platform(0.06, 0.005, false));
+    assert!(!r.passed);
+    assert!(r.failure.as_deref().unwrap().contains("pump skid came off"));
+    let lost = r
+        .timeline
+        .iter()
+        .find_map(|e| match &e.what {
+            Happening::PayloadLost {
+                name, mass, radius, ..
+            } => Some((name.clone(), *mass, *radius)),
+            _ => None,
+        })
+        .expect("a PayloadLost event for the impact hand-off");
+    assert_eq!(lost.0, "pump skid");
+    assert_eq!(lost.1, 2500.0);
+    assert!(lost.2 > 0.5);
+}
+
+#[test]
+fn equipment_needs_a_node_under_every_foot() {
+    let s = plant();
+    let mut st = common::platform(0.04, 0.004, true);
+    // Move the node under one pump foot away.
+    let foot = st
+        .nodes
+        .iter()
+        .position(|p| (p - Vec3::new(1.0, 3.0, 0.5)).norm() < 1e-9)
+        .unwrap();
+    st.nodes[foot].x = 1.25;
+    let v = limits(&s, &st, PlayMode::Challenge);
+    assert!(
+        v.iter().any(
+            |v| matches!(v, Violation::PayloadUnattached { payload } if payload == "pump skid")
+        ),
+        "{v:?}"
+    );
+}
+
+#[test]
+fn strict_limits_fail_and_loose_ones_only_cost_score() {
+    let st = common::platform(0.04, 0.004, true);
+    let mut s = plant();
+    s.payloads[0].limits.sag = Some(0.001);
+    let loose = grade(&s, &st);
+    assert!(loose.passed);
+    assert!(loose
+        .criteria
+        .iter()
+        .any(|c| c.label == "pump skid sag" && !c.ok && c.bonus));
+    s.payloads[0].limits.strict = true;
+    let strict = grade(&s, &st);
+    assert!(!strict.passed);
+    assert!(strict.failure.unwrap().contains("sank"));
+}
+
+#[test]
+fn weak_bolts_tear_out_under_the_shaking() {
+    let mut s = plant();
+    s.payloads[1].mount = Mount::Bolted { capacity: 50.0 };
+    let r = grade(&s, &common::platform(0.04, 0.004, true));
+    assert!(r.payloads[1].1.bolts_failed);
+    assert!(r
+        .timeline
+        .iter()
+        .any(|e| matches!(e.what, Happening::BoltsFailed { payload: 1, .. })));
+}
+
+fn scenario(id: &str) -> Scenario {
+    builtin().into_iter().find(|s| s.id == id).unwrap()
+}
+
+#[test]
+fn the_fan_wall_loads_the_billboard_and_a_slim_tower_blows_over() {
+    let s = scenario("sign_wind");
+    let b = Binding::load_set(&s, s.settle);
+    assert!(b
+        .cases
+        .iter()
+        .any(|c| matches!(c.kind, breakit_core::loads::LoadKind::Wind(_))));
+    let good = grade(&s, &common::sign_tower(0.035, 0.0035, 2));
+    print!("{}", good.summary());
+    assert!(good.passed, "{:?}", good.failure);
+    // ½ ρ C_d A U² on the 18 m² board at 40 m/s is about 32 kN: the
+    // tower's members must feel it.
+    assert!(good.peak_utilization > 0.3, "{}", good.peak_utilization);
+    let bad = grade(&s, &common::sign_tower(0.02, 0.002, 2));
+    assert!(!bad.passed);
+}
+
+#[test]
+fn the_surge_pushes_the_jetty_legs() {
+    let s = scenario("flood_jetty");
+    let braced = grade(&s, &common::jetty(0.03, 0.003, true));
+    print!("{}", braced.summary());
+    assert!(braced.passed, "{:?}", braced.failure);
+    // Unbraced legs sway far more under the same surge.
+    let sway = grade(&s, &common::jetty(0.06, 0.005, false));
+    let drift = |r: &Report| r.payloads[0].1.drift;
+    assert!(
+        drift(&sway) > 1.5 * drift(&braced),
+        "{} vs {}",
+        drift(&sway),
+        drift(&braced)
+    );
 }

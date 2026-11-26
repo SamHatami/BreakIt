@@ -19,6 +19,11 @@
 //! order. [`BlockChol::load`] and [`BlockChol::store`] convert from and to
 //! the caller's compact DOF numbering.
 
+#![expect(
+    unsafe_code,
+    reason = "runtime AVX2/FMA dispatch: #[target_feature] kernels are called after a CPU check"
+)]
+
 use crate::linsolve::{tri, NodeLayout, BLOCK_NNZ};
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::sparse::linalg::amd;

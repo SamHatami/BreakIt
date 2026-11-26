@@ -98,14 +98,8 @@ fn setup(mut commands: Commands, bays: Res<Bays>) {
         add(&mut s, n[1], n[3], MaterialKind::Timber, post);
         add(&mut s, n[0], n[3], MaterialKind::Composite, brace);
         if i < bays {
-            for c in 0..4 {
-                add(
-                    &mut s,
-                    chords[c][i],
-                    chords[c][i + 1],
-                    MaterialKind::Steel,
-                    tube,
-                );
+            for chord in &chords {
+                add(&mut s, chord[i], chord[i + 1], MaterialKind::Steel, tube);
             }
             add(
                 &mut s,

@@ -1,0 +1,73 @@
+// Test sheet P-01: equipment on a platform, on the shake table.
+//
+// The pump skid just stands on the deck: it slides if the deck shakes
+// harder than friction can hold, and tips if a foot lifts. The control
+// cabinet is bolted down. A stiff platform keeps the deck calm; a soft one
+// amplifies the shaking.
+(
+    id: "plant_platform",
+    sheet: "P-01",
+    group: "Equipment",
+    title: "Pump platform on the shake table",
+    brief: "Hold a 2.5 t pump skid and a 400 kg control cabinet on a platform 3 m up while the table shakes at 0.3 g. The pump only stands on its four feet: shake the deck too hard and it slides or tips off, and the test fails. Its feet need nodes at x = ±1 m, z = ±0.5 m; the cabinet's at x = ±0.5 m, z = 0.5 and 1.5 m. Four fixed footings at the corners of a 3 m square.",
+    limits: (
+        volume: (min: (-2.0, 0.0, -2.0), max: (2.0, 3.5, 2.0)),
+        budget: Some(150000.0),
+        max_mass: Some(2500.0),
+        materials: None,
+    ),
+    anchors: [
+        (name: "A", position: (-1.5, 0.0, -1.5), kind: Fixed),
+        (name: "B", position: (1.5, 0.0, -1.5), kind: Fixed),
+        (name: "C", position: (1.5, 0.0, 1.5), kind: Fixed),
+        (name: "D", position: (-1.5, 0.0, 1.5), kind: Fixed),
+    ],
+    payloads: [
+        (
+            name: "pump skid",
+            at: (0.0, 3.0, 0.0),
+            tolerance: 0.1,
+            mass: 2500.0,
+            feet: [(-1.0, 0.0, -0.5), (1.0, 0.0, -0.5), (1.0, 0.0, 0.5), (-1.0, 0.0, 0.5)],
+            height: 0.8,
+            size: Some((2.4, 1.4, 1.3)),
+            mount: Resting(friction: 0.35),
+            limits: (tilt_deg: Some(0.5), sag: Some(0.015)),
+            critical: true,
+        ),
+        (
+            name: "control cabinet",
+            at: (0.0, 3.0, 1.0),
+            tolerance: 0.1,
+            mass: 400.0,
+            feet: [(-0.5, 0.0, -0.5), (0.5, 0.0, -0.5), (0.5, 0.0, 0.5), (-0.5, 0.0, 0.5)],
+            height: 1.0,
+            size: Some((1.2, 2.0, 1.2)),
+            mount: Bolted(capacity: 6000.0),
+            limits: (drift: Some(0.05)),
+        ),
+    ],
+    events: [
+        GroundShake(
+            name: "Shake 0.3 g",
+            start: 0.5,
+            duration: 8.0,
+            peak: 2.94,
+            frequency: 2.5,
+            direction: (1.0, 0.0, 0.4),
+            fade: 1.5,
+        ),
+    ],
+    duration: 10.0,
+    settle: 1.0,
+    collapse: (displacement: 0.5, max_broken_fraction: 0.25),
+    overload: None,
+    objectives: [NoBreaks],
+    scoring: (
+        target_cost: 100000.0,
+        target_mass: 800.0,
+        margin_band: (1.25, 2.0),
+        weights: (cost: 0.3, mass: 0.15, margin: 0.25, objectives: 0.3),
+        stars: (0.6, 0.85),
+    ),
+)

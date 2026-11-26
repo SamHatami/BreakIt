@@ -4,6 +4,11 @@
 //! `Send`, so voices can live on the audio thread. Frequencies are in Hz and
 //! times in seconds; each block is told the sample rate when it is built.
 
+#![expect(
+    clippy::should_implement_trait,
+    reason = "per-sample `next()` is the DSP convention; these generators never end, so they are not iterators"
+)]
+
 use std::f32::consts::{PI, TAU};
 
 /// Fast deterministic noise source (xorshift32). Seeded, so a sound is the

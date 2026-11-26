@@ -8,7 +8,7 @@ use breakit_scenario::{builtin, evaluate, CostModel, PlayMode};
 
 #[path = "../tests/common/mod.rs"]
 mod common;
-use common::{mast, warren};
+use common::{jetty, mast, platform, sign_tower, warren};
 
 fn main() {
     let scenarios = builtin();
@@ -26,8 +26,36 @@ fn main() {
         ("mast 20x2 x3", 1, mast(0.02, 0.002, 3)),
         ("mast 40x4 x2", 1, mast(0.04, 0.004, 2)),
         ("mast 25x2.5 x2", 1, mast(0.025, 0.0025, 2)),
+        ("platform 80x8 braced", 2, platform(0.08, 0.008, true)),
+        ("platform 60x5 braced", 2, platform(0.06, 0.005, true)),
+        ("platform 40x4 braced", 2, platform(0.04, 0.004, true)),
+        ("platform 100x10 unbraced", 2, platform(0.1, 0.01, false)),
+        ("platform 60x5 unbraced", 2, platform(0.06, 0.005, false)),
+        ("sign tower 80x8 x4", 3, sign_tower(0.08, 0.008, 4)),
+        ("sign tower 60x5 x4", 3, sign_tower(0.06, 0.005, 4)),
+        ("sign tower 50x5 x4", 3, sign_tower(0.05, 0.005, 4)),
+        ("sign tower 40x4 x4", 3, sign_tower(0.04, 0.004, 4)),
+        ("sign tower 30x3 x4", 3, sign_tower(0.03, 0.003, 4)),
+        ("sign tower 60x5 x2", 3, sign_tower(0.06, 0.005, 2)),
+        ("sign tower 40x4 x2", 3, sign_tower(0.04, 0.004, 2)),
+        ("sign tower 35x3.5 x2", 3, sign_tower(0.035, 0.0035, 2)),
+        ("sign tower 30x3 x2", 3, sign_tower(0.03, 0.003, 2)),
+        ("sign tower 25x2.5 x2", 3, sign_tower(0.025, 0.0025, 2)),
+        ("sign tower 20x2 x2", 3, sign_tower(0.02, 0.002, 2)),
+        ("jetty 80x8 braced", 4, jetty(0.08, 0.008, true)),
+        ("jetty 60x5 braced", 4, jetty(0.06, 0.005, true)),
+        ("jetty 40x4 braced", 4, jetty(0.04, 0.004, true)),
+        ("jetty 30x3 braced", 4, jetty(0.03, 0.003, true)),
+        ("jetty 25x2.5 braced", 4, jetty(0.025, 0.0025, true)),
+        ("jetty 100x10 unbraced", 4, jetty(0.1, 0.01, false)),
+        ("jetty 60x5 unbraced", 4, jetty(0.06, 0.005, false)),
+        ("jetty 50x5 unbraced", 4, jetty(0.05, 0.005, false)),
     ];
+    let only = std::env::args().nth(1);
     for (name, k, s) in cases {
+        if only.as_deref().is_some_and(|o| !name.contains(o)) {
+            continue;
+        }
         let t = Instant::now();
         match evaluate(
             &scenarios[k],

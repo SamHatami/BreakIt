@@ -452,8 +452,13 @@ fn cladding(s: &mut Scenery, spec: &HallSpec) {
         if end > 0.0 {
             roller_door(s, x, n, 1.0, 7.0, 6.0);
         } else {
-            // A big window high in the far gable: a bright backdrop.
-            wall_quad(s, Mat::Skylight, -6.0, 6.0, 7.5, 10.5, 10.5);
+            // A big window high in the far gable: a bright backdrop. It
+            // stands just proud of the sheeting and its ribs, so the two
+            // never share a depth.
+            let xw = x + n * 0.045;
+            let (a, b) = (Vec3::new(xw, 7.5, -6.0), Vec3::new(xw, 7.5, 6.0));
+            let (c, d) = (Vec3::new(xw, 10.5, 6.0), Vec3::new(xw, 10.5, -6.0));
+            s.m(Mat::Skylight).quad([b, a, d, c]);
             let mut z = -6.0;
             while z <= 6.01 {
                 s.m(Mat::LightSteel).bar(

@@ -41,6 +41,7 @@ use breakit_mesh::{
 
 pub use breakit_mesh;
 
+mod joints;
 mod particles;
 
 const SHADER_PATH: &str = "embedded://breakit_render/member.wesl";
@@ -58,12 +59,14 @@ impl Plugin for BreakitRenderPlugin {
             .init_resource::<MemberFrame>()
             .init_resource::<RenderSettings>()
             .init_resource::<RenderStats>()
+            .init_resource::<joints::JointAssets>()
             .add_systems(Startup, setup_assets)
             .add_systems(
                 PostUpdate,
                 (
                     advance_scene,
                     sync_instances,
+                    joints::sync_joints,
                     sync_debris,
                     particles::sync_particles,
                 )
@@ -114,6 +117,15 @@ impl StructureVisual {
         ))
     }
 
+    /// As [`Self::new`], with the connection hardware of the structure's
+    /// joints and a hub at every node (see `breakit_mesh::joint`).
+    pub fn jointed(structure: &Structure, styles: &[MemberStyle]) -> Self {
+        Self::from_scene(VisualScene::new(
+            VisualStructure::new(structure, styles).with_joints_from(structure),
+            SceneConfig::default(),
+        ))
+    }
+
     pub fn from_scene(scene: VisualScene) -> Self {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -140,21 +152,12 @@ impl StructureVisual {
 #[derive(Resource, Default)]
 pub struct MemberFrame(pub VisualFrame);
 
-#[derive(Resource, Debug, Clone)]
+#[derive(Resource, Debug, Clone, Default)]
 pub struct RenderSettings {
     /// Colour members by utilisation instead of showing their material.
     pub stress_view: bool,
     /// Members to highlight (hover, selection).
     pub highlighted: Vec<usize>,
-}
-
-impl Default for RenderSettings {
-    fn default() -> Self {
-        Self {
-            stress_view: false,
-            highlighted: Vec::new(),
-        }
-    }
 }
 
 /// What the renderer did last frame, for HUDs and benchmarks.

@@ -5,8 +5,12 @@ description = "BreakIt lab scene: procedural test hall (portal frames, crane, li
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 publish = false
 
 [dependencies]
 # Same pin as breakit-game and breakit-render; upgrade all three together.
 bevy = { version = "=0.20.1", default-features = false, features = ["3d", "ui"] }
+
+[lints]
+workspace = true

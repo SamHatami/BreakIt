@@ -55,8 +55,20 @@ pub const MERGE_DISTANCE: f64 = 1e-3;
 pub struct LaneLine {
     pub start: Vec3,
     pub end: Vec3,
-    /// Nodes within this distance of the line carry the lane, m.
+    /// Nodes within this distance of the line carry the lane, m. With
+    /// [`Self::vertical`] set it is the sideways distance only.
     pub capture_radius: f64,
+    /// Vertical capture distance, m, for a wide deck strip: nodes within
+    /// `capture_radius` sideways and this far up or down carry the lane, so
+    /// a deck between two trusses captures both chords but not the top
+    /// chords. `None`: one radius in every direction.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub vertical: Option<f64>,
+    /// Share each station's load evenly between all its nodes (the two
+    /// trusses of a box bridge) instead of putting it on the node nearest
+    /// the line.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub spread: bool,
 }
 
 impl LaneLine {
@@ -65,6 +77,20 @@ impl LaneLine {
             start,
             end,
             capture_radius,
+            vertical: None,
+            spread: false,
+        }
+    }
+
+    /// A deck strip `half_width` either side of the line and `vertical` up
+    /// or down, sharing each station's load between its nodes.
+    pub fn strip(start: Vec3, end: Vec3, half_width: f64, vertical: f64) -> Self {
+        Self {
+            start,
+            end,
+            capture_radius: half_width,
+            vertical: Some(vertical),
+            spread: true,
         }
     }
     /// Unit direction of travel (x if the line is degenerate).
@@ -331,6 +357,8 @@ pub struct Lane {
     pub stations: Vec<Station>,
     /// Members joining station `k` to `k + 1`.
     pub segments: Vec<Vec<usize>>,
+    /// Share station loads between all their nodes ([`LaneLine::spread`]).
+    pub spread: bool,
 }
 
 /// Where a wheel is.
@@ -356,8 +384,15 @@ impl Lane {
             .filter_map(|(i, p)| {
                 let rel = p - line.start;
                 let t = rel.dot(&dir);
-                let perp = (rel - dir * t).norm();
-                (t >= -1e-9 && t <= len + 1e-9 && perp <= r).then_some((t, perp, i))
+                let off = rel - dir * t;
+                let (perp, inside) = match line.vertical {
+                    Some(h) => {
+                        let side = (off - Vec3::y() * off.y).norm();
+                        (side, side <= r && off.y.abs() <= h)
+                    }
+                    None => (off.norm(), off.norm() <= r),
+                };
+                (t >= -1e-9 && t <= len + 1e-9 && inside).then_some((t, perp, i))
             })
             .collect();
         found.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.2.cmp(&b.2)));
@@ -406,6 +441,22 @@ impl Lane {
             start: line.start,
             stations,
             segments,
+            spread: line.spread,
+        }
+    }
+
+    /// Puts `force` on station `k`: on its node, or shared between all its
+    /// nodes for a [`LaneLine::spread`] lane.
+    pub fn load(&self, k: usize, force: Vec3, out: &mut [Vec3]) {
+        let st = &self.stations[k];
+        if self.spread && !st.others.is_empty() {
+            let each = force / (1 + st.others.len()) as f64;
+            out[st.node] += each;
+            for &n in &st.others {
+                out[n] += each;
+            }
+        } else {
+            out[st.node] += force;
         }
     }
 
@@ -756,8 +807,8 @@ fn step_vehicle(
                     force += dir * (ramp * a.mass * kin.deceleration);
                 }
                 let force = force * (scale * h / dt);
-                out[lane.stations[k].node] += force * (1.0 - l);
-                out[lane.stations[k + 1].node] += force * l;
+                lane.load(k, force * (1.0 - l), out);
+                lane.load(k + 1, force * l, out);
             }
         }
     }

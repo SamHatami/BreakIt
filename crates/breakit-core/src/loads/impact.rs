@@ -5,9 +5,11 @@
 //! window start with a position and velocity. It falls under gravity unless it
 //! is `guided`: a cart on a track moves only along its guide line, and the
 //! guide takes every force across it. Contact is a padded penalty contact
-//! against the structure nodes: a node closer than the radius is in contact,
-//! with overlap `δ = r − |p − x|` and the force `F = k δ + c δ̇` along the
-//! separation normal, compressive only.
+//! against the members: each member is a capsule around its chord with half
+//! its section depth as radius, the overlap is `δ = r + d/2 − |p − x|` with
+//! `x` the closest point on the chord, and the force `F = k δ + c δ̇` acts
+//! along the separation normal, compressive only. It is split between the
+//! member's end nodes by where `x` lies; a contact at a joint counts once.
 //!
 //! Each frame, the impactor is integrated over `[t, t + dt]` with `substeps`
 //! semi-implicit Euler steps, the nodes moving linearly with their velocity
@@ -31,12 +33,38 @@
 use super::{View, G};
 use crate::{Structure, Vec3};
 
+/// A member the impactor may touch this frame, with the impulse it took.
+struct Cand {
+    member: usize,
+    a: usize,
+    b: usize,
+    xa: Vec3,
+    xb: Vec3,
+    ua: Vec3,
+    ub: Vec3,
+    half: f64,
+    imp_a: Vec3,
+    imp_b: Vec3,
+}
+
+/// Closest point of segment a-b to `p`: (fraction along, distance).
+fn closest_on_segment(p: Vec3, a: Vec3, b: Vec3) -> (f64, f64) {
+    let ab = b - a;
+    let l2 = ab.norm_squared();
+    let s = if l2 > 0.0 {
+        ((p - a).dot(&ab) / l2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (s, (p - (a + ab * s)).norm())
+}
+
 /// Default contact duration against a rigid target, s.
 pub const DEFAULT_CONTACT_TIME: f64 = 0.05;
 /// Default pad damping, fraction of critical.
 pub const DEFAULT_PAD_DAMPING_RATIO: f64 = 0.1;
 /// Contact events kept for the rig.
-const MAX_EVENTS: usize = 64;
+const MAX_EVENTS: usize = 64; // keep the doc on `ImpactorRig::events` in step
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -100,7 +128,7 @@ pub struct ImpactorRig {
     pub contact_force: Vec3,
     /// Largest contact force so far, N.
     pub peak_force: f64,
-    /// Contact events, oldest first (the last [`MAX_EVENTS`]).
+    /// Contact events, oldest first (the last 64).
     pub events: Vec<ContactEvent>,
 }
 
@@ -147,6 +175,21 @@ impl Impactor {
         Self {
             gravity: true,
             ..Self::new(name, mass, radius, position, Vec3::zeros())
+        }
+    }
+    /// Something that came loose and falls from where it was, keeping its
+    /// velocity: lost equipment, a dropped load. Add it with
+    /// [`super::LoadSet::add_case`] and a window starting now.
+    pub fn released(
+        name: impl Into<String>,
+        mass: f64,
+        radius: f64,
+        position: Vec3,
+        velocity: Vec3,
+    ) -> Self {
+        Self {
+            gravity: true,
+            ..Self::new(name, mass, radius, position, velocity)
         }
     }
     /// A cart on a track along `velocity`.
@@ -260,13 +303,35 @@ impl Impactor {
         let n = self.substeps.max(1);
         let h = dt / n as f64;
 
-        // Nodes the impactor can reach this frame.
+        // Members the impactor can reach this frame: contact is against the
+        // member's surface (chord plus half its section depth), split to its
+        // end nodes by where along the member it touches.
         let st = &self.state;
         let reach = r + dt * (st.v.norm() + gravity.norm() * dt) + 1e-6;
-        let mut cand: Vec<(usize, Vec3, Vec3, Vec3)> = (0..v.structure.nodes.len())
-            .filter_map(|j| {
-                let (x, u) = (v.sim.position(j), v.sim.velocity(j));
-                ((x - st.p).norm() < reach + u.norm() * dt).then_some((j, x, u, Vec3::zeros()))
+        let mut cand: Vec<Cand> = (0..v.structure.members.len())
+            .filter_map(|mi| {
+                if v.sim.is_broken(mi) {
+                    return None;
+                }
+                let mem = &v.structure.members[mi];
+                let (xa, xb) = (v.sim.position(mem.a), v.sim.position(mem.b));
+                let (ua, ub) = (v.sim.velocity(mem.a), v.sim.velocity(mem.b));
+                let g = &v.geometry.members[mi];
+                let half = 0.5 * g.depth_y.max(g.depth_z);
+                let (_, d) = closest_on_segment(st.p, xa, xb);
+                let slack = reach + half + dt * ua.norm().max(ub.norm());
+                (d < slack).then_some(Cand {
+                    member: mi,
+                    a: mem.a,
+                    b: mem.b,
+                    xa,
+                    xb,
+                    ua,
+                    ub,
+                    half,
+                    imp_a: Vec3::zeros(),
+                    imp_b: Vec3::zeros(),
+                })
             })
             .collect();
 
@@ -276,39 +341,56 @@ impl Impactor {
         let mut events = std::mem::take(&mut self.state.events);
         let mut peak = self.state.peak_force;
         let mut total = Vec3::zeros();
+        let mut end_contacts: Vec<usize> = Vec::new();
         for i in 0..n {
             let tau = i as f64 * h;
             let mut f_imp = Vec3::zeros();
-            for (j, x0, u, imp) in &mut cand {
-                let x = *x0 + *u * tau;
-                let d = p - x;
-                let dist = d.norm();
-                let delta = r - dist;
-                let idx = open.iter().position(|(nd, _)| nd == j);
-                if delta <= 0.0 || dist < 1e-12 {
+            end_contacts.clear();
+            for cd in &mut cand {
+                let (xa, xb) = (cd.xa + cd.ua * tau, cd.xb + cd.ub * tau);
+                let (sp, dist) = closest_on_segment(p, xa, xb);
+                let delta = r + cd.half - dist;
+                let idx = open.iter().position(|(mi, _)| *mi == cd.member);
+                // A contact at a member end is a contact with the node: count
+                // it once however many members meet there.
+                let end_node = if sp <= 0.0 {
+                    Some(cd.a)
+                } else if sp >= 1.0 {
+                    Some(cd.b)
+                } else {
+                    None
+                };
+                let dup = end_node.is_some_and(|nd| end_contacts.contains(&nd));
+                if delta <= 0.0 || dist < 1e-12 || dup {
                     if let Some(o) = idx {
                         events[open[o].1].active = false;
                         open.swap_remove(o);
                     }
                     continue;
                 }
-                let nrm = d / dist;
-                let delta_dot = -(vel - *u).dot(&nrm);
+                if let Some(nd) = end_node {
+                    end_contacts.push(nd);
+                }
+                let x = xa + (xb - xa) * sp;
+                let u = cd.ua + (cd.ub - cd.ua) * sp;
+                let nrm = (p - x) / dist;
+                let delta_dot = -(vel - u).dot(&nrm);
                 let f = (k * delta + c * delta_dot).max(0.0);
                 let fv = nrm * f;
                 f_imp += fv;
-                *imp -= fv * h;
+                cd.imp_a -= fv * (h * (1.0 - sp));
+                cd.imp_b -= fv * (h * sp);
                 let e = match idx {
                     Some(o) => open[o].1,
                     None => {
                         events.push(ContactEvent {
                             time: t + tau,
-                            node: *j,
+                            node: if sp < 0.5 { cd.a } else { cd.b },
                             impact_speed: delta_dot.max(0.0),
                             active: true,
                             ..Default::default()
                         });
-                        open.push((*j, events.len() - 1));
+                        open.push((cd.member, events.len() - 1));
                         events.len() - 1
                     }
                 };
@@ -330,8 +412,9 @@ impl Impactor {
                 vel.z *= fr;
             }
         }
-        for (j, _, _, imp) in &cand {
-            out[*j] += *imp / dt;
+        for cd in &cand {
+            out[cd.a] += cd.imp_a / dt;
+            out[cd.b] += cd.imp_b / dt;
         }
         // Drop old closed events, keeping indices of open ones valid.
         if events.len() > MAX_EVENTS {

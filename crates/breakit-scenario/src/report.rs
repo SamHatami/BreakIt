@@ -7,8 +7,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::cost::Bill;
 use crate::limits::PlayMode;
+use crate::run::PayloadMeasured;
 use crate::run::{Measured, TestRun, TimelineEntry};
-use crate::scenario::{Objective, Scenario};
+use crate::scenario::{Mount, Objective, Scenario};
 
 /// One row of the report: what was asked, what was measured.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -57,6 +58,8 @@ pub struct Report {
     pub safety_margin: f64,
     pub peak_deck_sag: Option<f64>,
     pub payload_drift: Vec<(String, f64)>,
+    /// Tilt, sag, drift and whether it stayed on, per payload.
+    pub payloads: Vec<(String, PayloadMeasured)>,
     pub first_damage: Option<f64>,
     pub first_break: Option<BreakRecord>,
     pub collapse_time: Option<f64>,
@@ -171,6 +174,56 @@ fn objective_row(o: &Objective, s: &Scenario, m: &Measured) -> Criterion {
     }
 }
 
+fn payload_rows(s: &Scenario, m: &Measured) -> Vec<Criterion> {
+    let mm = |x: f64| format!("{:.1} mm", x * 1000.0);
+    let mut rows = Vec::new();
+    for (p, pm) in s.payloads.iter().zip(&m.payloads) {
+        if p.mount != Mount::Fixed || p.critical {
+            rows.push(Criterion {
+                label: format!("{} stays on", p.name),
+                measured: match (pm.lost, pm.bolts_failed) {
+                    (Some(t), _) => format!("came off at {t:.1} s"),
+                    (None, true) => "bolts failed, stayed on".into(),
+                    (None, false) if pm.min_reaction < 0.0 => "rocked, stayed on".into(),
+                    (None, false) => "held".into(),
+                },
+                required: "stays on".into(),
+                ok: pm.lost.is_none(),
+                bonus: !p.critical,
+            });
+        }
+        let l = &p.limits;
+        if let Some(t) = l.tilt_deg {
+            rows.push(Criterion {
+                label: format!("{} tilt", p.name),
+                measured: format!("{:.2}°", pm.tilt_deg),
+                required: format!("≤ {t:.2}°"),
+                ok: pm.tilt_deg <= t,
+                bonus: !l.strict,
+            });
+        }
+        if let Some(d) = l.sag {
+            rows.push(Criterion {
+                label: format!("{} sag", p.name),
+                measured: mm(pm.sag),
+                required: format!("≤ {}", mm(d)),
+                ok: pm.sag <= d,
+                bonus: !l.strict,
+            });
+        }
+        if let Some(d) = l.drift {
+            rows.push(Criterion {
+                label: format!("{} movement", p.name),
+                measured: mm(pm.drift),
+                required: format!("≤ {}", mm(d)),
+                ok: pm.drift <= d,
+                bonus: !l.strict,
+            });
+        }
+    }
+    rows
+}
+
 fn warning_time(m: &Measured) -> Option<f64> {
     match (m.proof_first_damage, m.proof_collapse) {
         (Some(d), Some(c)) => Some(c - d),
@@ -243,17 +296,25 @@ impl Report {
             .iter()
             .map(|o| objective_row(o, s, m))
             .collect();
-        let met = objective_rows.iter().filter(|c| c.ok).count();
-        criteria.extend(objective_rows);
+        // Payload rows: strict and critical ones are pass rows, the rest
+        // count with the objectives.
+        let payload_rows = payload_rows(s, m);
+        let scored: Vec<&Criterion> = objective_rows
+            .iter()
+            .chain(payload_rows.iter().filter(|c| c.bonus))
+            .collect();
+        let (met, scored_n) = (scored.iter().filter(|c| c.ok).count(), scored.len());
+        criteria.extend(objective_rows.iter().cloned());
+        criteria.extend(payload_rows);
 
         let parts = ScoreParts {
             cost: under_target(bill.total(), sc.target_cost, s.limits.budget),
             mass: under_target(bill.mass, sc.target_mass, s.limits.max_mass),
             margin: margin_score(margin, sc.margin_band),
-            objectives: if s.objectives.is_empty() {
+            objectives: if scored_n == 0 {
                 1.0
             } else {
-                met as f64 / s.objectives.len() as f64
+                met as f64 / scored_n as f64
             },
         };
         let w = sc.weights;
@@ -289,6 +350,12 @@ impl Report {
                 .iter()
                 .map(|p| p.name.clone())
                 .zip(m.payload_drift.iter().copied())
+                .collect(),
+            payloads: s
+                .payloads
+                .iter()
+                .map(|p| p.name.clone())
+                .zip(m.payloads.iter().cloned())
                 .collect(),
             first_damage: m.first_damage,
             first_break: m

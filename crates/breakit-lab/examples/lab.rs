@@ -1,11 +1,14 @@
 //! The lab on its own, with a stand-in model on the table.
 //!
 //! `cargo run --release -p breakit-lab --example lab` then:
-//! 1-4 table insert, V next camera view, B depth of field (bokeh, gaussian,
-//! off), L lamp lights on/off (restart), [ ] f-number.
+//! 1-4 table insert, V next camera view, F4 quality preset, B depth of field
+//! (bokeh, gaussian, off), [ ] f-number.
 //!
-//! `-- --capture <dir>` saves one screenshot per view and table and exits.
-//! `-- --bench` prints frame times per second for each setting.
+//! `-- --quality low|medium|high|ultra` starts on that preset.
+//! `-- --capture <dir>` saves one screenshot per view and table and exits;
+//! `--views play,hall` keeps only those views, `--tables` adds the play view
+//! of the other tables.
+//! `-- --bench` prints frame times for each quality preset.
 
 use std::path::PathBuf;
 
@@ -14,7 +17,7 @@ use bevy::post_process::dof::DepthOfFieldMode;
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use bevy::window::PresentMode;
-use breakit_lab::{LabCamera, LabPlugin, LabSettings, LabStats, PlayTable};
+use breakit_lab::{LabCamera, LabPlugin, LabQuality, LabSettings, LabStats, PlayTable};
 
 /// (focus, distance, yaw, pitch, label)
 const VIEWS: [(Vec3, f32, f32, f32, &str); 5] = [
@@ -28,6 +31,8 @@ const VIEWS: [(Vec3, f32, f32, f32, &str); 5] = [
 #[derive(Resource)]
 struct Script {
     capture: Option<PathBuf>,
+    /// (view, table) pairs to capture.
+    shots: Vec<(usize, usize)>,
     bench: bool,
     view: usize,
     frame: u32,
@@ -43,6 +48,25 @@ fn main() {
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from);
     let bench = args.iter().any(|a| a == "--bench");
+    let value = |flag: &str| {
+        args.iter()
+            .position(|a| a == flag)
+            .and_then(|i| args.get(i + 1))
+    };
+    let quality = value("--quality")
+        .and_then(|q| LabQuality::parse(q))
+        .unwrap_or_default();
+    let views: Vec<usize> = match value("--views") {
+        Some(list) => list
+            .split(',')
+            .filter_map(|name| VIEWS.iter().position(|v| v.4 == name))
+            .collect(),
+        None => (0..VIEWS.len()).collect(),
+    };
+    let mut shots: Vec<(usize, usize)> = views.into_iter().map(|v| (v, 0)).collect();
+    if value("--views").is_none() || args.iter().any(|a| a == "--tables") {
+        shots.extend((1..4).map(|t| (0, t)));
+    }
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
@@ -53,9 +77,11 @@ fn main() {
             }),
             ..default()
         }))
+        .insert_resource(LabSettings::default().with_quality(quality))
         .add_plugins(LabPlugin)
         .insert_resource(Script {
             capture,
+            shots,
             bench,
             view: 0,
             frame: 0,
@@ -126,7 +152,7 @@ fn keys(
         script.view = (script.view + 1) % VIEWS.len();
     }
     if input.just_pressed(KeyCode::KeyB) {
-        settings.dof = match settings.dof {
+        settings.look.dof = match settings.look.dof {
             Some(DepthOfFieldMode::Bokeh) => Some(DepthOfFieldMode::Gaussian),
             Some(DepthOfFieldMode::Gaussian) => None,
             None => Some(DepthOfFieldMode::Bokeh),
@@ -140,8 +166,8 @@ fn keys(
     }
 }
 
-/// Capture: every view on the default table, then the play view on each
-/// other table. Bench: 4 s per depth-of-field setting.
+/// Capture: the chosen views on the default table, then the play view on
+/// each other table. Bench: about 120 frames per quality preset.
 fn script(
     mut commands: Commands,
     mut script: ResMut<Script>,
@@ -153,11 +179,10 @@ fn script(
 ) {
     script.frame += 1;
     if script.bench {
-        let modes = [
-            Some(DepthOfFieldMode::Bokeh),
-            Some(DepthOfFieldMode::Gaussian),
-            None,
-        ];
+        let modes = LabQuality::ALL;
+        if script.frame == 1 && script.step == 0 {
+            settings.set_quality(modes[0]);
+        }
         if script.frame > 30 {
             let dt = time.delta_secs() * 1000.0;
             script.times.push(dt);
@@ -171,8 +196,8 @@ fn script(
             t.sort_by(f32::total_cmp);
             let avg = t.iter().sum::<f32>() / t.len() as f32;
             println!(
-                "bench dof={:?} frames={} avg {:.1} ms  p50 {:.1}  p95 {:.1}  | hall {} tris in {} meshes, table {} tris, {} lamps",
-                settings.dof,
+                "bench quality={} frames={} avg {:.1} ms  p50 {:.1}  p95 {:.1}  | hall {} tris in {} meshes, table {} tris, {} lamps ({} shadowed)",
+                settings.quality.name(),
                 t.len(),
                 avg,
                 t[t.len() / 2],
@@ -180,14 +205,15 @@ fn script(
                 stats.hall_triangles,
                 stats.hall_meshes,
                 stats.table_triangles,
-                stats.point_lights
+                stats.point_lights,
+                stats.shadowed_lamps
             );
             script.step += 1;
             script.frame = 0;
             if script.step >= modes.len() {
                 exit.write(AppExit::Success);
             } else {
-                settings.dof = modes[script.step];
+                settings.set_quality(modes[script.step]);
             }
         }
         return;
@@ -195,12 +221,8 @@ fn script(
     let Some(dir) = script.capture.clone() else {
         return;
     };
-    let shots: Vec<(usize, usize)> = (0..VIEWS.len())
-        .map(|v| (v, 0))
-        .chain((1..4).map(|t| (0, t)))
-        .collect();
     let wait = 40;
-    let Some(&(view, tbl)) = shots.get(script.step) else {
+    let Some(&(view, tbl)) = script.shots.get(script.step) else {
         // Give the last screenshot time to be written.
         if script.frame > 20 {
             exit.write(AppExit::Success);

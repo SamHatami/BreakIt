@@ -5,9 +5,13 @@ description = "Engine-free building parts for BreakIt: the part catalog, standar
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 breakit-core = { path = "../breakit-core" }
 breakit-mesh = { path = "../breakit-mesh" }
 serde = { version = "1", features = ["derive"] }
 ron = "0.12"
+
+[lints]
+workspace = true

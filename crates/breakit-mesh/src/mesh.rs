@@ -73,7 +73,9 @@ impl MeshData {
     /// Volume by the divergence theorem (closed meshes only).
     pub fn volume(&self) -> f32 {
         self.indices
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|t| {
                 let p = |i: u32| Vec3::from_array(self.positions[i as usize]);
                 p(t[0]).dot(p(t[1]).cross(p(t[2]))) / 6.0
