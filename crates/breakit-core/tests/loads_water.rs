@@ -447,3 +447,51 @@ fn broken_timber_floats() {
     println!("broken {broken:?}, free end at y = {y}");
     assert!((y - level).abs() < 0.05, "the free end should float: {y}");
 }
+
+#[test]
+fn static_support_is_archimedes_and_the_water_plane() {
+    // A raft: two tubes of radius 0.4 m, 3 m long, axis 0.2 m under the
+    // surface at y = 1.
+    let (ro, len, level) = (0.4, 3.0, 1.0);
+    let sec = Section::tube(ro, 0.01);
+    let mut s = Structure::new();
+    for z in [-1.0, 1.0] {
+        s.add_line(
+            Vec3::new(0.0, level - 0.2, z),
+            Vec3::new(len, level - 0.2, z),
+            2,
+            &Material::steel(),
+            &sec,
+        );
+    }
+    let (loads, springs) = Water::current(level, Vec3::zeros()).static_support(&s, 0.0);
+    let lift: f64 = loads.iter().map(|l| l.force.y).sum();
+    let k: f64 = springs.iter().map(|k| k.stiffness.y).sum();
+    let t: f64 = 0.5;
+    let segment = ((-t).acos() + t * (1.0 - t * t).sqrt()) / PI;
+    let chord = 2.0 * ro * (1.0 - t * t).sqrt();
+    let (lift_e, k_e) = (
+        RHO * G * 2.0 * len * PI * ro * ro * segment,
+        RHO * G * 2.0 * len * chord,
+    );
+    println!("lift {lift} vs {lift_e}, stiffness {k} vs {k_e}");
+    assert!(rel_err(lift, lift_e) < 1e-12 && rel_err(k, k_e) < 1e-12);
+    assert_eq!((loads.len(), springs.len()), (6, 6));
+    assert!(springs
+        .iter()
+        .all(|k| k.stiffness.x == 0.0 && k.stiffness.z == 0.0));
+
+    // A vertical pile through the surface: lift of its wet length, and the
+    // stiffness of its cross-section as a water plane. Fully under water:
+    // lift, no stiffness.
+    let (s, _) = column(2.0, 4, &tube());
+    let area = PI * 0.05 * 0.05;
+    let (loads, springs) = Water::current(1.3, Vec3::zeros()).static_support(&s, 0.0);
+    let lift: f64 = loads.iter().map(|l| l.force.y).sum();
+    let k: f64 = springs.iter().map(|k| k.stiffness.y).sum();
+    println!("pile lift {lift}, stiffness {k}");
+    assert!(rel_err(lift, RHO * G * area * 1.3) < 1e-9);
+    assert!(rel_err(k, RHO * G * area) < 1e-9);
+    let (_, springs) = Water::current(5.0, Vec3::zeros()).static_support(&s, 0.0);
+    assert!(springs.is_empty());
+}

@@ -39,7 +39,9 @@ The same load case carries everything that floats:
 - **Splashes.** `WaterSim::couple` notices nodes dropping into the water faster than 1 m/s and calls `WaterSim::splash`: spray, a patch of foam, and a dent in the surface. `splash` is public for things that are not members (dropped equipment).
 - **Pontoons.** `steel-pontoon-s` (CHS 406.4x8) and `steel-pontoon-l` (CHS 813x16) in the parts catalog: about 50 and 200 kg of spare lift per metre.
 
-Not covered: the water does not feel a floating body's displacement (only its drag), and the static check in build mode knows nothing about buoyancy, so a structure held up only by floats has no static solution there.
+- **Static check.** `Water::static_support(structure, t)` gives the still-water view of the same model for a static solve: the buoyant force on every node at the built position, and a vertical `NodeSpring` per node with the water-plane stiffness `ρ g × waterline area`.
+
+Not covered: the water does not feel a floating body's displacement (only its drag). The static solver does not take the springs yet (the scenario side is adding that), so until then a structure held up only by floats has no static solution in build mode.
 
 ## Validation
 
