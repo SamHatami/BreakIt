@@ -41,6 +41,7 @@ use breakit_mesh::{
 
 pub use breakit_mesh;
 
+mod joints;
 mod particles;
 
 const SHADER_PATH: &str = "embedded://breakit_render/member.wesl";
@@ -58,12 +59,14 @@ impl Plugin for BreakitRenderPlugin {
             .init_resource::<MemberFrame>()
             .init_resource::<RenderSettings>()
             .init_resource::<RenderStats>()
+            .init_resource::<joints::JointAssets>()
             .add_systems(Startup, setup_assets)
             .add_systems(
                 PostUpdate,
                 (
                     advance_scene,
                     sync_instances,
+                    joints::sync_joints,
                     sync_debris,
                     particles::sync_particles,
                 )
@@ -110,6 +113,15 @@ impl StructureVisual {
     pub fn new(structure: &Structure, styles: &[MemberStyle]) -> Self {
         Self::from_scene(VisualScene::new(
             VisualStructure::new(structure, styles),
+            SceneConfig::default(),
+        ))
+    }
+
+    /// As [`Self::new`], with the connection hardware of the structure's
+    /// joints and a hub at every node (see `breakit_mesh::joint`).
+    pub fn jointed(structure: &Structure, styles: &[MemberStyle]) -> Self {
+        Self::from_scene(VisualScene::new(
+            VisualStructure::new(structure, styles).with_joints_from(structure),
             SceneConfig::default(),
         ))
     }

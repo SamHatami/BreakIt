@@ -9,6 +9,7 @@ use glam::{Quat, Vec3};
 
 use breakit_core::{BreakCause, DynamicSim, Structure};
 
+use crate::joint::JointLook;
 use crate::pose::{rest_frame, GpuMember, MemberPose};
 use crate::profile::Profile;
 
@@ -94,6 +95,11 @@ pub struct VisualStructure {
     pub node_count: usize,
     /// Number of solver break events already turned into debris.
     pub consumed_breaks: usize,
+    /// Connection hardware at each member's ends a and b. Empty: none, and
+    /// members run node to node. Set with [`VisualStructure::with_joints`].
+    pub joints: Vec<[JointLook; 2]>,
+    /// Radius of the hub at each node, m; 0 where no joint meets it.
+    pub node_radius: Vec<f32>,
 }
 
 #[derive(Clone, Debug)]
@@ -145,11 +151,72 @@ impl VisualStructure {
                 }
             })
             .collect();
+        Self::from_members(members, s.nodes.len())
+    }
+
+    pub fn from_members(members: Vec<VisualMember>, node_count: usize) -> Self {
         Self {
             members,
-            node_count: s.nodes.len(),
+            node_count,
             consumed_breaks: 0,
+            joints: Vec::new(),
+            node_radius: Vec::new(),
         }
+    }
+
+    /// Draw connection hardware: one look per member end. Members are then
+    /// trimmed back to make room for a hub at every node a joint meets.
+    pub fn with_joints(mut self, joints: Vec<[JointLook; 2]>) -> Self {
+        assert_eq!(joints.len(), self.members.len(), "two joints per member");
+        let mut radius = vec![0.0f32; self.node_count];
+        let mut shortest = vec![f32::INFINITY; self.node_count];
+        for (m, looks) in self.members.iter().zip(&joints) {
+            for (node, look) in [(m.a, looks[0]), (m.b, looks[1])] {
+                if look != JointLook::None {
+                    radius[node] = radius[node].max(1.05 * m.style.profile.bounding_radius());
+                    shortest[node] = shortest[node].min(m.rest_length);
+                }
+            }
+        }
+        for (r, l) in radius.iter_mut().zip(&shortest) {
+            *r = r.min(0.3 * l);
+        }
+        self.joints = joints;
+        self.node_radius = radius;
+        self
+    }
+
+    /// Joints as the solver model has them, drawn as what makes such a
+    /// connection in each member's material.
+    pub fn with_joints_from(self, s: &Structure) -> Self {
+        let joints = s
+            .members
+            .iter()
+            .zip(&self.members)
+            .map(|(m, vm)| [0, 1].map(|e| JointLook::infer(&m.ends[e], vm.style.kind)))
+            .collect();
+        self.with_joints(joints)
+    }
+
+    /// What is drawn at `end` (0 = a, 1 = b) of member `i`.
+    pub fn joint(&self, i: usize, end: usize) -> JointLook {
+        self.joints.get(i).map(|j| j[end]).unwrap_or_default()
+    }
+
+    /// How far member `i` stops short of the node at `end`, m.
+    pub fn trim(&self, i: usize, end: usize) -> f32 {
+        if self.joint(i, end) == JointLook::None {
+            return 0.0;
+        }
+        let vm = &self.members[i];
+        let node = if end == 0 { vm.a } else { vm.b };
+        self.node_radius[node].min(0.3 * vm.rest_length)
+    }
+
+    /// The part of member `i` that is drawn, as template `s` (low, high).
+    pub fn window(&self, i: usize) -> (f32, f32) {
+        let l = self.members[i].rest_length.max(1e-6);
+        (self.trim(i, 0) / l, 1.0 - self.trim(i, 1) / l)
     }
 
     /// Styles from the solver materials, all with one profile. Handy for
@@ -262,7 +329,7 @@ impl VisualStructure {
             return p;
         }
         let hinge = frame.members.get(i).map(|m| m.hinge).unwrap_or_default();
-        MemberPose::from_nodes(
+        let mut pose = MemberPose::from_nodes(
             pa,
             pb,
             vm.rest_frame,
@@ -271,12 +338,43 @@ impl VisualStructure {
             hinge,
             vm.rest_length,
             2.0 * vm.style.profile.half_depth(),
-        )
+        );
+        // A pin passes no moment, so the beam has no curvature there: it
+        // leaves the node along its own line, not the node's.
+        let pinned = [0, 1].map(|e| self.joint(i, e) == JointLook::Pinned);
+        if pinned[0] || pinned[1] {
+            let chord = pose.pb - pose.pa;
+            let lc = chord.length();
+            let free = |other: Vec3| (1.5 * chord - 0.5 * lc * other).try_normalize();
+            match pinned {
+                [true, true] => {
+                    if let Some(t) = chord.try_normalize() {
+                        pose.ta = t;
+                        pose.tb = t;
+                    }
+                }
+                [true, false] => pose.ta = free(pose.tb).unwrap_or(pose.ta),
+                _ => pose.tb = free(pose.ta).unwrap_or(pose.tb),
+            }
+            pose.stub_a *= !pinned[0] as u32 as f32;
+            pose.stub_b *= !pinned[1] as u32 as f32;
+        }
+        pose
     }
 
     /// Pack member `i` for the GPU.
     pub fn gpu_member(&self, i: usize, frame: &VisualFrame, member_flags: u32) -> GpuMember {
-        let pose = self.pose(i, frame);
+        self.gpu_member_posed(i, &self.pose(i, frame), frame, member_flags)
+    }
+
+    /// [`Self::gpu_member`] with the pose already worked out.
+    pub fn gpu_member_posed(
+        &self,
+        i: usize,
+        pose: &MemberPose,
+        frame: &VisualFrame,
+        member_flags: u32,
+    ) -> GpuMember {
         let st = frame.members.get(i).copied().unwrap_or_default();
         let vm = &self.members[i];
         let mut fl = member_flags;
@@ -303,7 +401,10 @@ impl VisualStructure {
                 vm.style.kind.index() as f32,
                 fl as f32,
             ),
-            clip: glam::Vec4::new(0.0, 1.0, 0.0, 0.0),
+            clip: {
+                let (lo, hi) = self.window(i);
+                glam::Vec4::new(lo, hi, 0.0, 0.0)
+            },
             size: glam::Vec4::new(
                 2.0 * vm.style.profile.half_depth(),
                 2.0 * vm.style.profile.half_width(),
