@@ -7,6 +7,18 @@ use breakit_core::{
 use common::*;
 use std::f64::consts::PI;
 
+/// Apply `force` at `node`, ramped linearly over `ramp` seconds (a suddenly
+/// applied load would overshoot to about twice its static effect), then hold
+/// until `total` seconds have passed.
+fn ramp_load(sim: &mut DynamicSim, node: usize, force: Vec3, ramp: f64, total: f64) {
+    let frames = (total * 60.0) as usize;
+    for f in 0..frames {
+        let t = f as f64 / 60.0;
+        sim.set_force(node, force * (t / ramp).min(1.0));
+        sim.step(1.0 / 60.0);
+    }
+}
+
 fn quiet(plasticity: bool) -> SimConfig {
     SimConfig {
         gravity: Vec3::zeros(),
@@ -72,7 +84,7 @@ fn sideways_load_on_portal_frame_matches_static_solve() {
     s.add_support(Support::fixed(right[0]));
     let loads = [
         NodeLoad::force(left[4], Vec3::new(5000.0, 0.0, 2000.0)),
-        NodeLoad::force(right[4], Vec3::new(0.0, -20_000.0, 0.0)),
+        NodeLoad::force(right[4], Vec3::new(0.0, -2_000.0, 0.0)),
     ];
     let stat = solve_static(&s, &loads).unwrap();
     let mut sim = DynamicSim::new(&s, quiet(false));
@@ -107,10 +119,13 @@ fn column_buckles_above_euler_load_only() {
             },
         );
         // Axial load plus a 0.1% lateral nudge as the imperfection.
-        sim.set_force(ids[12], Vec3::new(0.001 * p_cr, -ratio * p_cr, 0.0));
-        for _ in 0..240 {
-            sim.step(1.0 / 60.0);
-        }
+        ramp_load(
+            &mut sim,
+            ids[12],
+            Vec3::new(0.001 * p_cr, -ratio * p_cr, 0.0),
+            2.0,
+            5.0,
+        );
         sim.displacement(ids[12]).x
     };
     let below = sway(0.8);
@@ -129,11 +144,13 @@ fn plastic_hinge_forms_at_collapse_load_and_then_snaps() {
     let run = |ratio: f64, seconds: f64| {
         let (s, ids) = cantilever(l, 8, Material::steel());
         let mut sim = DynamicSim::new(&s, quiet(true));
-        sim.set_force(ids[8], Vec3::new(0.0, -ratio * p_collapse, 0.0));
-        sim.step(seconds);
-        for _ in 0..(seconds * 60.0) as usize {
-            sim.step(1.0 / 60.0);
-        }
+        ramp_load(
+            &mut sim,
+            ids[8],
+            Vec3::new(0.0, -ratio * p_collapse, 0.0),
+            1.0,
+            seconds,
+        );
         sim
     };
     let safe = run(0.8, 2.0);

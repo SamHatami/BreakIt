@@ -49,6 +49,11 @@ pub struct SimConfig {
     pub substeps: usize,
     /// Gauss-Seidel sweeps or Gauss-Newton iterations per substep.
     pub iterations: usize,
+    /// Direct solver only: refactorise the system matrix every this many
+    /// solves and reuse the factorisation in between. The matrix only changes
+    /// as members rotate, but a stale one currently diverges under heavy
+    /// compression (see docs/solver-spike.md), so the default is 1.
+    pub refactor_every: usize,
     pub gravity: Vec3,
     /// Linear velocity damping, 1/s. Keeps collapses readable and lets
     /// structures settle.
@@ -61,8 +66,9 @@ impl Default for SimConfig {
     fn default() -> Self {
         Self {
             solver: Solver::Direct,
-            substeps: 8,
+            substeps: 16,
             iterations: 1,
+            refactor_every: 1,
             gravity: Vec3::new(0.0, -9.81, 0.0),
             damping: 0.5,
             plasticity: true,
@@ -480,7 +486,8 @@ impl DynamicSim {
                 }
             }
         }
-        let mut blocks = Vec::with_capacity(self.beams.len());
+        let refactor = cache.needs_factor(self.config.refactor_every);
+        let mut blocks = Vec::with_capacity(if refactor { self.beams.len() } else { 0 });
         for i in 0..self.beams.len() {
             if self.beams[i].broken {
                 continue;
@@ -489,10 +496,12 @@ impl DynamicSim {
             let slots = [cache.trans[a], cache.rot[a], cache.trans[b], cache.rot[b]];
             let mut kb = [[0.0f64; 144]; 1];
             for (c, k, g) in self.beam_constraints(i) {
-                let flat: [f64; 12] = std::array::from_fn(|j| g[j / 3][j % 3]);
-                for r in 0..12 {
-                    for col in 0..12 {
-                        kb[0][r * 12 + col] += k * flat[r] * flat[col];
+                if refactor {
+                    let flat: [f64; 12] = std::array::from_fn(|j| g[j / 3][j % 3]);
+                    for r in 0..12 {
+                        for col in 0..=r {
+                            kb[0][r * 12 + col] += k * flat[r] * flat[col];
+                        }
                     }
                 }
                 for (s, slot) in slots.iter().enumerate() {
@@ -503,9 +512,21 @@ impl DynamicSim {
                     }
                 }
             }
-            blocks.push((slots, kb[0]));
+            if refactor {
+                // Mirror the lower triangle so any (row, col) lookup works.
+                for r in 0..12 {
+                    for col in r + 1..12 {
+                        kb[0][r * 12 + col] = kb[0][col * 12 + r];
+                    }
+                }
+                blocks.push((slots, kb[0]));
+            }
         }
-        let delta = cache.solve(&diag, &blocks, rhs);
+        let delta = if refactor && cache.factor(&diag, &blocks).is_none() {
+            None
+        } else {
+            cache.back_solve(rhs)
+        };
         self.direct = Some(cache);
         let Some(delta) = delta else { return };
         let cache = self.direct.as_ref().unwrap();
@@ -640,6 +661,10 @@ mod direct {
         pub trans: Vec<Option<usize>>,
         pub rot: Vec<Option<usize>>,
         symbolic: Option<SymbolicLlt<usize>>,
+        mat: Option<SparseColMat<usize, f64>>,
+        pos: Vec<usize>,
+        llt: Option<Llt<usize, f64>>,
+        age: usize,
     }
 
     impl Cache {
@@ -666,24 +691,46 @@ mod direct {
                 trans,
                 rot,
                 symbolic: None,
+                mat: None,
+                pos: Vec::new(),
+                llt: None,
+                age: 0,
             }
         }
 
-        /// Solve (diag + Σ blocks) δ = rhs. Each block is a dense 12x12 over the
-        /// four 3-DOF slots of a beam (None = fixed). Lower triangle only.
-        pub fn solve(
-            &mut self,
-            diag: &[f64],
-            blocks: &[([Option<usize>; 4], [f64; 144])],
-            rhs: Vec<f64>,
-        ) -> Option<Vec<f64>> {
+        pub fn needs_factor(&self, every: usize) -> bool {
+            self.ndof > 0 && (self.llt.is_none() || self.age >= every.max(1))
+        }
+
+        pub fn back_solve(&mut self, rhs: Vec<f64>) -> Option<Vec<f64>> {
             let n = self.ndof;
             if n == 0 {
                 return Some(rhs);
             }
-            let mut trip = Vec::with_capacity(n + blocks.len() * 78);
+            let llt = self.llt.as_ref()?;
+            self.age += 1;
+            let mut x = Mat::<f64>::from_fn(n, 1, |i, _| rhs[i]);
+            llt.solve_in_place(x.as_mut());
+            Some((0..n).map(|i| x[(i, 0)]).collect())
+        }
+
+        /// Factorise (diag + Σ blocks). Each block is a dense 12x12 over the four
+        /// 3-DOF slots of a beam (None = fixed); only the lower triangle is used.
+        pub fn factor(
+            &mut self,
+            diag: &[f64],
+            blocks: &[([Option<usize>; 4], [f64; 144])],
+        ) -> Option<()> {
+            let n = self.ndof;
+            // Entries in a fixed order: the diagonal, then each block's lower triangle.
+            let mut idx: Vec<(usize, usize)> = Vec::new();
+            let first = self.mat.is_none();
+            let mut vals = Vec::with_capacity(n + blocks.len() * 78);
             for (i, &d) in diag.iter().enumerate() {
-                trip.push(Triplet::new(i, i, d));
+                if first {
+                    idx.push((i, i));
+                }
+                vals.push(d);
             }
             for (slots, kb) in blocks {
                 for (sr, r0) in slots.iter().enumerate() {
@@ -694,26 +741,49 @@ mod direct {
                             for j in 0..3 {
                                 let (r, c) = (r0 + i, c0 + j);
                                 if r >= c {
-                                    trip.push(Triplet::new(
-                                        r,
-                                        c,
-                                        kb[(sr * 3 + i) * 12 + sc * 3 + j],
-                                    ));
+                                    if first {
+                                        idx.push((r, c));
+                                    }
+                                    vals.push(kb[(sr * 3 + i) * 12 + sc * 3 + j]);
                                 }
                             }
                         }
                     }
                 }
             }
-            let mat = SparseColMat::<usize, f64>::try_new_from_triplets(n, n, &trip).ok()?;
-            if self.symbolic.is_none() {
-                self.symbolic = SymbolicLlt::try_new(mat.symbolic(), Side::Lower).ok();
+            if first {
+                // Build the pattern once, then map every entry to its slot in
+                // the CSC value array so later substeps only scatter values.
+                let trip: Vec<_> = idx.iter().map(|&(r, c)| Triplet::new(r, c, 0.0)).collect();
+                let mat = SparseColMat::<usize, f64>::try_new_from_triplets(n, n, &trip).ok()?;
+                let sym = mat.symbolic();
+                let (cp, ri) = (sym.col_ptr(), sym.row_idx());
+                self.pos = idx
+                    .iter()
+                    .map(|&(r, c)| {
+                        cp[c]
+                            + ri[cp[c]..cp[c + 1]]
+                                .binary_search(&r)
+                                .expect("entry in pattern")
+                    })
+                    .collect();
+                self.symbolic = SymbolicLlt::try_new(sym, Side::Lower).ok();
+                self.mat = Some(mat);
             }
-            let llt = Llt::try_new_with_symbolic(self.symbolic.clone()?, mat.as_ref(), Side::Lower)
-                .ok()?;
-            let mut x = Mat::<f64>::from_fn(n, 1, |i, _| rhs[i]);
-            llt.solve_in_place(x.as_mut());
-            Some((0..n).map(|i| x[(i, 0)]).collect())
+            let mat = self.mat.as_mut()?;
+            {
+                let v = mat.val_mut();
+                v.fill(0.0);
+                for (k, &p) in self.pos.iter().enumerate() {
+                    v[p] += vals[k];
+                }
+            }
+            self.llt = Some(
+                Llt::try_new_with_symbolic(self.symbolic.clone()?, mat.as_ref(), Side::Lower)
+                    .ok()?,
+            );
+            self.age = 0;
+            Some(())
         }
     }
 }

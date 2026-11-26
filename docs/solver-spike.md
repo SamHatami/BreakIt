@@ -16,10 +16,29 @@ Probe: 2 m steel tube cantilever (r 50 mm, t 5 mm), 10 elements, 1 kN tip load, 
 | Direct | 8 x 1 | 7.521 mm | -0.02% |
 | Direct | 4 x 1 | 7.443 mm | -1.1% |
 
-## Open (3 of 8 dynamics tests failing)
+## Fixed since the first push
 
-1. `plastic_hinge_forms_at_collapse_load_and_then_snaps`: at 80% of the collapse load a break event still fires; likely the dynamic overshoot of a suddenly applied load (up to 2x static) or the linear interaction check. Ramp the load in tests, then re-check.
-2. `sideways_load_on_portal_frame_matches_static_solve`: mismatch on a frame with vertical columns and out-of-plane load; check torsion constraint sign/gradient and the vertical-member local axes.
-3. `column_buckles_above_euler_load_only`: thresholds not met; Gauss-Newton has no geometric stiffness, check whether the column buckles over the 4 s window and tune.
+All 15 tests pass (7 static, 8 dynamic).
 
-Next after these: performance benchmark at ~2,000 members, then the Bevy prototype crate.
+- Damping was applied to the external-force velocity increment, making every settled deflection about 1.7% too small. Damping now applies before forces are added.
+- Suddenly applied loads overshoot to about 2x their static effect, which made the "safe" plastic and buckling cases fail. Tests now ramp loads (`ramp_load`); the game should ramp scenario loads too.
+- Portal frame test used a 20 kN column load, so the real P-delta effect in the dynamic solver made it differ from the linear static solve by ~1%. Vertical load reduced to 2 kN for that comparison.
+- Compression stability: the Gauss-Newton Hessian has no geometric stiffness. At 8 substeps x 1 iteration a column at 50% of its Euler load oscillates chaotically; at 16 x 1 it matches the theoretical P-delta amplification 1/(1 - P/Pcr) within 1% (4.97 vs 4.93 mm), and above Pcr it buckles. Default is now 16 substeps x 1 iteration.
+
+## Performance (`cargo run --release --example bench -- 120`)
+
+3D truss bridge, 484 nodes, 1,565 steel members, 16 substeps x 1 iteration, single thread:
+
+| Change | ms per 60 Hz frame |
+| --- | --- |
+| Rebuild CSC from triplets every substep | 152 |
+| Reuse sparsity pattern, scatter values only | 44 |
+| Also reuse the factorisation for 4 substeps | 18 (but diverges under heavy compression) |
+
+Per substep at 44 ms/frame: numeric Cholesky ~1.5 ms, assembly ~0.5 ms. Factor reuse (`SimConfig::refactor_every`) exists but defaults to 1, because a stale factorisation makes the 0.8 Pcr column test produce NaN even at 2. The static solve is still dense (1.9 s at this size) and must move to the sparse path.
+
+## Next
+
+1. Reach 16 ms/frame at ~1,500 members: parallel assembly, fewer substeps once geometric stiffness (tension part, or a PD-safe approximation) is in the Hessian, or factor reuse made safe (e.g. refactor when the residual grows).
+2. Sparse static solve.
+3. Axial-bending interaction in the yield check; plastic torsion.
