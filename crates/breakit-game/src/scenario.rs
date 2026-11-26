@@ -375,13 +375,15 @@ impl Scenario {
             })
             .max_by(|a, b| a.length().total_cmp(&b.length()))
             .unwrap_or(Vec3::ZERO);
-        for (p, n) in self.def.payloads.iter().zip(&binding.payload_nodes) {
-            if let Some(n) = *n {
-                let m = p.mass as f32;
-                out.push(NodeLoad::force(
-                    n,
-                    to_core(Vec3::new(0.0, -m * GRAVITY, 0.0) + shake * m),
-                ));
+        for (p, feet) in self.def.payloads.iter().zip(&binding.payload_feet) {
+            if let Some(feet) = feet {
+                let m = p.mass as f32 / feet.len() as f32;
+                for &n in feet {
+                    out.push(NodeLoad::force(
+                        n,
+                        to_core(Vec3::new(0.0, -m * GRAVITY, 0.0) + shake * m),
+                    ));
+                }
             }
         }
         out
@@ -458,7 +460,9 @@ impl TimedEvent {
             bs::Happening::ProofTestHeld { factor } => TestEvent::ProofHeld {
                 factor: *factor as f32,
             },
-            bs::Happening::EventEnded { .. } => return None,
+            bs::Happening::EventEnded { .. }
+            | bs::Happening::BoltsFailed { .. }
+            | bs::Happening::PayloadLost { .. } => return None,
         };
         Some(Self { time, event })
     }

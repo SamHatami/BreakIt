@@ -313,3 +313,95 @@ fn joint_kinds_change_the_price() {
     assert!((bolted.joints - 2.0 * pinned.joints).abs() < 1e-9);
     assert_eq!(bolted.materials, pinned.materials);
 }
+
+fn plant() -> Scenario {
+    builtin()
+        .into_iter()
+        .find(|s| s.id == "plant_platform")
+        .unwrap()
+}
+
+#[test]
+fn a_braced_platform_keeps_the_pump_on() {
+    let s = plant();
+    let r = grade(&s, &common::platform(0.04, 0.004, true));
+    print!("{}", r.summary());
+    assert!(r.passed, "{:?}", r.failure);
+    let (_, pump) = &r.payloads[0];
+    assert!(pump.lost.is_none());
+    assert!(pump.sag > 0.001 && pump.tilt_deg < 0.5);
+    assert!(r
+        .criteria
+        .iter()
+        .any(|c| c.label == "pump skid stays on" && c.ok && !c.bonus));
+}
+
+#[test]
+fn a_swaying_platform_shakes_the_pump_off_and_fails() {
+    let s = plant();
+    let r = grade(&s, &common::platform(0.06, 0.005, false));
+    assert!(!r.passed);
+    assert!(r.failure.as_deref().unwrap().contains("pump skid came off"));
+    let lost = r
+        .timeline
+        .iter()
+        .find_map(|e| match &e.what {
+            Happening::PayloadLost {
+                name, mass, radius, ..
+            } => Some((name.clone(), *mass, *radius)),
+            _ => None,
+        })
+        .expect("a PayloadLost event for the impact hand-off");
+    assert_eq!(lost.0, "pump skid");
+    assert_eq!(lost.1, 2500.0);
+    assert!(lost.2 > 0.5);
+}
+
+#[test]
+fn equipment_needs_a_node_under_every_foot() {
+    let s = plant();
+    let mut st = common::platform(0.04, 0.004, true);
+    // Move the node under one pump foot away.
+    let foot = st
+        .nodes
+        .iter()
+        .position(|p| (p - Vec3::new(1.0, 3.0, 0.5)).norm() < 1e-9)
+        .unwrap();
+    st.nodes[foot].x = 1.25;
+    let v = limits(&s, &st, PlayMode::Challenge);
+    assert!(
+        v.iter().any(
+            |v| matches!(v, Violation::PayloadUnattached { payload } if payload == "pump skid")
+        ),
+        "{v:?}"
+    );
+}
+
+#[test]
+fn strict_limits_fail_and_loose_ones_only_cost_score() {
+    let st = common::platform(0.04, 0.004, true);
+    let mut s = plant();
+    s.payloads[0].limits.sag = Some(0.001);
+    let loose = grade(&s, &st);
+    assert!(loose.passed);
+    assert!(loose
+        .criteria
+        .iter()
+        .any(|c| c.label == "pump skid sag" && !c.ok && c.bonus));
+    s.payloads[0].limits.strict = true;
+    let strict = grade(&s, &st);
+    assert!(!strict.passed);
+    assert!(strict.failure.unwrap().contains("sank"));
+}
+
+#[test]
+fn weak_bolts_tear_out_under_the_shaking() {
+    let mut s = plant();
+    s.payloads[1].mount = Mount::Bolted { capacity: 50.0 };
+    let r = grade(&s, &common::platform(0.04, 0.004, true));
+    assert!(r.payloads[1].1.bolts_failed);
+    assert!(r
+        .timeline
+        .iter()
+        .any(|e| matches!(e.what, Happening::BoltsFailed { payload: 1, .. })));
+}
