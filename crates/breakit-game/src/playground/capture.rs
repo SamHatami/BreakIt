@@ -89,7 +89,7 @@ fn script(
         }
         3 if waited >= 20 && *screen.get() == Screen::Playground => {
             bench.setup.wind.on = true;
-            bench.setup.wind.speed = 40.0;
+            bench.setup.wind.speed = 25.0;
             bench.setup.traffic.mass = 30.0;
             bench.pick = Some(Pick::Member(3));
             bench.trace = Some(Trace::new(Probe::member(3)[0], TRACE_SECONDS));

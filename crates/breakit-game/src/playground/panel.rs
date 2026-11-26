@@ -682,7 +682,7 @@ fn controls(p: &mut ChildSpawnerCommands, c: &Ctx) {
         );
         button(
             r,
-            &format!("Table: {}", c.table.insert.name()),
+            c.table.insert.name(),
             Some("T"),
             a(PlayAction::NextTable),
             ButtonKind::Secondary,
@@ -752,14 +752,14 @@ pub fn update_readouts(
     };
     for (r, mut t) in &mut texts {
         match r {
-            Readout::Clock => set(&mut t, format!("{:06.2} s", live.time())),
+            Readout::Clock => set(&mut t, format!("{:06.2}", live.time())),
             Readout::Speed => {
                 let v = if clock.paused {
-                    "paused".to_string()
+                    "s  paused".to_string()
                 } else if (clock.speed - 1.0).abs() < 1e-3 {
-                    "real time".into()
+                    "s  real time".into()
                 } else {
-                    format!("x{}", clock.speed)
+                    format!("s  x{}", clock.speed)
                 };
                 set(&mut t, v);
             }

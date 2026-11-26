@@ -2,7 +2,7 @@
 //! [`LoadSet`] that follows the load bench ([`Setup`]) while it runs.
 //!
 //! Wind, shaking and water each get one case the first time they are
-//! switched on. Switching them off and on again fades the case's load
+//! switched on (also when on from the start: they fade in then too). Switching them off and on again fades the case's load
 //! factor out and in over [`FADE_TIME`] instead of removing it, so no load
 //! jumps; changing a setting rebuilds that one case in place (the others
 //! keep their state). Trucks and dropped weights are new cases added when
@@ -128,14 +128,6 @@ impl Live {
             structure,
         };
         live.set_setup(setup);
-        // Switched on from the start: no fade-in.
-        for (i, on) in [setup.wind.on, setup.quake.on, setup.water.on]
-            .into_iter()
-            .enumerate()
-        {
-            live.fade[i] = if on { 1.0 } else { 0.0 };
-        }
-        live.apply_fades();
         live
     }
 
@@ -372,7 +364,14 @@ impl Live {
         }
 
         // Constant loads: extra gravity on every free node, then clicks.
-        let mut fixed = self.base.clone();
+        // The design's own loads come on over the first [`FADE_TIME`], like
+        // everything else, instead of all at once.
+        let ramp = breakit_core::loads::smooth_ramp(self.sim.time(), FADE_TIME);
+        let mut fixed: Vec<NodeLoad> = self
+            .base
+            .iter()
+            .map(|l| NodeLoad::force(l.node, l.force * ramp))
+            .collect();
         let extra = (self.gravity - 1.0) * G;
         if extra.abs() > 1e-9 {
             for n in 0..self.sim.node_count() {
@@ -643,7 +642,7 @@ mod tests {
             paddle: -13.6,
         };
         let mut live = Live::new(s, SimConfig::default(), &setup, env);
-        assert_eq!(live.fades(), [0.0, 1.0, 1.0]);
+        assert_eq!(live.fades(), [0.0, 0.0, 0.0]);
         run(&mut live, 2.0);
         assert!(live.table_offset().norm() > 0.0);
         let lvl = live.still_level().unwrap();
