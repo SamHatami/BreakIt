@@ -122,6 +122,8 @@ pub struct Config {
     pub pressure_tolerance: f64,
     /// Most conjugate-gradient iterations per substep.
     pub pressure_iterations: usize,
+    /// How the pressure system is solved.
+    pub pressure_solver: PressureSolver,
     /// Bed slopes steeper than this (rise over run) are treated as steps:
     /// no non-hydrostatic bed term across them.
     pub max_bed_slope: f64,
@@ -143,6 +145,7 @@ impl Default for Config {
             breaking_beta: 0.3,
             pressure_tolerance: 1e-3,
             pressure_iterations: 60,
+            pressure_solver: PressureSolver::ConjugateGradient,
             max_bed_slope: 1.0,
             max_speed: 25.0,
         }
@@ -160,6 +163,26 @@ pub struct StepStats {
     pub advanced: f64,
     /// Cells flagged as breaking at the end.
     pub breaking_cells: usize,
+    /// Relative residual of the last substep's pressure solve.
+    pub pressure_residual: f64,
+}
+
+/// How the pressure system of a substep is solved.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PressureSolver {
+    /// Preconditioned conjugate gradients to [`Config::pressure_tolerance`]:
+    /// the reference.
+    ConjugateGradient,
+    /// A fixed number of red-black successive over-relaxation sweeps, warm
+    /// started from the last substep. Every cell of one colour only needs
+    /// cells of the other, so a sweep is two fully parallel passes: this is
+    /// what the GPU backend runs, kept here as its reference.
+    RedBlack {
+        /// Sweeps per substep (each is a red and a black pass).
+        sweeps: usize,
+        /// Over-relaxation factor, 1 to 2.
+        omega: f64,
+    },
 }
 
 /// The reference solver. See the module docs for the model.
@@ -218,6 +241,30 @@ pub struct Solver {
     precon: Vec<f64>,
     time: f64,
     stats: StepStats,
+    /// Relative residual of the last pressure solve.
+    residual: f64,
+    /// Counts the edits that replace the flow state wholesale.
+    revision: u64,
+    /// Surface changes since the last step, per cell: `(cell, metres)`.
+    surface_edits: Vec<(usize, f64)>,
+}
+
+/// A flow state computed elsewhere, for [`Solver::load_state`]. All slices
+/// are laid out like the solver's own (see [`Grid`]).
+#[derive(Clone, Copy, Debug)]
+pub struct FlowState<'a> {
+    /// Free surface per cell, absolute y, m.
+    pub surface: &'a [f64],
+    /// Velocity on the x-faces, m/s.
+    pub u: &'a [f64],
+    /// Velocity on the z-faces, m/s.
+    pub v: &'a [f64],
+    /// Depth-averaged vertical velocity per cell, m/s.
+    pub w: &'a [f64],
+    /// Breaking strength per cell, 0 where not breaking.
+    pub break_strength: &'a [f64],
+    /// Simulated time of the state, s.
+    pub time: f64,
 }
 
 impl Solver {
@@ -275,6 +322,9 @@ impl Solver {
             precon: pad(),
             time: 0.0,
             stats: StepStats::default(),
+            residual: 0.0,
+            revision: 0,
+            surface_edits: Vec::new(),
         }
     }
 
@@ -296,6 +346,7 @@ impl Solver {
                 self.zeta[c] = self.zeta[c].max(self.bed[c]);
             }
         }
+        self.revision += 1;
         self.refresh_slopes();
     }
 
@@ -336,6 +387,7 @@ impl Solver {
         self.v.fill(0.0);
         self.w.fill(0.0);
         self.p.fill(0.0);
+        self.revision += 1;
         self.refresh_depth();
     }
 
@@ -350,6 +402,7 @@ impl Solver {
                 self.zeta[c] = f(x, z).max(self.bed[c]);
             }
         }
+        self.revision += 1;
         self.refresh_depth();
     }
 
@@ -363,6 +416,7 @@ impl Solver {
                 self.u[g.u(i, j)] = f(x, z);
             }
         }
+        self.revision += 1;
     }
 
     fn refresh_depth(&mut self) {
@@ -459,11 +513,72 @@ impl Solver {
         }
         self.zeta[c] -= moved;
         self.h[c] -= moved;
+        self.surface_edits.push((c, -moved));
         let share = moved / wet.len() as f64;
         for n in wet {
             self.zeta[n] += share;
             self.h[n] += share;
+            self.surface_edits.push((n, share));
         }
+    }
+
+    /// Counts the edits that replace the flow state wholesale
+    /// ([`Self::set_bed`], [`Self::fill_to`], [`Self::set_surface`],
+    /// [`Self::set_velocity_x`]): a backend that keeps the state elsewhere
+    /// takes it from here again when this changes.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// The surface changes made by [`Self::displace`] since the last step
+    /// or the last call, as `(cell, metres)`: a backend that keeps the
+    /// state elsewhere applies them there.
+    pub fn take_surface_edits(&mut self) -> Vec<(usize, f64)> {
+        std::mem::take(&mut self.surface_edits)
+    }
+
+    /// Replaces the flow state by one computed elsewhere (the GPU backend
+    /// reads its result back into this solver, which the foam, the spray
+    /// and the loads then read as usual). The surface is clamped to the
+    /// bed; the pressure is not kept.
+    pub fn load_state(&mut self, state: FlowState) {
+        self.zeta.copy_from_slice(state.surface);
+        self.u.copy_from_slice(state.u);
+        self.v.copy_from_slice(state.v);
+        self.w.copy_from_slice(state.w);
+        self.break_strength.copy_from_slice(state.break_strength);
+        for c in 0..self.zeta.len() {
+            self.zeta[c] = self.zeta[c].max(self.bed[c]);
+            self.breaking[c] = self.break_strength[c] > 0.0;
+        }
+        self.time = state.time;
+        self.refresh_depth();
+    }
+
+    /// Records what a step taken elsewhere cost.
+    pub fn set_stats(&mut self, stats: StepStats) {
+        self.stats = stats;
+    }
+
+    /// Bed slope across the x-faces and the z-faces (rise over run; 0
+    /// across steps and at the sides).
+    pub fn bed_slopes(&self) -> (&[f64], &[f64]) {
+        (&self.sx, &self.sz)
+    }
+
+    /// Volume source per cell, m/s.
+    pub fn source(&self) -> &[f64] {
+        &self.source
+    }
+
+    /// Sponge damping rate per cell, 1/s.
+    pub fn sponge(&self) -> &[f64] {
+        &self.sponge
+    }
+
+    /// Horizontal velocity of the blockage per cell, m/s.
+    pub fn blockage_velocity(&self) -> (&[f64], &[f64]) {
+        (&self.block_u, &self.block_v)
     }
 
     /// Simulated time, s.
@@ -590,6 +705,7 @@ impl Solver {
     /// needs.
     pub fn advance(&mut self, dt: f64) -> StepStats {
         let mut stats = StepStats::default();
+        self.surface_edits.clear();
         let mut left = dt;
         while left > 1e-12 && stats.substeps < self.config.max_substeps {
             let stable = self.stable_dt();
@@ -606,6 +722,7 @@ impl Solver {
             left -= h;
         }
         stats.breaking_cells = self.breaking.iter().filter(|b| **b).count();
+        stats.pressure_residual = self.residual;
         self.stats = stats;
         stats
     }
@@ -1070,7 +1187,49 @@ impl Solver {
                     }
                 }
             }
-            if rhs_norm > 0.0 {
+            if let (PressureSolver::RedBlack { sweeps, omega }, true) =
+                (cfg.pressure_solver, rhs_norm > 0.0)
+            {
+                for _ in 0..sweeps {
+                    for colour in 0..2 {
+                        for j in 0..nz {
+                            for i in ((j + colour) % 2..nx).step_by(2) {
+                                let c = g.c(i, j);
+                                if !self.active[c] {
+                                    continue;
+                                }
+                                let k = o + c;
+                                let mut sum = 0.0;
+                                if i + 1 < nx {
+                                    sum += self.ax[k] * self.p[c + 1];
+                                }
+                                if i > 0 {
+                                    sum += self.ax[k - 1] * self.p[c - 1];
+                                }
+                                if j + 1 < nz {
+                                    sum += self.az[k] * self.p[c + nx];
+                                }
+                                if j > 0 {
+                                    sum += self.az[k - nx] * self.p[c - nx];
+                                }
+                                let gs = (self.cg_r[c] - sum) / self.cg_diag[c];
+                                self.p[c] += omega * (gs - self.p[c]);
+                            }
+                        }
+                    }
+                }
+                iterations = sweeps;
+                // The residual left, for the statistics.
+                self.cg_d[o..o + n].copy_from_slice(&self.p);
+                self.apply_matrix();
+                let mut rr = 0.0;
+                for c in 0..n {
+                    if self.active[c] {
+                        rr += (self.cg_r[c] - self.cg_q[c]).powi(2);
+                    }
+                }
+                self.residual = (rr / rhs_norm).sqrt();
+            } else if rhs_norm > 0.0 {
                 // Modified incomplete Cholesky, MIC(0).
                 for c in 0..n {
                     let k = o + c;
@@ -1136,6 +1295,7 @@ impl Solver {
                     }
                     iterations += 1;
                 }
+                self.residual = (rr / rhs_norm).sqrt();
             }
             // Correct the velocities with M⁻¹ Cᵀ p.
             self.pressure_gradient();

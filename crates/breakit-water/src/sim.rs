@@ -209,6 +209,18 @@ impl WaterSim {
 
     /// Advances the water by `dt` seconds.
     pub fn advance(&mut self, dt: f64, drive: Drive) -> StepStats {
+        self.advance_with(dt, drive, Solver::advance)
+    }
+
+    /// [`Self::advance`] with the solver step taken by `step` (another
+    /// backend: it gets the solver with this frame's drive, blockage and
+    /// sources set, and leaves the new state in it).
+    pub fn advance_with(
+        &mut self,
+        dt: f64,
+        drive: Drive,
+        step: impl FnOnce(&mut Solver, f64) -> StepStats,
+    ) -> StepStats {
         self.drive = drive;
         self.solver.paddle_velocity = drive.paddle_velocity + drive.current;
         self.solver.sponge_velocity = drive.current;
@@ -221,7 +233,7 @@ impl WaterSim {
         if self.hold_level {
             self.follow_level(drive.still_level);
         }
-        let stats = self.solver.advance(dt);
+        let stats = step(&mut self.solver, dt);
         self.update_foam(stats.advanced);
         self.update_spray(stats.advanced);
         self.field = Arc::new(Field::capture_after(&self.solver, &self.field));

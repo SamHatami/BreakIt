@@ -326,8 +326,7 @@ fn step_simulation(
     sim: Option<ResMut<Simulation>>,
     design: Res<Design>,
     mut state: ResMut<FrameState>,
-    mut water: Option<ResMut<breakit_water_render::LiveWater>>,
-    water_link: Option<Res<crate::water::WaterLink>>,
+    mut water: crate::water::WaterStep,
 ) {
     let Some(mut sim) = sim else { return };
     let dt = if clock.paused {
@@ -341,10 +340,8 @@ fn step_simulation(
             *acc = 0.0;
             break;
         }
-        if let (Some(water), Some(link), Driver::Test(run)) =
-            (water.as_mut(), water_link.as_ref(), &mut sim.driver)
-        {
-            crate::water::step(water, link, run, SIM_DT);
+        if let Driver::Test(run) = &mut sim.driver {
+            water.step(run, SIM_DT);
         }
         sim.step(SIM_DT);
         *acc -= SIM_DT;

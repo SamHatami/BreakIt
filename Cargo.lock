@@ -2117,7 +2117,9 @@ dependencies = [
  "breakit-render",
  "breakit-scenario",
  "breakit-water",
+ "breakit-water-gpu",
  "breakit-water-render",
+ "wgpu",
 ]
 
 [[package]]
@@ -2179,6 +2181,16 @@ name = "breakit-water"
 version = "0.1.0"
 dependencies = [
  "breakit-core",
+]
+
+[[package]]
+name = "breakit-water-gpu"
+version = "0.1.0"
+dependencies = [
+ "breakit-water",
+ "bytemuck",
+ "futures-lite",
+ "wgpu",
 ]
 
 [[package]]
@@ -6646,6 +6658,7 @@ dependencies = [
  "smallvec",
  "static_assertions",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
  "wgpu-core",
  "wgpu-hal",

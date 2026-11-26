@@ -105,12 +105,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libudev-dev libwayland-dev libxkbcommon-dev libasound2-dev pkg-config
+            libudev-dev libwayland-dev libxkbcommon-dev libasound2-dev pkg-config \
+            mesa-vulkan-drivers
+      # mesa-vulkan-drivers is a software Vulkan adapter: with it the GPU
+      # water is compared with the CPU solver here (docs/water.md).
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: game
       # One full build of every target, reused by the tests. The engine-free
       # crates already ran in release above; debug here keeps the Bevy build small.
-      - run: cargo build --locked --all-targets -p breakit-game -p breakit-render -p breakit-lab -p breakit-water-render
-      - run: cargo test --locked -p breakit-game -p breakit-render -p breakit-lab -p breakit-water-render
+      - run: cargo build --locked --all-targets -p breakit-game -p breakit-render -p breakit-lab -p breakit-water-render -p breakit-water-gpu
+      - run: cargo test --locked -p breakit-game -p breakit-render -p breakit-lab -p breakit-water-render -p breakit-water-gpu
       - run: df -h /

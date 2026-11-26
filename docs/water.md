@@ -1,10 +1,11 @@
 # Water
 
-The water on the play table is simulated, and the same simulated water is drawn and pushes on the structure. Three pieces:
+The water on the play table is simulated, and the same simulated water is drawn and pushes on the structure. Four pieces:
 
 | Crate | What |
 | --- | --- |
 | `breakit-water` (engine-free) | the solver, the paddle, foam and spray, the hook into the core load model |
+| `breakit-water-gpu` (wgpu, no Bevy) | the solver as compute passes, read back into the CPU solver |
 | `breakit-water-render` (Bevy) | the surface mesh and shader, the spray, quality presets |
 | `breakit-game/src/water.rs` | sets the water up from the play table and the sheet's water case, steps it with the physics |
 
@@ -72,7 +73,7 @@ Not covered: the water does not feel a floating body's displacement (only its dr
 - caustics on what is seen through the surface, focused by crests;
 - foam from the simulated cover, and a lace along a moving shoreline.
 
-`WaterQuality` follows the lab's F4 presets: low is alpha-blended without ripples or spray, medium adds refraction and ripples, high adds caustics and a finer surface, ultra the finest. In the game the solver cell is 25 cm on low, 20 cm on medium and high, 15 cm on ultra.
+`WaterQuality` follows the lab's F4 presets: low is alpha-blended without ripples or spray, medium adds refraction and ripples, high adds caustics and a finer surface, ultra the finest. In the game the solver cell is 25 cm on low, 20 cm on medium and high, 15 cm on ultra on the CPU, and 20, 15 and 10 cm on the GPU.
 
 `cargo run --release -p breakit-water-render --example flume` is a flume in the lab with a beach and a pier: 1 waves, 2 surge, 3 flood, V views. `-- --capture <dir>` and `-- --clip <dir> --view beach --frames 100 --fps 20` save stills and frames headless (under `xvfb-run`).
 
@@ -86,10 +87,34 @@ One core, `cargo run --release -p breakit-water --example water_bench` (28 m by 
 | 15 cm | 7 360 | 5.7 |
 | 10 cm | 16 560 | 18.0 |
 
-Two thirds of it is the pressure solve. It is scalar code; a GPU compute backend behind the same `Field` interface, checked against this solver within a tolerance, is the planned way to finer grids.
+Two thirds of it is the pressure solve, and it is scalar code. `PressureSolver::RedBlack` (16 sweeps) instead of conjugate gradients takes the 10 cm grid from 18 to about 12 ms; the GPU backend below is the way to finer grids.
+
+## On the GPU
+
+`breakit-water-gpu` runs the same substep as compute passes (`solver.wgsl`, to be kept in step with `Solver::substep` formula by formula). `GpuSolver::step` goes where `Solver::advance` would: `WaterSim::advance_with(dt, drive, |solver, dt| gpu.step(device, queue, solver, dt))`.
+
+- **What differs from the CPU reference.** The arithmetic is `f32`. The pressure system is relaxed by a fixed number of red-black over-relaxation sweeps (16, factor 1.6, warm-started from the last substep) because conjugate gradients with an incomplete Cholesky factor is a chain through every cell and does not run in parallel; `PressureSolver::RedBlack` is the same relaxation on the CPU and is what the GPU is tested against. The outflow limiter scales all faces from the state before it instead of cell after cell.
+- **The CPU solver is the mirror.** The state lives on the GPU. Each step copies it into a staging buffer that is mapped without waiting, and whatever has arrived is loaded into the CPU `Solver` (`Solver::load_state`). Foam, spray, `Field`, the loads on the structure and the renderer read that solver as before, one step late: at 60 Hz the water the structure feels and the water drawn are 17 ms behind the water computed. The substep is sized from the mirror with a 15 % margin for that. `GpuSolver::sync` waits for the GPU (tests, captures).
+- **What goes up each step.** Bed, sources, sponge and blockage (four floats per cell, twice), the paddle and the boundaries. A splash (`Solver::displace`) goes up as extra source over the step, so the state never has to come back down first. Edits that replace the state (`fill_to`, `set_surface`, `set_bed`, `set_velocity_x`; `Solver::revision` counts them) upload it whole and drop read-backs still in flight.
+- **Size.** Eight storage buffers of `(nx + 1)(nz + 1)` entries, 16 bytes each (the pressure 4). A substep is 9 dispatches plus two per sweep, 41 in all, each its own compute pass because each reads what the one before wrote.
+
+**Tolerance, not equality.** Different GPUs round differently (fused multiply-add, `pow`, `sqrt`), so nothing may depend on the water being the same bit for bit: tests compare within tolerances, and limits scored from water need a margin. Measured here on a software Vulkan adapter (`cargo test --release -p breakit-water-gpu`), GPU against the CPU with the same relaxation:
+
+| Case | Surface difference, rms | at most |
+| --- | --- | --- |
+| Flume, 0.3 m waves breaking on a beach, 14 s | 0.6 µm | 2 µm |
+| Basin with a current, a pile, an open side and a splash, 4 s | 23 µm | 0.3 mm |
+| Flume with the mirror lagging against waiting every step, 8 s | 38 µm | 74 µm |
+
+The red-black relaxation itself differs from the conjugate-gradient reference by 0.3 mm rms and 1.7 mm at most in 0.6 m waves (CPU against CPU). The tests pass without checking anything where there is no adapter; CI installs Mesa's software Vulkan so they do run there.
+
+**In the game** the CPU is the default. F6 or `BREAKIT_WATER=gpu` steps the water on the GPU the game draws with (`WaterBackend`); the frame-time read-out (F3) says where the water runs and on what grid. The grid follows the backend the next time the water is set up (a running test keeps its grid and only changes where it is stepped).
+
+**Not timed on real hardware.** Everything here was built and checked on a software adapter, which says it is right and nothing about how fast it is. To find out: on the flume table, run a test with waves, open the read-out (F3) and compare the frame time with F6 off and on. Until someone has, the CPU stays the default.
 
 ## Open
 
+- The GPU backend has not been timed on a GPU (see above). Foam, spray and the surface mesh are still built on the CPU from the mirror each step, which is what will limit grids much finer than 10 cm.
 - The flume's walls are infinitely high for the water: a crest higher than the table top does not spill over it.
 - Dropped equipment (scenario payloads) is not yet pushed by the water; `Field::column` and `WaterField::kinematics` are there for it.
 - Waves shorter than about three water depths do not travel in this model, so a splash stirs the water where it lands but sends out no rings; ripple rings would be a shader effect.
