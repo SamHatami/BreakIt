@@ -148,7 +148,7 @@ fn script(
     mut table: ResMut<PlayTable>,
     mut settings: ResMut<LabSettings>,
     stats: Res<LabStats>,
-    time: Res<Time>,
+    time: Res<Time<Real>>,
     mut exit: MessageWriter<AppExit>,
 ) {
     script.frame += 1;

@@ -26,6 +26,20 @@ pub trait TableInsert: Send + Sync + 'static {
     /// Fill the basin: everything from y = -[`BASIN_DEPTH`] up to the
     /// playing surface, inside `top.half` in x and z.
     fn build(&self, top: &mut TableTop);
+    /// Solid ground for the solver's contact, as axis-aligned boxes
+    /// (min, max) in world units, covering what `build` makes solid. The
+    /// default is a flat slab over the whole opening.
+    fn contact_boxes(&self, half: Vec2) -> Vec<(Vec3, Vec3)> {
+        vec![slab(-half, half, 0.0)]
+    }
+}
+
+/// A block of basin fill from the basin floor up to `top`.
+pub fn slab(min: Vec2, max: Vec2, top: f32) -> (Vec3, Vec3) {
+    (
+        Vec3::new(min.x, -BASIN_DEPTH, min.y),
+        Vec3::new(max.x, top, max.y),
+    )
 }
 
 /// The table the current scenario plays on. Change it and the lab rebuilds
@@ -49,6 +63,11 @@ impl PlayTable {
             size: Vec2::new(28.0, 16.0),
             insert: Arc::new(insert),
         }
+    }
+
+    /// The table's solid ground for contact, world units.
+    pub fn contact_boxes(&self) -> Vec<(Vec3, Vec3)> {
+        self.insert.contact_boxes(self.size * 0.5)
     }
 
     /// The built-in inserts in a fixed order, for cycling through them.
@@ -294,6 +313,17 @@ impl TableInsert for Ravine {
         "ravine"
     }
 
+    fn contact_boxes(&self, h: Vec2) -> Vec<(Vec3, Vec3)> {
+        // The contour layers step out below the top; the sheer bank edge
+        // is close enough for contact.
+        let g = self.gap * 0.5;
+        vec![
+            slab(Vec2::new(-h.x, -h.y), Vec2::new(-g, h.y), 0.0),
+            slab(Vec2::new(g, -h.y), Vec2::new(h.x, h.y), 0.0),
+            slab(Vec2::new(-g, -h.y), Vec2::new(g, h.y), -self.depth),
+        ]
+    }
+
     fn build(&self, top: &mut TableTop) {
         let h = top.half;
         let g = self.gap * 0.5;
@@ -339,6 +369,15 @@ impl Default for Flume {
 impl TableInsert for Flume {
     fn name(&self) -> &str {
         "wave flume"
+    }
+
+    fn contact_boxes(&self, h: Vec2) -> Vec<(Vec3, Vec3)> {
+        let w = self.width * 0.5;
+        vec![
+            slab(Vec2::new(-h.x, -h.y), Vec2::new(h.x, -w), 0.0),
+            slab(Vec2::new(-h.x, w), Vec2::new(h.x, h.y), 0.0),
+            slab(Vec2::new(-h.x, -w), Vec2::new(h.x, w), -self.depth),
+        ]
     }
 
     fn build(&self, top: &mut TableTop) {
@@ -460,6 +499,21 @@ mod tests {
             let top = surface_top(&s, t.size * 0.5);
             assert!(top.abs() < 1e-5, "{} top at {top}", t.insert.name());
             assert!(s.bufs.contains_key(&Mat::GridMajor));
+        }
+    }
+
+    #[test]
+    fn contact_boxes_top_out_at_the_playing_surface() {
+        for i in 0..4 {
+            let t = PlayTable::builtin(i);
+            let boxes = t.contact_boxes();
+            assert!(!boxes.is_empty());
+            let top = boxes.iter().map(|b| b.1.y).fold(f32::MIN, f32::max);
+            assert_eq!(top, 0.0, "{}", t.insert.name());
+            for (min, max) in boxes {
+                assert!(min.cmple(max).all());
+                assert!(max.x <= t.size.x * 0.5 + 1e-4 && max.z <= t.size.y * 0.5 + 1e-4);
+            }
         }
     }
 

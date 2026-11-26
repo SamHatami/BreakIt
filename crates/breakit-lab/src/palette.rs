@@ -151,7 +151,7 @@ pub fn material(m: Mat) -> StandardMaterial {
             perceptual_roughness: 0.8,
             ..default()
         },
-        Mat::Foam => paint(0xc9c2b2, 0.95),
+        Mat::Foam => paint(0xd6cfbf, 0.95),
         Mat::TableDark => paint(0x15181b, 0.7),
     }
 }

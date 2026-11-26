@@ -90,10 +90,44 @@ pub fn build(spec: &HallSpec, seed: u64) -> Scenery {
     timber_stack(&mut s, Vec3::new(-20.5, 0.0, 9.5));
     scissor_lift(&mut s, Vec3::new(-19.0, 0.0, 2.5));
     pallet_truck(&mut s, Vec3::new(9.5, 0.0, 10.5), 0.6);
-    // Barriers and cones around the strong floor.
-    for k in 0..6 {
-        cone(&mut s, Vec3::new(-14.6 + k as f32 * 2.4, 0.0, 1.8));
+    // Safety railings round the rig bays, with gaps to walk in, and a few
+    // cones where the reaction-frame bay is open.
+    let v = |x: f32, z: f32| Vec3::new(x, 0.0, z);
+    railing(&mut s, &[v(-14.4, -4.0), v(-14.4, 1.6), v(-11.0, 1.6)]);
+    railing(&mut s, &[v(-7.0, 1.6), v(-1.6, 1.6), v(-1.6, -6.5)]);
+    for k in 0..3 {
+        cone(&mut s, Vec3::new(-10.4 + k as f32 * 1.5, 0.0, 1.8));
     }
+    railing(
+        &mut s,
+        &[
+            v(19.0, -5.0),
+            v(25.0, -5.0),
+            v(25.0, 1.0),
+            v(19.0, 1.0),
+            v(19.0, -1.0),
+        ],
+    );
+    railing(
+        &mut s,
+        &[v(10.2, -6.0), v(13.8, -6.0), v(13.8, -2.0), v(11.5, -2.0)],
+    );
+    // Drain gratings along the wet side of the flume.
+    floor_grating(
+        &mut s,
+        Vec3::new(-22.0, 0.0, -8.45),
+        Vec3::new(4.0, 0.0, -8.15),
+    );
+    floor_grating(
+        &mut s,
+        Vec3::new(-26.0, 0.0, -12.0),
+        Vec3::new(-25.7, 0.0, -8.15),
+    );
+    // Steel sections racked by the door end, and two silos outside the
+    // flume's beach end.
+    section_rack(&mut s, Vec3::new(hx - 1.2, 0.0, 10.8));
+    tank(&mut s, Vec3::new(3.5, 0.0, -hz + 1.6), 0.8, 5.5);
+    tank(&mut s, Vec3::new(5.4, 0.0, -hz + 1.6), 0.8, 5.5);
 
     s
 }
@@ -1090,6 +1124,105 @@ fn pallet_truck(s: &mut Scenery, at: Vec3, yaw: f32) {
         6,
         true,
     );
+}
+
+/// A yellow two-rail guard rail along a polyline on the floor.
+fn railing(s: &mut Scenery, pts: &[Vec3]) {
+    for w in pts.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let n = (a.distance(b) / 1.5).ceil().max(1.0) as i32;
+        for k in 0..=n {
+            let p = a.lerp(b, k as f32 / n as f32);
+            s.m(Mat::Yellow)
+                .cylinder(p, p + Vec3::Y * 1.1, 0.03, 8, false);
+            s.m(Mat::Dark).aabb(
+                p - Vec3::new(0.08, 0.0, 0.08),
+                p + Vec3::new(0.08, 0.02, 0.08),
+            );
+        }
+        for h in [0.5f32, 1.1] {
+            s.m(Mat::Yellow)
+                .cylinder(a + Vec3::Y * h, b + Vec3::Y * h, 0.025, 8, false);
+        }
+        // Kick plate.
+        s.m(Mat::Yellow)
+            .bar(a + Vec3::Y * 0.08, b + Vec3::Y * 0.08, 0.01, 0.1, Vec3::Y);
+    }
+}
+
+/// A floor drain: a dark channel with a slatted grating, `a` to `b` corners.
+fn floor_grating(s: &mut Scenery, a: Vec3, b: Vec3) {
+    let (min, max) = (a.min(b), a.max(b));
+    s.m(Mat::Dark).aabb(
+        Vec3::new(min.x, -0.01, min.z),
+        Vec3::new(max.x, 0.003, max.z),
+    );
+    let along_x = (max.x - min.x) > (max.z - min.z);
+    let len = if along_x {
+        max.x - min.x
+    } else {
+        max.z - min.z
+    };
+    let n = (len / 0.05) as i32;
+    for k in 0..n {
+        let t = min + (max - min) * (k as f32 + 0.5) / n as f32;
+        let (p, q) = if along_x {
+            (
+                Vec3::new(t.x - 0.01, 0.0, min.z),
+                Vec3::new(t.x + 0.01, 0.008, max.z),
+            )
+        } else {
+            (
+                Vec3::new(min.x, 0.0, t.z - 0.01),
+                Vec3::new(max.x, 0.008, t.z + 0.01),
+            )
+        };
+        s.m(Mat::LightSteel).aabb(p, q);
+    }
+}
+
+/// A cantilever rack of long steel sections against a wall.
+fn section_rack(s: &mut Scenery, at: Vec3) {
+    for k in 0..3 {
+        let z = at.z - 2.8 + k as f32 * 2.8;
+        s.m(Mat::MachineBlue).i_beam(
+            Vec3::new(at.x, 0.0, z),
+            Vec3::new(at.x, 4.0, z),
+            0.3,
+            0.2,
+            0.01,
+            0.015,
+            Vec3::X,
+        );
+        for y in [0.8f32, 1.8, 2.8] {
+            s.m(Mat::MachineBlue).bar(
+                Vec3::new(at.x, y, z),
+                Vec3::new(at.x - 1.0, y + 0.05, z),
+                0.1,
+                0.12,
+                Vec3::Y,
+            );
+        }
+    }
+    for (layer, y) in [0.86f32, 1.86, 2.86].into_iter().enumerate() {
+        for k in 0..(5 - layer) {
+            let x = at.x - 0.2 - k as f32 * 0.17;
+            let mat = if layer == 1 {
+                Mat::LightSteel
+            } else {
+                Mat::FrameSteel
+            };
+            s.m(mat).i_beam(
+                Vec3::new(x, y + 0.1, at.z - 3.6),
+                Vec3::new(x, y + 0.1, at.z + 3.6),
+                0.16,
+                0.08,
+                0.006,
+                0.009,
+                Vec3::Y,
+            );
+        }
+    }
 }
 
 fn cone(s: &mut Scenery, at: Vec3) {
