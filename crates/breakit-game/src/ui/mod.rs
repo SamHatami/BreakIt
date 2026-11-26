@@ -137,10 +137,7 @@ impl View {
                 v.history.can_redo()
             ),
             View::BuildInspector => hud::inspector_key(v),
-            View::BuildDrawer => format!(
-                "{:?} {:?} {:?} {}",
-                v.tool.kind, v.tool.allowed, v.tool.selected_beam, v.design.revision
-            ),
+            View::BuildDrawer => hud::drawer_key(v),
             View::BuildFooter => format!(
                 "{:?} {:?} {} {} {}",
                 v.tool.tool,

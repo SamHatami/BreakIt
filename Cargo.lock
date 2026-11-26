@@ -2111,6 +2111,7 @@ dependencies = [
  "breakit-audio",
  "breakit-core",
  "breakit-lab",
+ "breakit-parts",
  "breakit-render",
  "breakit-scenario",
 ]

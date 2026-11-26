@@ -124,8 +124,14 @@ fn capture_script(
         }
         4 if waited >= 20 && *screen.get() == Screen::Build => {
             let (chord, web) = match std::env::var("BREAKIT_TRUSS").as_deref() {
-                Ok("steel") => (BeamKind::SteelTube, BeamKind::SteelTube),
-                _ => (BeamKind::SteelTube, BeamKind::Timber),
+                Ok("steel") => (
+                    BeamKind::part("steel-tube-m"),
+                    BeamKind::part("steel-tube-m"),
+                ),
+                _ => (
+                    BeamKind::part("steel-tube-m"),
+                    BeamKind::part("timber-joist"),
+                ),
             };
             if std::env::var("BREAKIT_TRUSS").as_deref() == Ok("weak") {
                 build_plank(&mut design);
@@ -202,6 +208,6 @@ fn build_plank(d: &mut Design) {
         .map(|x| d.add_node(Vec3::new(x as f32, 0.0, 0.0)))
         .collect();
     for w in nodes.windows(2) {
-        d.add_beam(w[0], w[1], BeamKind::Timber);
+        d.add_beam(w[0], w[1], BeamKind::part("timber-joist"));
     }
 }

@@ -262,11 +262,28 @@ pub fn build_register(p: &mut ChildSpawnerCommands, v: &GameView) {
 }
 
 fn parts_label(s: &Scenario) -> String {
-    s.allowed
-        .iter()
-        .map(|k| k.label())
-        .collect::<Vec<_>>()
-        .join(", ")
+    let mut classes: Vec<&str> = Vec::new();
+    for k in &s.allowed {
+        let c = match k.material_kind() {
+            breakit_core::MaterialKind::Steel => "steel",
+            breakit_core::MaterialKind::Timber => "timber",
+            breakit_core::MaterialKind::Concrete => "concrete",
+            breakit_core::MaterialKind::Composite => "carbon fibre",
+        };
+        if !classes.contains(&c) {
+            classes.push(c);
+        }
+    }
+    let list = classes.join(", ");
+    let mut it = list.chars();
+    match it.next() {
+        Some(f) => format!(
+            "{}{} members, any standard size",
+            f.to_uppercase(),
+            it.as_str()
+        ),
+        None => "None".into(),
+    }
 }
 
 /// A register row: five cells, clickable when it has an action.

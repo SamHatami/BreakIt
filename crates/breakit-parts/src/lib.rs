@@ -110,6 +110,17 @@ impl MaterialSpec {
         }
     }
 
+    /// Grade or class as printed on a drawing: "S355", "C24", "GL28h",
+    /// "C30/37", "CFRP".
+    pub fn grade_label(&self) -> &'static str {
+        let key = self.price_key();
+        match self {
+            MaterialSpec::Cfrp => "CFRP",
+            MaterialSpec::CfrpLaminate => "CFRP lam.",
+            _ => key.rsplit(' ').next().unwrap_or(key),
+        }
+    }
+
     /// The key prices are looked up by: material and grade, not grain
     /// angle, rebar ratio or cover.
     pub fn price_key(&self) -> &'static str {
@@ -192,6 +203,21 @@ impl ProfileSpec {
     pub fn section(&self) -> Section {
         self.profile().section()
     }
+
+    /// Dimensions in millimetres, e.g. "CHS 114.3x5" or "I 200x100".
+    pub fn designation(&self) -> String {
+        let n = |x: f64| {
+            let s = format!("{x:.1}");
+            s.trim_end_matches(".0").to_string()
+        };
+        match *self {
+            ProfileSpec::Rect { b, h } => format!("{}x{}", n(b), n(h)),
+            ProfileSpec::Round { d } => format!("Ø{}", n(d)),
+            ProfileSpec::Chs { d, t } => format!("CHS {}x{}", n(d), n(t)),
+            ProfileSpec::Rhs { b, h, t } => format!("RHS {}x{}x{}", n(h), n(b), n(t)),
+            ProfileSpec::I { h, b, .. } => format!("I {}x{}", n(h), n(b)),
+        }
+    }
 }
 
 /// The joint types as stored in data and designs; see [`JointKind`].
@@ -206,6 +232,27 @@ pub enum JointSpec {
 }
 
 impl JointSpec {
+    pub const ALL: [JointSpec; 6] = [
+        JointSpec::Pinned,
+        JointSpec::Dowelled,
+        JointSpec::Bolted,
+        JointSpec::Monolithic,
+        JointSpec::Welded,
+        JointSpec::Rigid,
+    ];
+
+    /// Lower-case name for the UI.
+    pub fn label(self) -> &'static str {
+        match self {
+            JointSpec::Rigid => "rigid",
+            JointSpec::Pinned => "pinned",
+            JointSpec::Bolted => "bolted",
+            JointSpec::Welded => "welded",
+            JointSpec::Monolithic => "monolithic",
+            JointSpec::Dowelled => "dowelled",
+        }
+    }
+
     pub fn kind(self) -> JointKind {
         match self {
             JointSpec::Rigid => JointKind::Rigid,
@@ -262,6 +309,34 @@ impl MemberChoice {
     pub fn joints_suit_material(&self) -> bool {
         let kind = self.material.kind();
         self.joints.iter().all(|j| j.kind().suits(kind))
+    }
+}
+
+/// The joint a member end gets when the player leaves it on automatic:
+/// what a builder would use for this material where it meets `others`, the
+/// materials of the other members at the same node. Timber meeting timber
+/// is dowelled, concrete meeting concrete is cast in one (monolithic),
+/// steel and mixed materials are bolted (the usual site connection; welding
+/// is stiffer but costs twice as much, so it is the player's call), concrete
+/// sits on a pinned bearing where it meets anything else, and solid round
+/// bars are pinned ties. The result is always one of `allowed` (the first one if the rule's
+/// pick is not), so a family's joint list has the last word.
+pub fn auto_joint(c: &MemberChoice, others: &[MaterialKind], allowed: &[JointSpec]) -> JointSpec {
+    let kind = c.material.kind();
+    let same = others.iter().all(|k| *k == kind);
+    let pick = match (kind, c.profile) {
+        (_, ProfileSpec::Round { .. }) => JointSpec::Pinned,
+        (MaterialKind::Timber, _) if same => JointSpec::Dowelled,
+        (MaterialKind::Concrete, _) if same => JointSpec::Monolithic,
+        // Concrete can't be bolted to other materials in this model: a
+        // pinned bearing.
+        (MaterialKind::Concrete, _) => JointSpec::Pinned,
+        _ => JointSpec::Bolted,
+    };
+    if allowed.is_empty() || allowed.contains(&pick) {
+        pick
+    } else {
+        allowed[0]
     }
 }
 
@@ -556,6 +631,46 @@ impl Catalog {
 
     pub fn family(&self, id: &str) -> Option<&Family> {
         self.families.iter().find(|f| f.id == id)
+    }
+
+    /// The family, size index and grade index a member's section and
+    /// material come from, if they are standard. Joints are not compared.
+    pub fn family_of(&self, c: &MemberChoice) -> Option<(&Family, usize, usize)> {
+        self.families.iter().find_map(|f| {
+            let grade = f.grades.iter().position(|g| *g == c.material)?;
+            let size = f.sizes.iter().position(|s| s.profile == c.profile)?;
+            Some((f, size, grade))
+        })
+    }
+
+    /// The catalog part with this material and section, if any. Joints are
+    /// not compared.
+    pub fn part_of(&self, c: &MemberChoice) -> Option<&Part> {
+        self.parts
+            .iter()
+            .find(|p| p.choice.material == c.material && p.choice.profile == c.profile)
+    }
+
+    /// Short designation: the standard size and grade ("IPE 200 S355"), else
+    /// the section in millimetres and the grade.
+    pub fn designation(&self, c: &MemberChoice) -> String {
+        let size = match self.family_of(c) {
+            Some((f, s, _)) => f.sizes[s].name.clone(),
+            None => c.profile.designation(),
+        };
+        format!("{size} {}", c.material.grade_label())
+    }
+
+    /// Joint types a member of this material can have: the family's when the
+    /// member is standard, else every type that suits the material.
+    pub fn joints_for(&self, c: &MemberChoice) -> Vec<JointSpec> {
+        match self.family_of(c) {
+            Some((f, ..)) => f.joints.clone(),
+            None => JointSpec::ALL
+                .into_iter()
+                .filter(|j| *j != JointSpec::Rigid && j.kind().suits(c.material.kind()))
+                .collect(),
+        }
     }
 
     /// Check what loading cannot: unique ids, prices for every material and

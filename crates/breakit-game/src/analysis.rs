@@ -52,6 +52,9 @@ pub struct MemberState {
     pub broken: bool,
     /// Axial force in newtons, tension positive. Only known in build mode.
     pub axial: Option<f32>,
+    /// Fraction of each end joint's capacity in use (end a, end b); 0 for
+    /// rigid joints.
+    pub joints: [f32; 2],
 }
 
 /// What the renderer draws this frame.
@@ -178,6 +181,7 @@ pub fn compute_static(design: &Design, scale: f32, extra: &[NodeLoad]) -> FrameS
             for (m, f) in state.members.iter_mut().zip(&r.member_forces) {
                 m.utilization = f.utilization as f32;
                 m.axial = Some(f.axial as f32);
+                m.joints = f.joint_utilization.map(|u| u as f32);
             }
         }
         Err(e) => state.error = Some(e.to_string()),
@@ -217,7 +221,7 @@ fn start_simulation(
         ..Default::default()
     };
     let s = sheets.current();
-    let bill = sheets.costs.estimate(&structure);
+    let bill = design.bill(&structure, &sheets.costs);
     let run = match TestRun::new(
         &s.def,
         &structure,
@@ -287,6 +291,7 @@ fn step_simulation(
     for (i, m) in state.members.iter_mut().enumerate() {
         m.utilization = s.utilization(i) as f32;
         m.broken = s.is_broken(i);
+        m.joints = s.damage(i).joint.map(|u| u as f32);
     }
 
     let events = s.break_events();
@@ -359,7 +364,7 @@ mod tests {
         let mut d = Design::default();
         let a = d.add_node(Vec3::ZERO);
         let b = d.add_node(Vec3::X);
-        d.add_beam(a, b, BeamKind::SteelTube);
+        d.add_beam(a, b, BeamKind::part("steel-tube-m"));
         let s = compute_static(&d, 1.0, &[]);
         assert!(s.error.is_some());
     }
@@ -369,7 +374,7 @@ mod tests {
         let mut d = Design::default();
         let a = d.add_node(Vec3::ZERO);
         let b = d.add_node(Vec3::X * 2.0);
-        d.add_beam(a, b, BeamKind::SteelTube);
+        d.add_beam(a, b, BeamKind::part("steel-tube-m"));
         d.set_support(a, Some(SupportKind::Fixed));
         let mut sim = DynamicSim::new(&d.to_structure(), SimConfig::default());
         for _ in 0..60 {

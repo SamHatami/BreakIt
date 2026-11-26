@@ -68,7 +68,17 @@ pub enum UiAction {
     ToggleControls,
     CloseOverlay,
     SetTool(Tool),
+    /// Use this member for the next beam and the selected one.
     SetMaterial(BeamKind),
+    /// Palette tab n (keys 1-4): the first allowed part of that material.
+    MaterialTab(u8),
+    /// Next (+1) or previous (-1) standard size in the member's family.
+    StepSize(i8),
+    /// Next grade in the member's family.
+    CycleGrade,
+    /// Selected beam's joint at end 0 or 1: automatic, then each type the
+    /// material allows.
+    CycleJoint(u8),
     DeleteSelected,
     Undo,
     Redo,
@@ -318,8 +328,13 @@ pub fn keyboard_actions(
                 (K::KeyL, UiAction::SetTool(Tool::Load)),
                 (K::Delete, UiAction::DeleteSelected),
                 (K::Backspace, UiAction::DeleteSelected),
-                (K::Digit1, UiAction::SetMaterial(BeamKind::ALL[0])),
-                (K::Digit2, UiAction::SetMaterial(BeamKind::ALL[1])),
+                (K::Digit1, UiAction::MaterialTab(0)),
+                (K::Digit2, UiAction::MaterialTab(1)),
+                (K::Digit3, UiAction::MaterialTab(2)),
+                (K::Digit4, UiAction::MaterialTab(3)),
+                (K::BracketLeft, UiAction::StepSize(-1)),
+                (K::BracketRight, UiAction::StepSize(1)),
+                (K::KeyG, UiAction::CycleGrade),
                 (K::KeyF, UiAction::FrameView),
                 (K::Tab, UiAction::CyclePlane),
                 (K::KeyE, UiAction::PlaneUp),
