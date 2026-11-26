@@ -29,10 +29,11 @@ laminate. S355, C24 and RC C30/37 equal the old default constructors.
 ## Costs
 
 `Prices::member(choice, length)` = mass × price per kg (by grade) + a cost
-per member end by joint type: pinned 20, dowelled 30, bolted 40, monolithic
-60, welded 80, rigid 80 (sandbox). Steel 2.3 to 2.9 per kg, timber 1.0 to
-1.8, concrete 0.22 to 0.3, RC 0.42 to 0.5, CFRP 25 to 30. Game values,
-agreed with the scenario thread's cost model.
+per member end by joint type, in installed kr (Sam's call): pinned 400,
+dowelled 600, bolted 800, monolithic 1 200, welded 1 600, rigid 1 600
+(sandbox). Per kg: steel 46 to 58, timber 20 to 36, concrete 4.4 to 6, RC
+8.4 to 10, CFRP 500 to 600. Kept consistent with the scenario crate's cost
+model.
 
 ## Sandbox limits
 
