@@ -11,6 +11,7 @@ members = [
     "crates/breakit-render",
     "crates/breakit-scenario",
     "crates/breakit-water",
+    "crates/breakit-water-gpu",
     "crates/breakit-water-render",
 ]
 

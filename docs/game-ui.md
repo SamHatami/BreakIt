@@ -65,6 +65,7 @@ and clicks (`ui/pointer.rs`) write the same actions.
 | C | clear to the sheet's start |
 | T | next play table (until sheets choose their own) |
 | F3 | frame-time read-out (hidden by default) |
+| F6 | water on the CPU / on the GPU (`docs/water.md`) |
 | Space | run test; in a test, pause |
 | , . | test slower / faster |
 | H | stress heatmap during a test |

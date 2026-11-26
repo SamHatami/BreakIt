@@ -98,6 +98,11 @@ fn update_readout(
     mut perf: ResMut<Perf>,
     render: Option<Res<RenderStats>>,
     lab: Res<LabStats>,
+    water: (
+        Res<crate::water::WaterBackend>,
+        Res<crate::water::WaterGpu>,
+        Option<Res<breakit_water_render::LiveWater>>,
+    ),
     mut text: Single<(&mut Text, &mut Visibility), With<PerfText>>,
 ) {
     if keys.just_pressed(KeyCode::F3) {
@@ -119,7 +124,7 @@ fn update_readout(
     };
     let visuals = render.map(|r| r.scene_update_ms).unwrap_or(0.0);
     let s = format!(
-        "{}\n{:.1} ms  {:.0} fps  worst {:.1} ms\nphysics {:.2} ms  visuals {:.2} ms\nlab {}k tris  {} meshes  {} lamps  table: {}\nquality: {} (F4)",
+        "{}\n{:.1} ms  {:.0} fps  worst {:.1} ms\nphysics {:.2} ms  visuals {:.2} ms\nlab {}k tris  {} meshes  {} lamps  table: {}\nquality: {} (F4)\n{}",
         crate::release::version_line(),
         avg,
         1000.0 / avg.max(1e-3),
@@ -131,6 +136,7 @@ fn update_readout(
         lab.point_lights,
         lab.table_name,
         lab.quality,
+        crate::water::status_line(*water.0, &water.1, water.2.as_deref()),
     );
     perf.since_log += dt;
     if perf.log && perf.since_log >= 1.0 {

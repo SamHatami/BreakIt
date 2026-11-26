@@ -15,4 +15,4 @@ pub use field::Field;
 pub use grid::Grid;
 pub use paddle::Program;
 pub use sim::{Drive, Droplet, FlumeSetup, WaterSim, Whitewater};
-pub use solver::{Boundary, Config, Side, Solver, StepStats};
+pub use solver::{Boundary, Config, FlowState, PressureSolver, Side, Solver, StepStats};

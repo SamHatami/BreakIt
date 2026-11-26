@@ -14,7 +14,7 @@
 - Building parts (catalog, standard sections, grades, costs, sandbox limits): `docs/parts.md`, data in `crates/breakit-parts/data/parts.ron`.
 - Member visuals (GPU deformation, damage looks, breaking, joints and node hubs): `docs/visuals.md`. `GpuMember` in `breakit-mesh` and `Member` in `breakit-render/src/member.wesl` must stay field-for-field identical.
 - Scenario loads (wind, quake, water, vehicles, impacts) and their rig hooks: `docs/loads.md`.
-- Simulated water (solver, forces from it, rendering, cost): `docs/water.md`. Engine-free solver in `breakit-water`, drawing in `breakit-water-render`.
+- Simulated water (solver, forces from it, rendering, cost): `docs/water.md`. Engine-free solver in `breakit-water`, drawing in `breakit-water-render`, the solver as GPU compute passes in `breakit-water-gpu` (`solver.wgsl` must stay in step with `Solver::substep`).
 - The visible load rigs (fan wall, shake actuators, wave paddle, model trucks, rig park) and the hero-model slots: `docs/rigs.md`.
 - The hall and play table: `docs/lab.md`. The structure is full size; the hall is drawn `model_scale` (20) times larger so the table reads as a 1:20 model.
 - Playground (free load bench, overlays, inspector, saved setups): `docs/playground.md`. Engine-free half in `breakit-playground`.
