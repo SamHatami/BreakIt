@@ -2,6 +2,8 @@
 //! into one sparse system per substep, solve it, and check the step against
 //! the true energy with a backtracking line search.
 
+use super::assemble::{AssembleSerial, BeamTerms, ComputeChunk};
+use super::pool::ordered_chunks;
 use super::*;
 
 /// Sufficient-decrease constant of the step check: accepts steps whose true
@@ -19,30 +21,29 @@ pub(super) struct DirectSystem {
     trans: Vec<Option<usize>>,
     rot: Vec<Option<usize>>,
     pub(super) lin: LinSolver,
-    rhs: Vec<f64>,
+    pub(super) rhs: Vec<f64>,
     delta: Vec<f64>,
     /// Scratch for the step check: body states before the step.
     base: Vec<(Vec3, UnitQuaternion<f64>)>,
-    /// Scratch for assembly: every beam's contribution.
+    /// Scratch for threaded assembly: every beam's contribution.
     terms: Vec<BeamTerms>,
 }
 
-/// One beam's contribution to the substep system.
-#[derive(Clone)]
-pub(super) struct BeamTerms {
-    live: bool,
-    energy: f64,
-    /// Elastic force on [x_a, φ_a, x_b, φ_b].
-    force: [f64; 12],
-    /// Packed lower triangle of the 12x12 stiffness block.
-    block: [f64; BLOCK_NNZ],
-}
-
-/// Beams per parallel work item.
+/// Beams per parallel work item, and per partial sum of the step check.
 pub(super) const PAR_CHUNK: usize = 64;
 
+/// Threaded assembly asks for one more thread per this many beams (about
+/// 0.2 ms of work), threaded step checks per [`OBJECTIVE_PER_HELPER`]
+/// (the same time: a beam's energy alone costs less than half its block).
+/// Waking a worker costs tens of microseconds on the calling thread, and
+/// members a worker has read are slower for this thread to write to in
+/// `update_material` afterwards, so more threads than this lose. Measured on
+/// a 4-core cloud machine with towers and bridges of 1,300 to 5,800 members.
+const ASSEMBLY_PER_HELPER: usize = 1024;
+const OBJECTIVE_PER_HELPER: usize = 2048;
+
 impl DirectSystem {
-    pub(super) fn new(bodies: &[Body], beams: &[Beam], backend: Backend) -> Option<Self> {
+    pub(super) fn new(bodies: &[Body], beams: &[Beam], config: &SimConfig) -> Option<Self> {
         let mut ndof = 0;
         let mut next = |free: bool| {
             free.then(|| {
@@ -60,23 +61,38 @@ impl DirectSystem {
             .iter()
             .map(|bm| [trans[bm.a], rot[bm.a], trans[bm.b], rot[bm.b]])
             .collect();
+        let mut lin = LinSolver::new(ndof, &blocks, config.linear_backend)?;
+        lin.set_simd(config.simd);
+        if config.parallel_min_members == usize::MAX {
+            lin.set_parallel_min_nodes(usize::MAX);
+        }
         Some(Self {
-            lin: LinSolver::new(ndof, &blocks, backend)?,
+            lin,
             trans,
             rot,
             rhs: vec![0.0; ndof],
             delta: vec![0.0; ndof],
             base: Vec::new(),
-            terms: vec![
-                BeamTerms {
-                    live: false,
-                    energy: 0.0,
-                    force: [0.0; 12],
-                    block: [0.0; BLOCK_NNZ],
-                };
-                beams.len()
-            ],
+            terms: Vec::new(),
         })
+    }
+
+    /// Subtract a beam's elastic force from the right-hand side.
+    #[inline(always)]
+    pub(super) fn add_force(&mut self, bm: &Beam, force: &[f64; 12]) {
+        let slots = [
+            self.trans[bm.a],
+            self.rot[bm.a],
+            self.trans[bm.b],
+            self.rot[bm.b],
+        ];
+        for (s, slot) in slots.iter().enumerate() {
+            if let Some(d) = slot {
+                for k3 in 0..3 {
+                    self.rhs[d + k3] -= force[s * 3 + k3];
+                }
+            }
+        }
     }
 }
 impl DynamicSim {
@@ -109,21 +125,27 @@ impl DynamicSim {
                 self.beam_energy(i, r)
             }
         };
+        // Summed per fixed-size chunk, then in chunk order, on one thread or
+        // many: the same result on any number of threads.
+        let n = self.beams.len();
+        let chunk = |c: usize| {
+            (c * PAR_CHUNK..((c + 1) * PAR_CHUNK).min(n))
+                .map(energy)
+                .sum::<f64>()
+        };
+        let chunks = n.div_ceil(PAR_CHUNK);
         if self.runs_parallel() {
-            // Summed per fixed-size chunk, then in chunk order: the same
-            // result on any number of threads.
-            let n = self.beams.len();
-            let parts: Vec<f64> = (0..n.div_ceil(PAR_CHUNK))
-                .into_par_iter()
-                .map(|c| {
-                    (c * PAR_CHUNK..((c + 1) * PAR_CHUNK).min(n))
-                        .map(energy)
-                        .sum::<f64>()
-                })
-                .collect();
-            phi += parts.iter().sum::<f64>();
+            let mut parts = vec![0.0; chunks];
+            let mut sum = 0.0;
+            ordered_chunks(
+                &mut parts,
+                n / OBJECTIVE_PER_HELPER,
+                |c, part| *part = chunk(c),
+                |_, part| sum += *part,
+            );
+            phi += sum;
         } else {
-            phi += (0..self.beams.len()).map(energy).sum::<f64>();
+            phi += (0..chunks).map(chunk).sum::<f64>();
         }
         phi
     }
@@ -174,79 +196,41 @@ impl DynamicSim {
             }
         }
         let r = self.plastic_ratio(h).0;
-        // Per-beam work has no shared state: compute every beam's block and
-        // forces (on several cores for large structures), then scatter in
-        // beam order so the result does not depend on the thread count.
-        let compute = |(i, out): (usize, &mut BeamTerms)| {
-            out.live = !self.beams[i].broken;
-            if !out.live {
-                return;
-            }
-            let (a, b) = (self.beams[i].a, self.beams[i].b);
-            let kb = &mut out.block;
-            *kb = [0.0; BLOCK_NNZ];
-            out.force = [0.0; 12];
-            let (terms, energy) = self.beam_constraints(i, r);
-            out.energy = energy;
-            for (f, k, g) in terms {
-                let flat: [f64; 12] = std::array::from_fn(|j| g[j / 3][j % 3]);
-                let mut t = 0;
-                for r in 0..12 {
-                    let kr = k * flat[r];
-                    out.force[r] += f * flat[r];
-                    for &fc in &flat[..=r] {
-                        kb[t] += kr * fc;
-                        t += 1;
-                    }
-                }
-            }
-            if self.config.tension_stiffness {
-                // Geometric stiffness of the axial force, (N/L)(I − e eᵀ) on
-                // the relative translation of the ends: the restoring force of
-                // a taut string. Tension only. Under compression the term is
-                // negative and could make the matrix indefinite; leaving it
-                // out there only makes the step slightly short.
-                let (n, e) = (terms[0].0, terms[0].2[2]);
-                if n > 0.0 {
-                    let gk = n / (self.bodies[b].x - self.bodies[a].x).norm();
-                    for r in 0..3 {
-                        for col in 0..=r {
-                            let v = gk * (if r == col { 1.0 } else { 0.0 } - e[r] * e[col]);
-                            kb[tri(r, col)] += v;
-                            kb[tri(6 + r, 6 + col)] += v;
-                            kb[tri(6 + r, col)] -= v;
-                            if r != col {
-                                kb[tri(6 + col, r)] -= v;
-                            }
+        let arch = self.config.simd.arch();
+        if self.runs_parallel() {
+            // Per-beam work has no shared state: the blocks and forces are
+            // computed in fixed chunks on whichever threads are there, and
+            // added to the system by this thread in beam order. The result
+            // does not depend on the thread count and is the single-thread
+            // result bit for bit.
+            let mut terms = std::mem::take(&mut sys.terms);
+            terms.resize(self.beams.len(), BeamTerms::EMPTY);
+            let mut chunks: Vec<&mut [BeamTerms]> = terms.chunks_mut(PAR_CHUNK).collect();
+            ordered_chunks(
+                &mut chunks,
+                self.beams.len() / ASSEMBLY_PER_HELPER,
+                |c, out| {
+                    arch.dispatch(ComputeChunk {
+                        sim: self,
+                        r,
+                        first: c * PAR_CHUNK,
+                        out,
+                    });
+                },
+                |c, out| {
+                    for (k, out) in out.iter().enumerate() {
+                        if out.live {
+                            let i = c * PAR_CHUNK + k;
+                            phi += out.energy;
+                            sys.add_force(&self.beams[i], &out.force);
+                            sys.lin.add_block(i, &out.block);
                         }
                     }
-                }
-            }
-        };
-        if self.runs_parallel() {
-            sys.terms
-                .par_iter_mut()
-                .enumerate()
-                .with_min_len(PAR_CHUNK)
-                .for_each(compute);
+                },
+            );
+            sys.terms = terms;
         } else {
-            sys.terms.iter_mut().enumerate().for_each(compute);
-        }
-        for (i, out) in sys.terms.iter().enumerate() {
-            if !out.live {
-                continue;
-            }
-            phi += out.energy;
-            let (a, b) = (self.beams[i].a, self.beams[i].b);
-            let slots = [sys.trans[a], sys.rot[a], sys.trans[b], sys.rot[b]];
-            for (s, slot) in slots.iter().enumerate() {
-                if let Some(d) = slot {
-                    for k3 in 0..3 {
-                        sys.rhs[d + k3] -= out.force[s * 3 + k3];
-                    }
-                }
-            }
-            sys.lin.add_block(i, &out.block);
+            phi += arch.dispatch(AssembleSerial { sim: self, r, sys });
         }
         sys.lin.stats.assembly_seconds += t0.elapsed().as_secs_f64();
         phi
@@ -283,12 +267,10 @@ impl DynamicSim {
     pub(super) fn solve_direct(&mut self, h: f64) {
         let mut sys = match self.direct.take() {
             Some(sys) => sys,
-            None => {
-                match DirectSystem::new(&self.bodies, &self.beams, self.config.linear_backend) {
-                    Some(sys) => sys,
-                    None => return,
-                }
-            }
+            None => match DirectSystem::new(&self.bodies, &self.beams, &self.config) {
+                Some(sys) => sys,
+                None => return,
+            },
         };
         let check = self.config.step_check;
         let policy = Policy {

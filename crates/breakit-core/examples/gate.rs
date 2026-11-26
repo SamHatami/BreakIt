@@ -11,9 +11,9 @@
 //!    factor in [`SIMD_GATES`]. A ratio measured on one machine in one run
 //!    holds up on shared CI runners where absolute times do not.
 //! 3. **Threads pay where they are on, and never change the answer.** The
-//!    iterative solver is run on 1, 2 and 4 threads: the result must be
-//!    bit-identical, and from the size where threads are on by default the
-//!    best threaded time must not be slower than one thread.
+//!    iterative solver and whole frames are run on 1, 2 and 4 threads: the
+//!    result must be bit-identical, and from the size where threads are on
+//!    by default the best threaded time must not be slower than one thread.
 //! 4. **The solver does no more work.** Short deterministic runs must stay
 //!    within their budgets of linear solves, CG iterations, factorisations
 //!    and step-check retries ([`WORK_BUDGETS`]), which catches algorithmic
@@ -31,9 +31,10 @@ use std::time::Instant;
 /// (kernel, least speed-up of native over scalar). The limits sit well
 /// under what was measured (see `docs/solver-spike.md`) so that only a
 /// kernel that stopped vectorising trips them.
-const SIMD_GATES: [(&str, f64); 2] = [
+const SIMD_GATES: [(&str, f64); 3] = [
     ("block Cholesky factorisation, tower 5x5x12", 1.3),
     ("block Jacobi solve, tower 8x8x16", 1.05),
+    ("element assembly, 20 frames of bridge 120 panels", 1.03),
 ];
 
 /// Threaded time over single-thread time may not exceed this where threads
@@ -117,6 +118,31 @@ fn jacobi_solve(case: &Case, level: SimdLevel, par_min_nodes: usize) -> (f64, Ve
     (t0.elapsed().as_secs_f64(), x)
 }
 
+/// `frames` elastic frames of `case` under its sideways push: seconds in
+/// assembly, seconds in all, and where the probe node ended up.
+fn run_frames(case: &Case, config: SimConfig, frames: usize) -> (f64, f64, Vec3) {
+    let s = &case.s;
+    let mut sim = DynamicSim::new(
+        s,
+        SimConfig {
+            damping: 8.0,
+            plasticity: false,
+            ..config
+        },
+    );
+    let push = case.push_dir * (0.2 * weight(s) / case.pushed.len() as f64);
+    for &n in &case.pushed {
+        sim.set_force(n, push);
+    }
+    let t0 = Instant::now();
+    for _ in 0..frames {
+        sim.step(1.0 / 60.0);
+    }
+    let total = t0.elapsed().as_secs_f64();
+    let assembly = sim.solver_stats().linear.assembly_seconds;
+    (assembly, total, sim.displacement(case.probe))
+}
+
 /// The least of `reps` timings of each of the two closures, interleaved so
 /// that a slow spell on a shared machine hits both.
 fn race(reps: usize, mut a: impl FnMut() -> f64, mut b: impl FnMut() -> f64) -> (f64, f64) {
@@ -148,6 +174,12 @@ fn main() {
     println!("\n| kernel | scalar ms | {native} ms | speed-up | required |");
     println!("|---|---|---|---|---|");
     let (tower_l, tower_xl) = (tower(5, 5, 12, 1), tower(8, 8, 16, 1));
+    let bridge_xl = bridge(120, 4);
+    let serial = |simd| SimConfig {
+        simd,
+        parallel_min_members: usize::MAX,
+        ..Default::default()
+    };
     let timings = [
         race(
             9,
@@ -158,6 +190,11 @@ fn main() {
             9,
             || jacobi_solve(&tower_xl, SimdLevel::Scalar, usize::MAX).0,
             || jacobi_solve(&tower_xl, SimdLevel::Native, usize::MAX).0,
+        ),
+        race(
+            5,
+            || run_frames(&bridge_xl, serial(SimdLevel::Scalar), 20).0,
+            || run_frames(&bridge_xl, serial(SimdLevel::Native), 20).0,
         ),
     ];
     for ((name, required), (scalar, simd)) in SIMD_GATES.into_iter().zip(timings) {
@@ -223,6 +260,57 @@ fn main() {
             failures.push(format!(
                 "{}: threads are on by default but cost {:.2} ms against {:.2} ms on one thread",
                 case.name, best_threaded, ms[0]
+            ));
+        }
+    }
+
+    // Whole frames with the default configuration, which threads assembly
+    // and the step check from `parallel_min_members` up.
+    println!("\n| 20 frames, ms per frame (assembly / all) | members | 1 thread | 2 threads | 4 threads |");
+    println!("|---|---|---|---|---|");
+    {
+        let case = &bridge_xl;
+        let (_, _, reference) = run_frames(case, serial(SimdLevel::Native), 20);
+        let mut ms = [(0.0, 0.0); 3];
+        for (t, threads) in ms.iter_mut().zip([1, 2, 4]) {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("a thread pool can be built");
+            let mut best = (f64::MAX, f64::MAX);
+            for _ in 0..3 {
+                let (assembly, total, probe) =
+                    pool.install(|| run_frames(case, SimConfig::default(), 20));
+                best = (best.0.min(assembly), best.1.min(total));
+                if probe != reference {
+                    failures.push(format!(
+                        "{}: frames on {threads} threads are not bit-identical to the single-thread path",
+                        case.name
+                    ));
+                }
+            }
+            *t = (best.0 * 1e3 / 20.0, best.1 * 1e3 / 20.0);
+        }
+        println!(
+            "| {} | {} | {:.2} / {:.2} | {:.2} / {:.2} | {:.2} / {:.2} |",
+            case.name,
+            case.s.members.len(),
+            ms[0].0,
+            ms[0].1,
+            ms[1].0,
+            ms[1].1,
+            ms[2].0,
+            ms[2].1
+        );
+        let best_threaded = if cores >= 4 {
+            ms[1].1.min(ms[2].1)
+        } else {
+            ms[1].1
+        };
+        if cores >= 2 && best_threaded > THREAD_SLACK * ms[0].1 {
+            failures.push(format!(
+                "{}: threads are on by default but a frame costs {:.2} ms against {:.2} ms on one thread",
+                case.name, best_threaded, ms[0].1
             ));
         }
     }
