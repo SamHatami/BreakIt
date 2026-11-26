@@ -2161,6 +2161,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "breakit-water"
+version = "0.1.0"
+dependencies = [
+ "breakit-core",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
