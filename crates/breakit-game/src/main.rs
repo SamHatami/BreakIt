@@ -18,6 +18,7 @@ mod flow;
 mod guides;
 mod history;
 mod perf;
+mod playground;
 mod release;
 mod render;
 mod rigs;
@@ -69,6 +70,7 @@ fn main() {
             capture::CapturePlugin,
             guides::GuidesPlugin,
             perf::PerfPlugin,
+            playground::PlaygroundPlugin,
             sound::SoundPlugin,
         ))
         .add_systems(Update, cycle_table.run_if(in_state(flow::Screen::Build)))

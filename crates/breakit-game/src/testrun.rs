@@ -111,8 +111,8 @@ fn record(
     mut outcome: ResMut<TestOutcome>,
 ) {
     let Some(sim) = sim else { return };
+    let Some(run) = sim.run() else { return };
     let s = sheets.current();
-    let run = sim.run();
     let t = run.time() as f32;
     let total = s.total_duration();
 

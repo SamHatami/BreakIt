@@ -69,7 +69,8 @@ fn draw_guides(
     let Some(sim) = sim.filter(|_| !building) else {
         return;
     };
-    for v in sim.run().vehicles() {
+    let Some(run) = sim.run() else { return };
+    for v in run.vehicles() {
         let length = match (v.wheels.first(), v.wheels.last()) {
             (Some(a), Some(b)) => (a.contact - b.contact).norm() as f32,
             _ => 0.0,

@@ -16,4 +16,5 @@
 - Scenario loads (wind, quake, water, vehicles, impacts) and their rig hooks: `docs/loads.md`.
 - The visible load rigs (fan wall, shake actuators, wave paddle, model trucks, rig park) and the hero-model slots: `docs/rigs.md`.
 - The hall and play table: `docs/lab.md`. The structure is full size; the hall is drawn `model_scale` (20) times larger so the table reads as a 1:20 model.
+- Playground (free load bench, overlays, inspector, saved setups): `docs/playground.md`. Engine-free half in `breakit-playground`.
 - Sound: `docs/audio.md`. Synthesised in `breakit-audio` (no sample files); the game only sends commands from `breakit-game/src/sound.rs`.

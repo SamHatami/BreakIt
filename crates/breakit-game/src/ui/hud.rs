@@ -1208,7 +1208,7 @@ pub fn update_test_readouts(
         build_chart(&mut commands, area, s);
         return;
     }
-    let t = sim.map(|s| s.run().time() as f32).unwrap_or(0.0);
+    let t = sim.map(|s| s.time() as f32).unwrap_or(0.0);
     for mut tx in &mut time_text {
         let v = format!("{t:05.2}");
         if tx.0 != v {

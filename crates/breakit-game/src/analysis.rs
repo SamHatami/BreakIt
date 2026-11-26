@@ -9,6 +9,7 @@
 use bevy::prelude::*;
 use breakit_core::{solve_static, Block, BreakCause, DynamicSim, Ground, NodeLoad, SimConfig};
 use breakit_lab::PlayTable;
+use breakit_playground::Live;
 use breakit_scenario::TestRun;
 
 use crate::design::{from_core, to_core, Design};
@@ -120,22 +121,80 @@ pub const SPEEDS: [f32; 5] = [0.125, 0.25, 0.5, 1.0, 2.0];
 /// Gravity used everywhere, m/s^2.
 pub const GRAVITY: f32 = 9.81;
 
-/// Live real-time simulation, present only in a test and its report: the
-/// sheet's graded [`TestRun`], which applies the scenario's loads (and in
-/// the sandbox the player's own).
+/// Live real-time simulation, present only in a test and its report or in
+/// the playground: the sheet's graded [`TestRun`], which applies the
+/// scenario's loads (and in the sandbox the player's own), or the
+/// playground's free load bench.
 #[derive(Resource)]
 pub struct Simulation {
-    run: Box<TestRun>,
+    driver: Driver,
     seen_breaks: usize,
 }
 
+enum Driver {
+    Test(Box<TestRun>),
+    Playground(Box<Live>),
+}
+
 impl Simulation {
-    pub fn sim(&self) -> &DynamicSim {
-        self.run.sim()
+    /// A playground run.
+    pub fn playground(live: Live) -> Self {
+        Self {
+            driver: Driver::Playground(Box::new(live)),
+            seen_breaks: 0,
+        }
     }
 
-    pub fn run(&self) -> &TestRun {
-        &self.run
+    pub fn sim(&self) -> &DynamicSim {
+        match &self.driver {
+            Driver::Test(r) => r.sim(),
+            Driver::Playground(l) => l.sim(),
+        }
+    }
+
+    /// The graded test run; `None` in the playground.
+    pub fn run(&self) -> Option<&TestRun> {
+        match &self.driver {
+            Driver::Test(r) => Some(r),
+            Driver::Playground(_) => None,
+        }
+    }
+
+    /// The playground run; `None` in a test.
+    pub fn live(&self) -> Option<&Live> {
+        match &self.driver {
+            Driver::Playground(l) => Some(l),
+            Driver::Test(_) => None,
+        }
+    }
+
+    pub fn live_mut(&mut self) -> Option<&mut Live> {
+        match &mut self.driver {
+            Driver::Playground(l) => Some(l),
+            Driver::Test(_) => None,
+        }
+    }
+
+    /// Simulated time, s.
+    pub fn time(&self) -> f64 {
+        match &self.driver {
+            Driver::Test(r) => r.time(),
+            Driver::Playground(l) => l.time(),
+        }
+    }
+
+    fn is_done(&self) -> bool {
+        match &self.driver {
+            Driver::Test(r) => r.is_done(),
+            Driver::Playground(_) => false,
+        }
+    }
+
+    fn step(&mut self, dt: f64) {
+        match &mut self.driver {
+            Driver::Test(r) => r.step(dt),
+            Driver::Playground(l) => l.step(dt),
+        }
     }
 }
 
@@ -245,7 +304,7 @@ fn start_simulation(
         ..Default::default()
     };
     commands.insert_resource(Simulation {
-        run: Box::new(run),
+        driver: Driver::Test(Box::new(run)),
         seen_breaks: 0,
     });
 }
@@ -258,7 +317,7 @@ fn stop_simulation(mut commands: Commands, mut state: ResMut<FrameState>) {
 
 /// Fixed physics step. The sim advances in 1/60 s steps however fast the
 /// game renders, catching up at most a few steps per frame.
-const SIM_DT: f64 = 1.0 / 60.0;
+pub const SIM_DT: f64 = 1.0 / 60.0;
 
 fn step_simulation(
     time: Res<Time>,
@@ -276,11 +335,11 @@ fn step_simulation(
     };
     *acc = (*acc + dt).min(8.0 * SIM_DT);
     while *acc >= SIM_DT {
-        if sim.run.is_done() {
+        if sim.is_done() {
             *acc = 0.0;
             break;
         }
-        sim.run.step(SIM_DT);
+        sim.step(SIM_DT);
         *acc -= SIM_DT;
     }
 
