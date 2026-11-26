@@ -98,6 +98,7 @@ impl LabQuality {
                 lamp_lights: 6,
                 lamp_shadows: 0,
                 reflections: 32,
+                surface_detail: false,
             },
             LabQuality::Medium => Look {
                 anti_alias: AntiAlias::Smaa,
@@ -111,6 +112,7 @@ impl LabQuality {
                 lamp_lights: 12,
                 lamp_shadows: 0,
                 reflections: 64,
+                surface_detail: true,
             },
             LabQuality::High => Look {
                 anti_alias: AntiAlias::Smaa,
@@ -124,6 +126,7 @@ impl LabQuality {
                 lamp_lights: 20,
                 lamp_shadows: 4,
                 reflections: 128,
+                surface_detail: true,
             },
             LabQuality::Ultra => Look {
                 anti_alias: AntiAlias::Taa,
@@ -137,6 +140,7 @@ impl LabQuality {
                 lamp_lights: 20,
                 lamp_shadows: 8,
                 reflections: 256,
+                surface_detail: true,
             },
         }
     }
@@ -180,6 +184,9 @@ pub struct Look {
     /// Edge of the reflection cube map, texels. 0 falls back to flat
     /// ambient light and no reflections.
     pub reflections: usize,
+    /// Procedural surfaces (worn concrete, grime, spangle, foam cells,
+    /// moving water). Off, the same materials are drawn plain.
+    pub surface_detail: bool,
 }
 
 /// Marks what [`light_hall`] spawned.

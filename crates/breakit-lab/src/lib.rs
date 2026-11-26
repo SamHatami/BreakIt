@@ -19,6 +19,7 @@ pub mod look;
 pub mod palette;
 pub mod props;
 pub mod scenery;
+pub mod surface;
 pub mod table;
 
 use std::collections::BTreeMap;
@@ -32,6 +33,7 @@ pub use hall::HallSpec;
 pub use look::{AntiAlias, LabQuality, Look, HALL_LAYER};
 pub use palette::Mat;
 pub use scenery::{Anchor, Scenery};
+pub use surface::{LabMaterial, LabSurface, LabWater, SurfaceKind};
 pub use table::{Flat, Flume, PlayTable, Ravine, ShakeTable, TableInsert, TableTop};
 
 #[derive(Resource, Clone, Debug)]
@@ -155,7 +157,9 @@ impl Plugin for LabPlugin {
             .init_resource::<LabAnchors>()
             .init_resource::<look::LabEnvironment>()
             .init_resource::<GlobalAmbientLight>()
-            .add_systems(Startup, spawn_hall)
+            .add_systems(Startup, spawn_hall);
+        surface::build(app);
+        app
             .add_systems(
                 Update,
                 (
@@ -178,28 +182,61 @@ struct HallPart;
 #[derive(Component)]
 struct TablePart;
 
-#[derive(Resource)]
-struct LabMaterials(BTreeMap<Mat, Handle<StandardMaterial>>);
+/// A scenery material: procedural where the material has a look, plain
+/// `StandardMaterial` otherwise.
+#[derive(Clone)]
+enum LabHandle {
+    Plain(Handle<StandardMaterial>),
+    Surface(Handle<LabMaterial>),
+}
 
-fn material_handle(
-    cache: &mut LabMaterials,
-    materials: &mut Assets<StandardMaterial>,
-    mat: Mat,
-) -> Handle<StandardMaterial> {
-    cache
-        .0
-        .entry(mat)
-        .or_insert_with(|| {
-            let mut m = palette::material(mat);
+/// One material per (scenery material, on the table or in the hall).
+#[derive(Resource, Default)]
+struct LabMaterials(BTreeMap<(Mat, bool), LabHandle>);
+
+#[derive(bevy::ecs::system::SystemParam)]
+struct MaterialMaker<'w> {
+    plain: ResMut<'w, Assets<StandardMaterial>>,
+    surfaces: ResMut<'w, Assets<LabMaterial>>,
+    settings: Res<'w, LabSettings>,
+    water: Res<'w, LabWater>,
+}
+
+impl MaterialMaker<'_> {
+    fn handle(&mut self, cache: &mut LabMaterials, mat: Mat, on_table: bool) -> LabHandle {
+        if let Some(h) = cache.0.get(&(mat, on_table)) {
+            return h.clone();
+        }
+        let double_sided = |m: &mut StandardMaterial| {
             if !palette::blended(mat) {
                 // Scenery quads are not wound consistently on purpose: it
                 // is cheaper to draw both sides than to care.
                 m.double_sided = true;
                 m.cull_mode = None;
             }
-            materials.add(m)
-        })
-        .clone()
+        };
+        let h = match surface::kind_of(mat) {
+            Some(kind) => {
+                let mut m = surface::lab_material(mat, kind, on_table, &self.settings, &self.water);
+                double_sided(&mut m.base);
+                LabHandle::Surface(self.surfaces.add(m))
+            }
+            None => {
+                let mut m = palette::material(mat);
+                double_sided(&mut m);
+                LabHandle::Plain(self.plain.add(m))
+            }
+        };
+        cache.0.insert((mat, on_table), h.clone());
+        h
+    }
+}
+
+fn insert_material(e: &mut EntityCommands, h: LabHandle) {
+    match h {
+        LabHandle::Plain(h) => e.insert(MeshMaterial3d(h)),
+        LabHandle::Surface(h) => e.insert(MeshMaterial3d(h)),
+    };
 }
 
 /// The hall and its dressing, in lab metres.
@@ -213,7 +250,7 @@ fn spawn_hall(
     mut commands: Commands,
     settings: Res<LabSettings>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut maker: MaterialMaker,
     mut stats: ResMut<LabStats>,
 ) {
     let t0 = Instant::now();
@@ -229,7 +266,7 @@ fn spawn_hall(
             .collect(),
     ));
 
-    let mut cache = LabMaterials(BTreeMap::new());
+    let mut cache = LabMaterials::default();
     let k = settings.model_scale;
     let root = Transform {
         translation: -settings.lab_origin() * k,
@@ -240,9 +277,9 @@ fn spawn_hall(
         if buf.is_empty() {
             continue;
         }
-        commands.spawn((
+        let material = maker.handle(&mut cache, mat, false);
+        let mut e = commands.spawn((
             Mesh3d(meshes.add(buf.into_mesh())),
-            MeshMaterial3d(material_handle(&mut cache, &mut materials, mat)),
             root,
             // Seen by lab cameras, and it casts in the lamps' shadow maps
             // but not in the daylight's (see `look::HALL_LAYER`).
@@ -250,6 +287,7 @@ fn spawn_hall(
             HallPart,
             Name::new(format!("lab {mat:?}")),
         ));
+        insert_material(&mut e, material);
     }
     commands.insert_resource(cache);
 }
@@ -261,7 +299,7 @@ fn rebuild_table(
     settings: Res<LabSettings>,
     parts: Query<Entity, With<TablePart>>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut maker: MaterialMaker,
     cache: Option<ResMut<LabMaterials>>,
     mut stats: ResMut<LabStats>,
 ) {
@@ -284,13 +322,14 @@ fn rebuild_table(
         if buf.is_empty() {
             continue;
         }
+        let material = maker.handle(&mut cache, mat, true);
         let mut e = commands.spawn((
             Mesh3d(meshes.add(buf.into_mesh())),
-            MeshMaterial3d(material_handle(&mut cache, &mut materials, mat)),
             Transform::IDENTITY,
             TablePart,
             Name::new(format!("table {mat:?}")),
         ));
+        insert_material(&mut e, material);
         if palette::blended(mat) {
             e.insert(NotShadowCaster);
         }
