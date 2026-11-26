@@ -57,7 +57,7 @@ Both take `--capture <dir> [--at t1,t2,...] [--view close]` for headless screens
 
 ## Open points
 
-- Collapsed parts fall through the ground: the solver has no ground contact for nodes. Debris and particles do land.
+- Nodes land on the ground and table (`docs/contact.md`), but broken halves hang rigidly from their node and can poke into the ground.
 - Each debris chunk has its own mesh (not instanced). Fine at the default cap of 2,000 pieces; pre-generate a chunk library if that ever shows up in a profile.
 - No level of detail yet. A third, coarser template for distant members is a small change in `sync_instances`.
 - Joints (gusset plates, bolts, node hubs) are not drawn; the game still draws its node spheres.

@@ -19,6 +19,7 @@
 //! The crate has no game-engine dependency on purpose.
 
 pub mod concrete;
+pub mod contact;
 pub mod damage;
 pub mod dynamics;
 pub mod frame;
@@ -28,6 +29,7 @@ pub mod model;
 pub mod section;
 pub mod statics;
 
+pub use contact::{Block, ContactEvent, Ground};
 pub use damage::{DamageState, MemberDamage};
 pub use dynamics::{BreakCause, BreakEvent, DynamicSim, SimConfig, Solver, SolverStats};
 pub use material::{Material, MaterialKind};
