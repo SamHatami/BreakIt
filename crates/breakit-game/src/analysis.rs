@@ -7,9 +7,11 @@
 //! render code.
 
 use bevy::prelude::*;
-use breakit_core::{solve_static, BreakCause, DynamicSim, SimConfig};
+use breakit_core::{solve_static, BreakCause, DynamicSim, NodeLoad, SimConfig};
 
 use crate::design::{from_core, to_core, Design};
+use crate::flow::Screen;
+use crate::scenario::Sheets;
 use crate::Mode;
 
 pub struct AnalysisPlugin;
@@ -25,6 +27,7 @@ impl Plugin for AnalysisPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FrameState>()
             .init_resource::<DeflectionScale>()
+            .init_resource::<SimClock>()
             .add_systems(
                 Update,
                 (
@@ -33,7 +36,7 @@ impl Plugin for AnalysisPlugin {
                 )
                     .in_set(BreakitSet::Physics),
             )
-            .add_systems(OnEnter(Mode::Simulate), start_simulation)
+            .add_systems(OnEnter(Screen::Test), start_simulation)
             .add_systems(OnExit(Mode::Simulate), stop_simulation);
     }
 }
@@ -60,6 +63,9 @@ pub struct FrameState {
     pub error: Option<String>,
     /// Largest real (unscaled) displacement, metres.
     pub max_displacement: f32,
+    /// Real (unscaled) static displacement per node; empty when unsolved or
+    /// simulating.
+    pub displacements: Vec<Vec3>,
     /// Break messages in the order they happened.
     pub log: Vec<String>,
     /// Design revision this state was computed for.
@@ -74,10 +80,6 @@ impl FrameState {
             .map(|m| m.utilization)
             .fold(0.0, f32::max)
     }
-
-    pub fn broken_count(&self) -> usize {
-        self.members.iter().filter(|m| m.broken).count()
-    }
 }
 
 /// Visual exaggeration of static deflections in build mode.
@@ -90,6 +92,26 @@ impl Default for DeflectionScale {
     }
 }
 
+/// How fast the test runs: a multiple of real time, or paused. Set by the
+/// test-run controls and by the automatic slow motion on a first break.
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+pub struct SimClock {
+    pub speed: f32,
+    pub paused: bool,
+}
+
+impl Default for SimClock {
+    fn default() -> Self {
+        Self {
+            speed: 1.0,
+            paused: false,
+        }
+    }
+}
+
+/// Speeds the slower / faster keys step through.
+pub const SPEEDS: [f32; 5] = [0.125, 0.25, 0.5, 1.0, 2.0];
+
 /// Gravity used everywhere, m/s^2.
 pub const GRAVITY: f32 = 9.81;
 
@@ -100,21 +122,34 @@ pub struct Simulation {
     seen_breaks: usize,
 }
 
-/// Computes the static response of the design when it, or the deflection
-/// scale, changes.
+/// Computes the static response of the design when it, the sheet, or the
+/// deflection scale changes. On a sheet, the check previews its heaviest
+/// load case.
 pub fn static_analysis(
     design: Res<Design>,
     scale: Res<DeflectionScale>,
+    sheets: Res<Sheets>,
     mut state: ResMut<FrameState>,
 ) {
-    if state.revision == Some(design.revision) && !scale.is_changed() {
+    if state.revision == Some(design.revision) && !scale.is_changed() && !sheets.is_changed() {
         return;
     }
-    *state = compute_static(&design, scale.0);
+    let s = sheets.current();
+    let extra: Vec<NodeLoad> = s
+        .heaviest_case()
+        .map(|c| {
+            s.case_forces(c)
+                .into_iter()
+                .filter(|(n, f)| *n < design.nodes.len() && *f != Vec3::ZERO)
+                .map(|(n, f)| NodeLoad::force(n, to_core(f)))
+                .collect()
+        })
+        .unwrap_or_default();
+    *state = compute_static(&design, scale.0, &extra);
 }
 
-/// Pure static analysis: self weight plus the player's loads.
-pub fn compute_static(design: &Design, scale: f32) -> FrameState {
+/// Pure static analysis: self weight, the player's loads and `extra`.
+pub fn compute_static(design: &Design, scale: f32, extra: &[NodeLoad]) -> FrameState {
     let mut state = FrameState {
         positions: design.nodes.clone(),
         members: vec![MemberState::default(); design.beams.len()],
@@ -127,10 +162,12 @@ pub fn compute_static(design: &Design, scale: f32) -> FrameState {
     let structure = design.to_structure();
     let mut loads = structure.self_weight_loads(GRAVITY as f64);
     loads.extend(design.node_loads());
+    loads.extend_from_slice(extra);
     match solve_static(&structure, &loads) {
         Ok(r) => {
+            state.displacements = r.displacements.iter().map(|&d| from_core(d)).collect();
             for (i, p) in state.positions.iter_mut().enumerate() {
-                let u = from_core(r.displacements[i]);
+                let u = state.displacements[i];
                 state.max_displacement = state.max_displacement.max(u.length());
                 *p += u * scale;
             }
@@ -144,18 +181,22 @@ pub fn compute_static(design: &Design, scale: f32) -> FrameState {
     state
 }
 
-fn start_simulation(mut commands: Commands, design: Res<Design>, mut state: ResMut<FrameState>) {
+fn start_simulation(
+    mut commands: Commands,
+    design: Res<Design>,
+    mut state: ResMut<FrameState>,
+    mut clock: ResMut<SimClock>,
+) {
+    *clock = SimClock::default();
     let structure = design.to_structure();
-    let mut sim = DynamicSim::new(
+    let sim = DynamicSim::new(
         &structure,
         SimConfig {
             gravity: to_core(Vec3::new(0.0, -GRAVITY, 0.0)),
             ..Default::default()
         },
     );
-    for l in design.node_loads() {
-        sim.set_force(l.node, l.force);
-    }
+    // Loads are applied per load case by `testrun`.
     *state = FrameState {
         positions: design.nodes.clone(),
         members: vec![MemberState::default(); design.beams.len()],
@@ -180,13 +221,19 @@ const SIM_DT: f64 = 1.0 / 60.0;
 
 fn step_simulation(
     time: Res<Time>,
+    clock: Res<SimClock>,
     mut acc: Local<f64>,
     sim: Option<ResMut<Simulation>>,
     design: Res<Design>,
     mut state: ResMut<FrameState>,
 ) {
     let Some(mut sim) = sim else { return };
-    *acc = (*acc + time.delta_secs_f64()).min(4.0 * SIM_DT);
+    let dt = if clock.paused {
+        0.0
+    } else {
+        time.delta_secs_f64() * clock.speed as f64
+    };
+    *acc = (*acc + dt).min(8.0 * SIM_DT);
     while *acc >= SIM_DT {
         sim.sim.step(SIM_DT);
         *acc -= SIM_DT;
@@ -219,7 +266,7 @@ fn step_simulation(
     state.log.extend(new);
 }
 
-fn cause_label(c: &BreakCause) -> String {
+pub fn cause_label(c: &BreakCause) -> String {
     format!("{c:?}").to_lowercase()
 }
 
@@ -231,7 +278,7 @@ mod tests {
     #[test]
     fn static_state_reports_utilization_and_sag() {
         let d = Design::starter_bridge();
-        let s = compute_static(&d, 1.0);
+        let s = compute_static(&d, 1.0, &[]);
         assert!(s.error.is_none(), "{:?}", s.error);
         assert_eq!(s.members.len(), d.beams.len());
         assert!(s.max_utilization() > 0.0);
@@ -250,7 +297,7 @@ mod tests {
         let a = d.add_node(Vec3::ZERO);
         let b = d.add_node(Vec3::X);
         d.add_beam(a, b, BeamKind::SteelTube);
-        let s = compute_static(&d, 1.0);
+        let s = compute_static(&d, 1.0, &[]);
         assert!(s.error.is_some());
     }
 

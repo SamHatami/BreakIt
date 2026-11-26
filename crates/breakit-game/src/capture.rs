@@ -1,7 +1,12 @@
-//! Scripted capture for headless checks: set `BREAKIT_CAPTURE=<dir>` and the
-//! game screenshots build mode, switches to simulate, screenshots again and
-//! exits. Used by agents and CI to see the game without a person at the
-//! screen, e.g. `xvfb-run cargo run -p breakit-game`.
+//! Scripted capture for headless checks: set `BREAKIT_CAPTURE=<dir>` and
+//! the game walks the whole loop on its own (register, brief, build a
+//! truss on sheet B-02, test, report), saves a screenshot of each screen
+//! and exits. Used by agents and CI to see the game without a person at
+//! the screen, e.g. `xvfb-run cargo run -p breakit-game`.
+//!
+//! `BREAKIT_THEME=1` starts with the second theme preset, for comparing
+//! looks. `BREAKIT_TRUSS=steel` builds the web in steel instead of timber;
+//! `BREAKIT_TRUSS=weak` lays a bare timber plank instead, which breaks.
 
 use std::path::PathBuf;
 
@@ -9,15 +14,28 @@ use bevy::app::AppExit;
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 
-use crate::Mode;
+use crate::analysis::Simulation;
+use crate::build::BuildTool;
+use crate::design::{BeamKind, Design};
+use crate::flow::{Revision, Revisions, Screen, UiAction};
+use crate::scenario::{Sheets, TestRecord};
+use crate::ui::theme::Themes;
 
 pub struct CapturePlugin;
 
 impl Plugin for CapturePlugin {
     fn build(&self, app: &mut App) {
+        if let Ok(theme) = std::env::var("BREAKIT_THEME") {
+            if let Ok(i) = theme.parse::<usize>() {
+                let mut t = Themes::default();
+                t.active = i.min(t.presets.len() - 1);
+                app.insert_resource(t);
+            }
+        }
         if let Ok(dir) = std::env::var("BREAKIT_CAPTURE") {
+            let _ = std::fs::create_dir_all(&dir);
             app.insert_resource(CaptureDir(PathBuf::from(dir)))
-                .add_systems(Update, capture_script);
+                .add_systems(Last, capture_script);
         }
     }
 }
@@ -25,34 +43,138 @@ impl Plugin for CapturePlugin {
 #[derive(Resource)]
 struct CaptureDir(PathBuf);
 
-/// Frames to wait before the build shot (shaders compile on first frames).
-const BUILD_SHOT: u32 = 90;
-/// Frames of simulation before the second shot.
-const SIM_SHOT: u32 = BUILD_SHOT + 180;
+#[derive(Default)]
+struct Script {
+    frame: u32,
+    /// Frame the current step started on.
+    since: u32,
+    step: u32,
+}
 
+#[allow(clippy::too_many_arguments)]
 fn capture_script(
     mut commands: Commands,
     dir: Res<CaptureDir>,
-    mut frame: Local<u32>,
-    mut next: ResMut<NextState<Mode>>,
+    mut s: Local<Script>,
+    screen: Res<State<Screen>>,
+    sheets: Res<Sheets>,
+    mut revisions: ResMut<Revisions>,
+    mut design: ResMut<Design>,
+    mut tool: ResMut<BuildTool>,
+    rec: Res<TestRecord>,
+    sim: Option<Res<Simulation>>,
+    mut actions: MessageWriter<UiAction>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    *frame += 1;
+    s.frame += 1;
+    let waited = s.frame - s.since;
     let shot = |commands: &mut Commands, name: &str| {
         let path = dir.0.join(name);
         commands
             .spawn(Screenshot::primary_window())
             .observe(save_to_disk(path));
     };
-    match *frame {
-        BUILD_SHOT => {
-            shot(&mut commands, "build.png");
-            next.set(Mode::Simulate);
+    let advance = |s: &mut Script| {
+        s.step += 1;
+        s.since = s.frame;
+    };
+    match s.step {
+        // Shaders compile on the first frames.
+        0 if waited >= 90 => {
+            // Pretend B-01 passed so B-02 is open, and select it.
+            revisions.push(
+                sheets.all[0].id,
+                Revision {
+                    letter: 'A',
+                    passed: true,
+                    held: 7.0,
+                    cost: 3_900.0,
+                },
+            );
+            actions.write(UiAction::SelectSheet(1));
+            advance(&mut s);
         }
-        SIM_SHOT => shot(&mut commands, "simulate.png"),
-        f if f == SIM_SHOT + 30 => {
+        1 if waited >= 20 => {
+            shot(&mut commands, "1-register.png");
+            advance(&mut s);
+        }
+        2 if waited >= 10 => {
+            actions.write(UiAction::OpenBrief);
+            advance(&mut s);
+        }
+        3 if waited >= 30 && *screen.get() == Screen::Brief => {
+            shot(&mut commands, "2-brief.png");
+            actions.write(UiAction::StartBuild);
+            advance(&mut s);
+        }
+        4 if waited >= 20 && *screen.get() == Screen::Build => {
+            let (chord, web) = match std::env::var("BREAKIT_TRUSS").as_deref() {
+                Ok("steel") => (BeamKind::SteelTube, BeamKind::SteelTube),
+                _ => (BeamKind::SteelTube, BeamKind::Timber),
+            };
+            if std::env::var("BREAKIT_TRUSS").as_deref() == Ok("weak") {
+                build_plank(&mut design);
+            } else {
+                build_truss(&mut design, chord, web);
+            }
+            tool.selected_beam = Some(design.beams.len() - 1);
+            advance(&mut s);
+        }
+        5 if waited >= 40 => {
+            shot(&mut commands, "3-build.png");
+            advance(&mut s);
+        }
+        6 if waited >= 10 => {
+            actions.write(UiAction::RunTest);
+            advance(&mut s);
+        }
+        7 => {
+            let t = sim.map(|s| s.sim.time()).unwrap_or(0.0);
+            let after_break = rec.first_break.is_some_and(|b| t > b as f64 + 0.15);
+            if *screen.get() == Screen::Test && (after_break || t > 7.0) {
+                shot(&mut commands, "4-test.png");
+                advance(&mut s);
+            }
+        }
+        8 if *screen.get() == Screen::Report => advance(&mut s),
+        9 if waited >= 30 => {
+            shot(&mut commands, "5-report.png");
+            advance(&mut s);
+        }
+        10 if waited >= 30 => {
             exit.write(AppExit::Success);
         }
         _ => {}
+    }
+}
+
+/// A Warren truss over sheet B-02's 6 m span: `chord` top and bottom,
+/// `web` diagonals.
+fn build_truss(d: &mut Design, chord: BeamKind, web: BeamKind) {
+    let bottom: Vec<usize> = (-3..=3)
+        .map(|x| d.add_node(Vec3::new(x as f32, 0.0, 0.0)))
+        .collect();
+    let top: Vec<usize> = (-3..3)
+        .map(|x| d.add_node(Vec3::new(x as f32 + 0.5, 1.0, 0.0)))
+        .collect();
+    for w in bottom.windows(2) {
+        d.add_beam(w[0], w[1], chord);
+    }
+    for w in top.windows(2) {
+        d.add_beam(w[0], w[1], chord);
+    }
+    for (i, &t) in top.iter().enumerate() {
+        d.add_beam(bottom[i], t, web);
+        d.add_beam(t, bottom[i + 1], web);
+    }
+}
+
+/// A bare timber plank across the span, which breaks under the vehicles.
+fn build_plank(d: &mut Design) {
+    let nodes: Vec<usize> = (-3..=3)
+        .map(|x| d.add_node(Vec3::new(x as f32, 0.0, 0.0)))
+        .collect();
+    for w in nodes.windows(2) {
+        d.add_beam(w[0], w[1], BeamKind::Timber);
     }
 }

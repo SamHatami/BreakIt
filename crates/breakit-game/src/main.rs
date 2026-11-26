@@ -1,21 +1,29 @@
 //! BreakIt game shell.
 //!
-//! Build a frame in build mode (live static check, beams coloured by
-//! utilisation), then press Space to run it in the real-time solver and
-//! watch it hold or break.
+//! Pick a sheet in the test register, read the brief, build a structure
+//! (live static check, beams coloured by utilisation), run the test in the
+//! real-time solver, read the report, revise. See `flow.rs` for the loop
+//! and `ui/` for the screens.
 
 mod analysis;
 mod build;
 mod camera;
 mod capture;
 mod design;
-mod hud;
+mod flow;
+mod history;
 mod render;
+mod scenario;
+mod testrun;
+mod ui;
 mod visuals;
 
 use bevy::prelude::*;
 
-#[derive(States, Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Which physics runs: the static check while building (and behind the
+/// register and brief), the real-time solver in a test and its report.
+/// Computed from [`flow::Screen`].
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Mode {
     #[default]
     Build,
@@ -32,31 +40,17 @@ fn main() {
             ..default()
         }))
         .insert_resource(ClearColor(Color::srgb(0.1, 0.11, 0.13)))
-        .insert_resource(design::Design::starter_bridge())
-        .init_state::<Mode>()
+        .insert_resource(design::Design::default())
         .add_plugins((
+            flow::FlowPlugin,
             camera::OrbitCameraPlugin,
             build::BuildPlugin,
             analysis::AnalysisPlugin,
+            testrun::TestRunPlugin,
             render::FrameRenderPlugin,
             visuals::VisualsPlugin,
-            hud::HudPlugin,
+            ui::GameUiPlugin,
             capture::CapturePlugin,
         ))
-        .add_systems(Update, toggle_mode)
         .run();
-}
-
-fn toggle_mode(
-    keys: Res<ButtonInput<KeyCode>>,
-    mode: Res<State<Mode>>,
-    mut next: ResMut<NextState<Mode>>,
-) {
-    match mode.get() {
-        Mode::Build if keys.just_pressed(KeyCode::Space) => next.set(Mode::Simulate),
-        Mode::Simulate if keys.any_just_pressed([KeyCode::Space, KeyCode::KeyR]) => {
-            next.set(Mode::Build)
-        }
-        _ => {}
-    }
 }
