@@ -126,6 +126,23 @@ Same benchmark, tower 5x5x12 and bridge 60 panels, elastic mean ms/frame, by sta
 
 Where the time goes now (tower 5x5x12, elastic, per frame): assembly 2.1 ms, solves 2.9 ms, factorisation 0.2 ms, everything else (integration, step-check objective, material update) about 0.6 ms.
 
+## Second linear backend: block-Jacobi CG, picked per structure
+
+A side study of factorisation-free solvers found that conjugate gradients preconditioned by each node's 6x6 block, warm-started from the previous solve, beats sparse Cholesky on 3D frames (whose factors fill in heavily) and loses on chain-like bridges (ill-conditioned along the span, 60 to 160 iterations in a collapse). `linsolve::Backend::Auto` (the default, `SimConfig::linear_backend`) therefore picks by the fill of the factorisation: block Jacobi when a factorisation costs more than 12 triangular-solve pairs in flops, Cholesky otherwise. In the bench that sends the three larger towers to block Jacobi and every bridge to Cholesky. The default `linear_tolerance` is now 1e-4: settled displacements and break counts in the bench are the same as at 1e-6.
+
+Elastic / collapse mean ms per frame (collapse max in brackets), 4 substeps, single thread:
+
+| Structure | Members | Cholesky backend | Block Jacobi backend | Auto picks |
+| --- | --- | --- | --- | --- |
+| tower 3x3x8 | 368 | 1.5 / 2.2 (7.0) | 1.5 / 1.4 (4.7) | Jacobi |
+| tower 5x5x12 | 1,272 | 5.5 / 9.5 (20) | 5.6 / 5.0 (16) | Jacobi |
+| tower 8x8x16 | 3,856 | 29 / 55 (211) | 18 / 18 (58) | Jacobi |
+| bridge 20 panels | 488 | 1.7 / 2.6 (7.0) | 3.2 / 3.2 (9.7) | Cholesky |
+| bridge 60 panels | 2,172 | 9.5 / 13 (39) | 16 / 26 (83) | Cholesky |
+| bridge 120 panels | 5,776 | 33 / 44 (149) | 50 / 128 (495) | Cholesky |
+
+Also measured in that study and not adopted: symmetric block Gauss-Seidel preconditioning (half the iterations at twice the cost each), Chebyshev iteration, matrix-free products, and rayon over the sparse product (slower than serial at these sizes on a shared 4-core machine). A separate f32 block-sparse implementation of the same method was about twice as fast per iteration as the f64 one adopted here; that is available headroom.
+
 ## Next
 
 1. Speed: assembly is now as expensive as the solve and is a per-member loop with no shared state, so it is the obvious thing to run in parallel (rayon), together with the step-check objective and the material update. Large 3D grids (tower 8x8x16) are limited by fill in the factorisation; a nested-dissection ordering or a looser `linear_tolerance` (1e-4 gave the same displacements and break counts in the bench) are the next levers there.

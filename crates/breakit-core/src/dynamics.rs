@@ -31,7 +31,7 @@ use nalgebra::{Quaternion, UnitQuaternion};
 
 use crate::damage::{self, Committed, Law, LawCache, MatState, Mech, MemberDamage};
 use crate::frame::member_axes;
-use crate::linsolve::{tri, LinSolver, Policy, Stats, BLOCK_NNZ};
+use crate::linsolve::{tri, Backend, LinSolver, Policy, Stats, BLOCK_NNZ};
 use crate::{Structure, Vec3};
 
 /// How each substep's constraint problem is solved.
@@ -59,6 +59,9 @@ pub struct SimConfig {
     /// old factorisation as a preconditioner for as long as that is cheaper
     /// than a new one; 1 factorises every substep.
     pub refactor_every: usize,
+    /// Direct solver only: which linear solver to use. The default picks per
+    /// structure.
+    pub linear_backend: Backend,
     /// Direct solver only: relative accuracy of each linear solve. The old
     /// factorisation only preconditions conjugate gradients on the current
     /// matrix, so the answer is the current system's to this tolerance.
@@ -103,7 +106,8 @@ impl Default for SimConfig {
             substeps: 4,
             iterations: 1,
             refactor_every: 0,
-            linear_tolerance: 1e-6,
+            linear_backend: Backend::Auto,
+            linear_tolerance: 1e-4,
             refactor_cost: 0,
             step_check: true,
             plastic_relaxation: 1.0 / 960.0,
@@ -899,10 +903,12 @@ impl DynamicSim {
     fn solve_direct(&mut self, h: f64) {
         let mut sys = match self.direct.take() {
             Some(sys) => sys,
-            None => match DirectSystem::new(&self.bodies, &self.beams) {
-                Some(sys) => sys,
-                None => return,
-            },
+            None => {
+                match DirectSystem::new(&self.bodies, &self.beams, self.config.linear_backend) {
+                    Some(sys) => sys,
+                    None => return,
+                }
+            }
         };
         let check = self.config.step_check;
         let policy = Policy {
@@ -1070,7 +1076,7 @@ struct DirectSystem {
 }
 
 impl DirectSystem {
-    fn new(bodies: &[Body], beams: &[Beam]) -> Option<Self> {
+    fn new(bodies: &[Body], beams: &[Beam], backend: Backend) -> Option<Self> {
         let mut ndof = 0;
         let mut next = |free: bool| {
             free.then(|| {
@@ -1089,7 +1095,7 @@ impl DirectSystem {
             .map(|bm| [trans[bm.a], rot[bm.a], trans[bm.b], rot[bm.b]])
             .collect();
         Some(Self {
-            lin: LinSolver::new(ndof, &blocks)?,
+            lin: LinSolver::new(ndof, &blocks, backend)?,
             trans,
             rot,
             rhs: vec![0.0; ndof],

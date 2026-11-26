@@ -185,27 +185,23 @@ fn cases(size: &str) -> Vec<Case> {
 /// Solver configurations under test: (name, config).
 fn configs() -> Vec<(&'static str, SimConfig)> {
     let d = SimConfig::default;
+    let with = |backend, tol| SimConfig {
+        linear_backend: backend,
+        linear_tolerance: tol,
+        ..d()
+    };
+    use linsolve::Backend::*;
     vec![
         ("default", d()),
-        (
-            "tol-1e-4",
-            SimConfig {
-                linear_tolerance: 1e-4,
-                ..d()
-            },
-        ),
-        ("8-substeps", SimConfig { substeps: 8, ..d() }),
+        ("cholesky", with(Cholesky, 1e-6)),
+        ("cholesky-1e-4", with(Cholesky, 1e-4)),
+        ("jacobi", with(BlockJacobi, 1e-6)),
+        ("jacobi-1e-4", with(BlockJacobi, 1e-4)),
+        ("jacobi-1e-3", with(BlockJacobi, 1e-3)),
         (
             "16-substeps",
             SimConfig {
                 substeps: 16,
-                ..d()
-            },
-        ),
-        (
-            "fresh",
-            SimConfig {
-                refactor_every: 1,
                 ..d()
             },
         ),
