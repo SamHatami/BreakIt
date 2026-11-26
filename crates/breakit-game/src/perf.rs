@@ -117,7 +117,7 @@ fn update_readout(
     };
     let visuals = render.map(|r| r.scene_update_ms).unwrap_or(0.0);
     let s = format!(
-        "{:.1} ms  {:.0} fps  worst {:.1} ms\nphysics {:.2} ms  visuals {:.2} ms\nlab {}k tris  {} meshes  {} lamps  table: {}",
+        "{:.1} ms  {:.0} fps  worst {:.1} ms\nphysics {:.2} ms  visuals {:.2} ms\nlab {}k tris  {} meshes  {} lamps  table: {}\nquality: {} (F4)",
         avg,
         1000.0 / avg.max(1e-3),
         worst,
@@ -127,6 +127,7 @@ fn update_readout(
         lab.hall_meshes + lab.table_meshes,
         lab.point_lights,
         lab.table_name,
+        lab.quality,
     );
     perf.since_log += dt;
     if perf.log && perf.since_log >= 1.0 {
