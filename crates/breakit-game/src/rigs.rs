@@ -4,8 +4,6 @@
 //! what they do comes from `breakit_core::loads::RigState`.
 
 use bevy::prelude::*;
-use breakit_core::loads::seismic::TableRig;
-use breakit_core::loads::traffic::{VehicleRig, WheelRig};
 use breakit_core::loads::RigState;
 use breakit_lab::rigs::{
     FanSetup, FlumeDrive, PaddleSetup, RigLive, RigSetup, ShakeSetup, TableDrive, VehicleDrive,
@@ -13,7 +11,7 @@ use breakit_lab::rigs::{
 };
 use breakit_lab::{LabRigs, RigModels, RigSet};
 use breakit_scenario as bs;
-use breakit_scenario::{Binding, TestRun};
+use breakit_scenario::Binding;
 
 use crate::analysis::{BreakitSet, Simulation};
 use crate::design::from_core;
@@ -38,20 +36,14 @@ impl Plugin for RigsPlugin {
     }
 }
 
-/// The rigs a scenario needs at the table, known before the test starts.
+/// The rigs a scenario needs at the table, known before the test starts:
+/// one per load case the sheet's events turn into.
 pub fn setup_for(scenario: &bs::Scenario) -> RigSetup {
-    let mut setup = RigSetup::default();
-    for e in &scenario.events {
-        if let bs::Event::GroundShake { .. } = e {
-            setup.shake = Some(ShakeSetup::default());
-        }
-    }
-    setup
+    let loads = Binding::load_set(scenario, scenario.settle.max(0.0));
+    setup_from(&loads.rig_state(0.0), RigSetup::default())
 }
 
-/// The rigs a set of load-model states needs. Used while a test runs, so a
-/// rig is at the table whenever its load is on even if the sheet did not
-/// announce it.
+/// The rigs a set of load-model states needs.
 fn setup_from(state: &RigState, mut setup: RigSetup) -> RigSetup {
     if let Some(w) = state.wind.first() {
         setup.fan.get_or_insert(FanSetup {
@@ -123,123 +115,38 @@ pub fn to_lab(state: &RigState, time: f32) -> RigLive {
     }
 }
 
-/// Integrates the table's acceleration to its velocity and displacement
-/// through a 0.25 Hz high-pass, as a shake table's controller does: a sine
-/// that starts from rest would otherwise leave the table drifting away.
-#[derive(Default, Clone, Copy)]
-struct TableMotion {
-    velocity: breakit_core::Vec3,
-    displacement: breakit_core::Vec3,
-    peak: f64,
-    time: Option<f64>,
-}
-
-impl TableMotion {
-    fn advance(&mut self, scenario: &bs::Scenario, to: f64) {
-        let from = match self.time {
-            Some(t) if to >= t && to - t < 1.0 => t,
-            // A new test, or a jump: start from rest.
-            _ => {
-                *self = Self::default();
-                to
-            }
-        };
-        let steps = (((to - from) / (1.0 / 240.0)).ceil() as usize).max(1);
-        let dt = (to - from) / steps as f64;
-        for k in 0..steps {
-            let a = Binding::ground_accel(scenario, from + (k as f64 + 0.5) * dt);
-            let corner = std::f64::consts::TAU * 0.25;
-            let restoring = self.velocity * (1.4 * corner) + self.displacement * corner * corner;
-            self.velocity += (a - restoring) * dt;
-            self.displacement += self.velocity * dt;
-        }
-        self.time = Some(to);
-    }
-}
-
-/// The rig state of a running test.
-///
-/// The scenario run still plays its own events (convoys and a sine ground
-/// shake) rather than a core `LoadSet`, so this builds the state from what
-/// the run exposes. When `TestRun::rig_state` is there, this function is
-/// that call.
-fn rig_state(run: &TestRun, table: &mut TableMotion) -> RigState {
-    let scenario = &run.scenario;
-    let t = run.time();
-    let mut state = RigState::default();
-
-    let shakes = scenario
-        .events
-        .iter()
-        .any(|e| matches!(e, bs::Event::GroundShake { .. }));
-    if shakes {
-        table.advance(scenario, t);
-        let acceleration = Binding::ground_accel(scenario, t);
-        table.peak = table.peak.max(acceleration.norm());
-        state.table = Some(TableRig {
-            displacement: table.displacement,
-            velocity: table.velocity,
-            acceleration,
-            drive: if table.peak > 0.0 {
-                acceleration.norm() / table.peak
-            } else {
-                0.0
-            },
-        });
-    }
-
-    for pose in run.vehicles() {
-        let Some(bs::Event::Convoy {
-            name, speed, axles, ..
-        }) = scenario.events.get(pose.event)
-        else {
-            continue;
-        };
-        let wheels: Vec<WheelRig> = axles
-            .iter()
-            .map(|a| WheelRig {
-                contact: pose.position - pose.dir * a.offset,
-                force: a.load,
-                on_structure: true,
-                ..Default::default()
-            })
-            .collect();
-        state.vehicles.push(VehicleRig {
-            // Each vehicle of a convoy is its own model.
-            name: format!("{name} {}", pose.index + 1),
-            position: pose.position - pose.dir * (pose.length * 0.5),
-            forward: pose.dir,
-            speed: *speed,
-            wheels,
-            ..Default::default()
-        });
-    }
-    state
-}
-
 /// Hero models in `assets/props/` replace the procedural rigs they are
 /// named for (see `docs/rigs.md`).
 fn load_hero_models(mut commands: Commands, assets: Res<AssetServer>) {
     commands.insert_resource(RigModels::from_folder(&assets, "props"));
 }
 
-fn call_rigs(sheets: Res<Sheets>, sim: Option<Res<Simulation>>, mut rigs: ResMut<LabRigs>) {
+fn call_rigs(
+    sheets: Res<Sheets>,
+    sim: Option<Res<Simulation>>,
+    mut rigs: ResMut<LabRigs>,
+    mut known: Local<Option<(String, RigSetup)>>,
+) {
     // While a test runs, `drive_rigs` keeps the setup.
     if sim.is_some() {
         return;
     }
-    let setup = setup_for(&sheets.current().def);
-    if rigs.setup != setup {
-        rigs.setup = setup;
+    let def = &sheets.current().def;
+    if known.as_ref().is_none_or(|(id, _)| *id != def.id) {
+        *known = Some((def.id.clone(), setup_for(def)));
+    }
+    let Some((_, setup)) = known.as_ref() else {
+        return;
+    };
+    if rigs.setup != *setup {
+        rigs.setup = setup.clone();
     }
 }
 
 fn drive_rigs(
     time: Res<Time>,
-    sheets: Res<Sheets>,
     sim: Option<Res<Simulation>>,
     mut rigs: ResMut<LabRigs>,
-    mut table: Local<TableMotion>,
     mut clock: Local<f32>,
 ) {
     let Some(sim) = sim else {
@@ -255,9 +162,9 @@ fn drive_rigs(
         return;
     };
     let run = sim.run();
-    let state = rig_state(run, &mut table);
+    let state = run.rig_state();
     *clock = run.time() as f32;
-    let setup = setup_from(&state, setup_for(&sheets.current().def));
+    let setup = setup_from(&state, RigSetup::default());
     if rigs.setup != setup {
         rigs.setup = setup;
     }
@@ -272,15 +179,36 @@ mod tests {
     use breakit_core::Vec3 as V;
 
     #[test]
-    fn the_quake_sheet_calls_the_shake_rig_and_the_bridge_does_not() {
+    fn every_sheet_calls_the_rigs_of_its_loads() {
         for s in bs::builtin() {
-            let shakes = s
-                .events
-                .iter()
-                .any(|e| matches!(e, bs::Event::GroundShake { .. }));
-            assert_eq!(setup_for(&s).shake.is_some(), shakes, "{}", s.id);
-            assert!(setup_for(&s).fan.is_none());
+            let has = |f: fn(&bs::Event) -> bool| s.events.iter().any(f);
+            let setup = setup_for(&s);
+            assert_eq!(
+                setup.shake.is_some(),
+                has(|e| matches!(e, bs::Event::GroundShake { .. })),
+                "{}",
+                s.id
+            );
+            assert_eq!(
+                setup.fan.is_some(),
+                has(|e| matches!(e, bs::Event::Wind { .. })),
+                "{}",
+                s.id
+            );
+            assert_eq!(
+                setup.paddle.is_some(),
+                has(|e| matches!(e, bs::Event::Water { .. })),
+                "{}",
+                s.id
+            );
         }
+        let jetty = bs::builtin()
+            .into_iter()
+            .find(|s| s.id == "flood_jetty")
+            .expect("the flume sheet is built in");
+        let paddle = setup_for(&jetty).paddle.unwrap();
+        assert_eq!((paddle.rest, paddle.bed), (-13.6, -3.2));
+        assert_eq!(paddle.direction, Vec3::X);
     }
 
     #[test]
@@ -291,6 +219,7 @@ mod tests {
                 speed: 12.0,
                 direction: V::new(0.0, 0.0, 1.0),
                 gust: 1.0,
+                ..Default::default()
             }],
             flume: vec![FlumeRig {
                 bed: -3.2,
@@ -310,44 +239,5 @@ mod tests {
         assert_eq!(live.wind.unwrap().speed, 12.0);
         assert_eq!(live.flume.unwrap().paddle_rest, -13.6);
         assert!(live.table.is_none() && live.vehicles.is_empty());
-    }
-
-    #[test]
-    fn the_integrated_table_motion_matches_the_sine_it_is_driven_with() {
-        let scenario = bs::builtin()
-            .into_iter()
-            .find(|s| {
-                s.events
-                    .iter()
-                    .any(|e| matches!(e, bs::Event::GroundShake { .. }))
-            })
-            .expect("a built-in scenario shakes");
-        let Some(bs::Event::GroundShake {
-            start,
-            duration,
-            peak,
-            frequency,
-            ..
-        }) = scenario
-            .events
-            .iter()
-            .find(|e| matches!(e, bs::Event::GroundShake { .. }))
-        else {
-            unreachable!()
-        };
-        let mut m = TableMotion::default();
-        let mut largest: f64 = 0.0;
-        let mut t = *start;
-        while t < start + duration {
-            m.advance(&scenario, t);
-            largest = largest.max(m.displacement.norm());
-            t += 1.0 / 60.0;
-        }
-        // A steady sine of acceleration `a` at `f` Hz moves by a / (2 pi f)^2.
-        let expect = peak / (std::f64::consts::TAU * frequency).powi(2);
-        assert!(
-            largest > 0.7 * expect && largest < 1.6 * expect,
-            "table moved {largest}, a steady sine would move {expect}"
-        );
     }
 }

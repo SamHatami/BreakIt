@@ -25,7 +25,7 @@ pub struct LabRigs {
 
 In the game, `setup_for` reads the sheet before the test (so the rig is at the table while you build) and `setup_from` adds any rig whose load is on. The solver works in the shake table's frame, so `visuals.rs` adds the table displacement to the drawn structure, and the lab moves the platform (`ShakePlatform` parts of the table, built into `TableTop::platform`).
 
-The scenario run still plays its own convoy and ground-shake events rather than a core `LoadSet`. Until it exposes `TestRun::rig_state()`, `rigs.rs::rig_state` builds the state from the run's vehicle poses (wheels on the undeformed lane, no bounce) and integrates the ground acceleration to a table displacement. Wind and flume cases reach the rigs as soon as the run reports them: nothing else has to change.
+The state comes straight from the run: `TestRun::rig_state()` reports every load case of the sheet (vehicles with their wheel contacts and bounce, the shake table's displacement, the fan wall, the flume and its paddle), and `rigs.rs::to_lab` copies it into `RigLive`. Before the test, `setup_for` builds the same load set from the sheet (`Binding::load_set`) so the right rigs are already at the table.
 
 ## Sizes
 
