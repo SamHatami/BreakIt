@@ -385,7 +385,7 @@ fn structure_sounds(
     mut st: ResMut<StructureSound>,
 ) {
     let Some(sim) = sim else { return };
-    let sim = &sim.sim;
+    let sim = sim.sim();
     let n = design.beams.len();
     if st.states.len() != n {
         st.states = vec![DamageState::Intact; n];

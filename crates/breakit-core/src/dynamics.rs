@@ -30,8 +30,10 @@
 use nalgebra::{Quaternion, UnitQuaternion};
 use rayon::prelude::*;
 
+use crate::contact::{ContactEvent, Ground, NodeContact};
 use crate::damage::{self, Committed, Law, LawCache, MatState, Mech, MemberDamage};
 use crate::frame::member_axes;
+use crate::joint::{bending_stiffness, Joint};
 use crate::linsolve::{tri, Backend, LinSolver, Policy, Stats, BLOCK_NNZ};
 use crate::{Structure, Vec3};
 
@@ -105,6 +107,8 @@ pub struct SimConfig {
     pub damping: f64,
     /// Enables yield, plastic hinges and fracture.
     pub plasticity: bool,
+    /// Ground plane the structure lands on, or `None` for free fall.
+    pub ground: Option<Ground>,
 }
 
 impl Default for SimConfig {
@@ -125,6 +129,7 @@ impl Default for SimConfig {
             gravity: Vec3::new(0.0, -9.81, 0.0),
             damping: 0.5,
             plasticity: true,
+            ground: None,
         }
     }
 }
@@ -183,8 +188,15 @@ struct Beam {
     /// Which yield conditions were active at the last material update.
     yield_mask: u8,
     plastic_elongation: f64,
-    /// Plastic hinge rotations [axis][end], axis 0 = y, 1 = z.
+    /// Plastic hinge rotations [axis][end], axis 0 = y, 1 = z: the member's
+    /// own plus its joints'.
     hinge: [[f64; 2]; 2],
+    /// Connections at ends a and b.
+    joints: [Joint; 2],
+    /// The part of `hinge` that yielded in the joints rather than the member.
+    joint_hinge: [[f64; 2]; 2],
+    /// Plastic rotation booked against each joint's rotation capacity, rad.
+    joint_rotation: [f64; 2],
     broken: bool,
     /// Material law, its history and the damage reported to renderers.
     law: Law,
@@ -192,6 +204,35 @@ struct Beam {
     damage: MemberDamage,
     /// Accumulated XPBD multipliers for this substep, one per constraint.
     lambda: [f64; 6],
+}
+
+impl Beam {
+    /// End-moment stiffness of one bending plane, joints included.
+    fn bending(&self, axis: usize) -> [[f64; 2]; 2] {
+        bending_stiffness(
+            self.ei_l[axis],
+            [
+                self.joints[0].stiffness[axis],
+                self.joints[1].stiffness[axis],
+            ],
+        )
+    }
+
+    /// Plastic end moments of one bending plane: the member's, or a weaker
+    /// joint's.
+    fn end_mp(&self, axis: usize) -> [f64; 2] {
+        [0, 1].map(|e| self.mp_now[axis].min(self.joints[e].moment_capacity[axis]))
+    }
+}
+
+/// Eigenvectors and eigenvalues (clamped at zero) of a symmetric 2x2 matrix.
+fn eigen2(k: [[f64; 2]; 2]) -> [([f64; 2], f64); 2] {
+    let ang = 0.5 * (2.0 * k[0][1]).atan2(k[0][0] - k[1][1]);
+    let (sn, cs) = ang.sin_cos();
+    [[cs, sn], [-sn, cs]].map(|v| {
+        let lam = k[0][0] * v[0] * v[0] + 2.0 * k[0][1] * v[0] * v[1] + k[1][1] * v[1] * v[1];
+        (v, lam.max(0.0))
+    })
 }
 
 /// Current corotational geometry of a beam.
@@ -212,6 +253,8 @@ pub struct DynamicSim {
     bodies: Vec<Body>,
     beams: Vec<Beam>,
     events: Vec<BreakEvent>,
+    contacts: Vec<NodeContact>,
+    contact_events: Vec<ContactEvent>,
     time: f64,
     direct: Option<DirectSystem>,
     stats: SolverStats,
@@ -259,43 +302,51 @@ fn return_1d(k: f64, c: f64, fy: f64, r: f64) -> (f64, f64, f64, f64) {
 }
 
 /// The same for the two end moments of one bending plane, which are coupled:
-/// M = [[k4, k2], [k2, k4]] (θ − dp). Returns (M, tangent, energy, dp).
+/// M = K (θ − dp), K symmetric (rigid ends: EI/L [[4, 2], [2, 4]]; joints
+/// change it, and a pinned end has a zero row). Each end has its own plastic
+/// moment `mp` (the member's, or a weaker joint's) and viscous term
+/// η = K_ii r. Returns (M, tangent, energy, dp).
 #[allow(clippy::type_complexity)]
 fn return_bend(
-    k4: f64,
-    k2: f64,
+    k: [[f64; 2]; 2],
     th: [f64; 2],
-    mp: f64,
+    mp: [f64; 2],
     r: f64,
 ) -> ([f64; 2], [[f64; 2]; 2], f64, [f64; 2]) {
-    let trial = [k4 * th[0] + k2 * th[1], k2 * th[0] + k4 * th[1]];
-    let mut act = [trial[0].abs() > mp, trial[1].abs() > mp];
+    let trial = [
+        k[0][0] * th[0] + k[0][1] * th[1],
+        k[1][0] * th[0] + k[1][1] * th[1],
+    ];
+    let mut act = [trial[0].abs() > mp[0], trial[1].abs() > mp[1]];
     let mut sg = [trial[0].signum(), trial[1].signum()];
-    let kd = k4 * (1.0 + r);
+    let kd = [k[0][0] * (1.0 + r), k[1][1] * (1.0 + r)];
     let mut dp = [0.0; 2];
     let mut m = trial;
     if act[0] || act[1] {
         for _ in 0..4 {
-            let f = [trial[0] - mp * sg[0], trial[1] - mp * sg[1]];
+            let f = [trial[0] - mp[0] * sg[0], trial[1] - mp[1] * sg[1]];
             dp = match act {
                 [true, true] => {
-                    let det = kd * kd - k2 * k2;
-                    [(kd * f[0] - k2 * f[1]) / det, (kd * f[1] - k2 * f[0]) / det]
+                    let det = kd[0] * kd[1] - k[0][1] * k[0][1];
+                    [
+                        (kd[1] * f[0] - k[0][1] * f[1]) / det,
+                        (kd[0] * f[1] - k[0][1] * f[0]) / det,
+                    ]
                 }
-                [true, false] => [f[0] / kd, 0.0],
-                [false, true] => [0.0, f[1] / kd],
+                [true, false] => [f[0] / kd[0], 0.0],
+                [false, true] => [0.0, f[1] / kd[1]],
                 [false, false] => [0.0; 2],
             };
             m = [
-                trial[0] - k4 * dp[0] - k2 * dp[1],
-                trial[1] - k2 * dp[0] - k4 * dp[1],
+                trial[0] - k[0][0] * dp[0] - k[0][1] * dp[1],
+                trial[1] - k[1][0] * dp[0] - k[1][1] * dp[1],
             ];
             let mut changed = false;
             for i in 0..2 {
                 if act[i] && dp[i] * sg[i] < 0.0 {
                     act[i] = false;
                     changed = true;
-                } else if !act[i] && m[i].abs() > mp * (1.0 + 1e-12) {
+                } else if !act[i] && m[i].abs() > mp[i] * (1.0 + 1e-12) {
                     act[i] = true;
                     sg[i] = m[i].signum();
                     changed = true;
@@ -306,32 +357,42 @@ fn return_bend(
             }
         }
     }
-    // Tangent K − K_A (K_AA + η)⁻¹ K_Aᵀ over the active ends A.
+    // Tangent K − K_A (K_AA + η_A)⁻¹ K_Aᵀ over the active ends A.
     let kt = match act {
         [true, true] => {
-            let det = kd * kd - k2 * k2;
-            // K (K + ηI)⁻¹ ηI, with η = k4 r.
-            let eta = k4 * r;
-            let inv = [[kd / det, -k2 / det], [-k2 / det, kd / det]];
-            let a = eta * (k4 * inv[0][0] + k2 * inv[1][0]);
-            let b = eta * (k4 * inv[0][1] + k2 * inv[1][1]);
-            [[a, b], [b, a]]
+            let det = kd[0] * kd[1] - k[0][1] * k[0][1];
+            let inv = [[kd[1] / det, -k[0][1] / det], [-k[0][1] / det, kd[0] / det]];
+            let mut t = k;
+            for a in 0..2 {
+                for b in 0..2 {
+                    for i in 0..2 {
+                        for j in 0..2 {
+                            t[a][b] -= k[a][i] * inv[i][j] * k[j][b];
+                        }
+                    }
+                }
+            }
+            t
         }
-        [true, false] => [
-            [k4 - k4 * k4 / kd, k2 - k4 * k2 / kd],
-            [k2 - k4 * k2 / kd, k4 - k2 * k2 / kd],
-        ],
-        [false, true] => [
-            [k4 - k2 * k2 / kd, k2 - k4 * k2 / kd],
-            [k2 - k4 * k2 / kd, k4 - k4 * k4 / kd],
-        ],
-        [false, false] => [[k4, k2], [k2, k4]],
+        [true, false] | [false, true] => {
+            let i = if act[0] { 0 } else { 1 };
+            let mut t = k;
+            for a in 0..2 {
+                for b in 0..2 {
+                    t[a][b] -= k[a][i] * k[i][b] / kd[i];
+                }
+            }
+            t
+        }
+        [false, false] => k,
     };
     let e = [th[0] - dp[0], th[1] - dp[1]];
-    let mut energy = 0.5 * (k4 * (e[0] * e[0] + e[1] * e[1]) + 2.0 * k2 * e[0] * e[1]);
-    if act[0] || act[1] {
-        // Not when elastic: mp may be infinite there.
-        energy += mp * (dp[0].abs() + dp[1].abs()) + 0.5 * k4 * r * (dp[0] * dp[0] + dp[1] * dp[1]);
+    let mut energy = 0.5 * (k[0][0] * e[0] * e[0] + k[1][1] * e[1] * e[1]) + k[0][1] * e[0] * e[1];
+    for i in 0..2 {
+        // Only yielding ends: mp may be infinite elsewhere.
+        if dp[i] != 0.0 {
+            energy += mp[i] * dp[i].abs() + 0.5 * k[i][i] * r * dp[i] * dp[i];
+        }
     }
     (m, kt, energy, dp)
 }
@@ -361,12 +422,20 @@ impl DynamicSim {
         let mut inertia = vec![0.0; s.nodes.len()];
         let mut beams = Vec::with_capacity(s.members.len());
         let mut laws = LawCache::default();
+        let mut contacts = vec![NodeContact::default(); s.nodes.len()];
         for (i, m) in s.members.iter().enumerate() {
             let l = s.member_length(i);
             let mm = m.material.density * m.section.area * l;
             for n in [m.a, m.b] {
                 mass[n] += 0.5 * mm;
                 inertia[n] += mm * l * l / 24.0;
+            }
+            let half = match m.section.shape {
+                crate::Shape::Rect { b, h } => 0.25 * (b + h),
+                crate::Shape::Tube { ro, .. } => ro,
+            };
+            for n in [m.a, m.b] {
+                contacts[n].radius = contacts[n].radius.max(half);
             }
             let (x, y, _z) = member_axes(&s.nodes[m.a], &s.nodes[m.b]);
             let (e, g) = (m.material.youngs_modulus, m.material.shear_modulus);
@@ -391,6 +460,9 @@ impl DynamicSim {
                 yield_mask: 0,
                 plastic_elongation: 0.0,
                 hinge: [[0.0; 2]; 2],
+                joints: m.ends,
+                joint_hinge: [[0.0; 2]; 2],
+                joint_rotation: [0.0; 2],
                 broken: false,
                 mat: MatState::new(k_axial, ei_l),
                 damage: MemberDamage::new(m.material.kind),
@@ -430,12 +502,18 @@ impl DynamicSim {
             }
         }
         Self {
+            // Built here, not on the first step: the symbolic analysis of a
+            // large structure costs several frames' worth of time.
+            direct: (config.solver == Solver::Direct)
+                .then(|| DirectSystem::new(&bodies, &beams, config.linear_backend))
+                .flatten(),
             config,
             bodies,
             beams,
             events: Vec::new(),
+            contacts,
+            contact_events: Vec::new(),
             time: 0.0,
-            direct: None,
             stats: SolverStats::default(),
         }
     }
@@ -456,11 +534,43 @@ impl DynamicSim {
         self.bodies[node].force = force;
     }
 
+    /// Adds a lumped mass (kg) to a free node, such as a tank or a machine
+    /// the structure carries. It has weight under gravity and inertia in
+    /// the solve. Does nothing at a node whose translation is fixed.
+    pub fn add_point_mass(&mut self, node: usize, kg: f64) {
+        let b = &mut self.bodies[node];
+        if b.inv_mass > 0.0 && kg > 0.0 {
+            b.inv_mass = 1.0 / (1.0 / b.inv_mass + kg);
+        }
+    }
+
     pub fn time(&self) -> f64 {
         self.time
     }
     pub fn position(&self, node: usize) -> Vec3 {
         self.bodies[node].x
+    }
+    /// Linear velocity of a node, m/s.
+    pub fn velocity(&self, node: usize) -> Vec3 {
+        self.bodies[node].v
+    }
+    /// Angular velocity of a node, rad/s.
+    pub fn angular_velocity(&self, node: usize) -> Vec3 {
+        self.bodies[node].w
+    }
+    /// Lumped translational mass of a node, kg: half the mass of every member
+    /// meeting there. 0 for nodes whose translation is fixed by a support.
+    pub fn node_mass(&self, node: usize) -> f64 {
+        let im = self.bodies[node].inv_mass;
+        if im > 0.0 {
+            1.0 / im
+        } else {
+            0.0
+        }
+    }
+    /// Number of nodes.
+    pub fn node_count(&self) -> usize {
+        self.bodies.len()
     }
     pub fn displacement(&self, node: usize) -> Vec3 {
         self.bodies[node].x - self.bodies[node].x0
@@ -490,6 +600,21 @@ impl DynamicSim {
     }
     pub fn break_events(&self) -> &[BreakEvent] {
         &self.events
+    }
+    /// Touch-downs on the ground since the start, oldest first.
+    pub fn contact_events(&self) -> &[ContactEvent] {
+        &self.contact_events
+    }
+    /// Ground normal force on a node at the end of the last substep, N.
+    pub fn contact_force(&self, node: usize) -> f64 {
+        self.contacts[node].normal_force
+    }
+    /// Gap between a node's contact sphere and the nearest ground surface, m
+    /// (negative while pressed in), if there is a ground.
+    pub fn clearance(&self, node: usize) -> Option<f64> {
+        let g = self.config.ground.as_ref()?;
+        let b = &self.bodies[node];
+        Some(g.clearance(&self.contacts[node], b.x0, b.x))
     }
     pub fn max_speed(&self) -> f64 {
         self.bodies.iter().map(|b| b.v.norm()).fold(0.0, f64::max)
@@ -521,7 +646,8 @@ impl DynamicSim {
         let damp = (-self.config.damping * h).exp();
         let g = self.config.gravity;
         let direct = self.config.solver == Solver::Direct;
-        for b in &mut self.bodies {
+        let ground = self.config.ground.take();
+        for (bi, b) in self.bodies.iter_mut().enumerate() {
             b.x_prev = b.x;
             b.q_prev = b.q;
             if b.inv_mass > 0.0 {
@@ -534,6 +660,9 @@ impl DynamicSim {
                 // would otherwise throw x̃ a whole member length away, too far
                 // for one Gauss-Newton step to recover.
                 b.x = if direct { b.x + h * coast } else { b.x_tilde };
+                if let (Some(gr), true) = (&ground, direct) {
+                    gr.clamp_start(&self.contacts[bi], b.x0, &mut b.x);
+                }
             } else {
                 b.x_tilde = b.x;
             }
@@ -543,6 +672,8 @@ impl DynamicSim {
             }
             b.q_tilde = b.q;
         }
+        // Back in place for the solve, which reads it from the config.
+        self.config.ground = ground;
         match self.config.solver {
             Solver::GaussSeidel => {
                 for bm in &mut self.beams {
@@ -552,6 +683,13 @@ impl DynamicSim {
                     for i in 0..self.beams.len() {
                         if !self.beams[i].broken {
                             self.solve_beam(i, h);
+                        }
+                    }
+                }
+                if let Some(gr) = &self.config.ground {
+                    for (bi, b) in self.bodies.iter_mut().enumerate() {
+                        if b.inv_mass > 0.0 {
+                            gr.project(&self.contacts[bi], b.x0, &mut b.x, b.x_prev);
                         }
                     }
                 }
@@ -569,6 +707,10 @@ impl DynamicSim {
             b.w = dq.imag() * s / h;
         }
         self.time += h;
+        if let Some(gr) = self.config.ground.take() {
+            self.commit_contacts(&gr, h);
+            self.config.ground = Some(gr);
+        }
         for i in 0..self.beams.len() {
             if !self.beams[i].broken {
                 self.update_material(i, h);
@@ -616,9 +758,14 @@ impl DynamicSim {
         let k = self.beams[i].k_torsion;
         self.apply(i, 1, c, Vec3::zeros(), Vec3::zeros(), gpa, gpb, k, h);
 
-        // Bending, two planes, symmetric and antisymmetric modes.
+        // Bending, two planes, along the eigenvectors of each plane's end
+        // stiffness (rigid ends: the symmetric and antisymmetric modes).
         for axis in 0..2 {
-            for mode in 0..2 {
+            let kb = self.beams[i].bending(axis);
+            for (mode, (v, k)) in eigen2(kb).into_iter().enumerate() {
+                if k <= 0.0 {
+                    continue; // a pinned end: nothing to resist
+                }
                 let gm = self.geom(i);
                 let bm = &self.beams[i];
                 let u = gm.axes[axis];
@@ -627,13 +774,10 @@ impl DynamicSim {
                 let th_b = gm.e.cross(&gm.tb).dot(&u) - bm.hinge[axis][1];
                 let gxa_b = p(gm.ta.cross(&u)) / gm.len; // dθa/dxb
                 let gxb_b = p(gm.tb.cross(&u)) / gm.len; // dθb/dxb
-                let gpa = gm.ta.cross(&u.cross(&gm.e));
-                let gpb = gm.tb.cross(&u.cross(&gm.e));
-                let (c, gxb, gpa, gpb, k) = if mode == 0 {
-                    (th_a + th_b, gxa_b + gxb_b, gpa, gpb, 3.0 * bm.ei_l[axis])
-                } else {
-                    (th_a - th_b, gxa_b - gxb_b, gpa, -gpb, bm.ei_l[axis])
-                };
+                let gpa = gm.ta.cross(&u.cross(&gm.e)) * v[0];
+                let gpb = gm.tb.cross(&u.cross(&gm.e)) * v[1];
+                let c = th_a * v[0] + th_b * v[1];
+                let gxb = gxa_b * v[0] + gxb_b * v[1];
                 self.apply(i, 2 + axis * 2 + mode, c, -gxb, gxb, gpa, gpb, k, h);
             }
         }
@@ -697,12 +841,11 @@ impl DynamicSim {
         };
         for axis in 0..2 {
             let mp = if r.is_some() {
-                bm.mp_now[axis]
+                bm.end_mp(axis)
             } else {
-                f64::INFINITY
+                [f64::INFINITY; 2]
             };
-            let (k4, k2) = (4.0 * bm.ei_l[axis], 2.0 * bm.ei_l[axis]);
-            let (m, kt, e, dp) = return_bend(k4, k2, st.th[axis], mp, rr);
+            let (m, kt, e, dp) = return_bend(bm.bending(axis), st.th[axis], mp, rr);
             out.m[axis] = m;
             out.kt[axis] = kt;
             out.dp[axis] = dp;
@@ -746,13 +889,8 @@ impl DynamicSim {
             let pb = gm.tb.cross(&u.cross(&gm.e));
             // The 2x2 tangent between the end moments as two scalar terms
             // along its eigenvectors. Elastic: θa + θb and θa − θb.
-            let kt = resp.kt[axis];
-            let ang = 0.5 * (2.0 * kt[0][1]).atan2(kt[0][0] - kt[1][1]);
-            let (sn, cs) = ang.sin_cos();
             let m = resp.m[axis];
-            for (j, v) in [[cs, sn], [-sn, cs]].into_iter().enumerate() {
-                let lam =
-                    kt[0][0] * v[0] * v[0] + 2.0 * kt[0][1] * v[0] * v[1] + kt[1][1] * v[1] * v[1];
+            for (j, (v, lam)) in eigen2(resp.kt[axis]).into_iter().enumerate() {
                 out[2 + axis * 2 + j] = (
                     m[0] * v[0] + m[1] * v[1],
                     lam.max(0.0),
@@ -788,6 +926,13 @@ impl DynamicSim {
                 phi += 0.5 * ih2 / b.inv_inertia * 4.0 * dq.imag().norm_squared();
             }
         }
+        if let Some(gr) = &self.config.ground {
+            for bi in 0..self.bodies.len() {
+                if let Some(t) = self.contact_terms(gr, bi, h) {
+                    phi += t.energy;
+                }
+            }
+        }
         let r = self.plastic_ratio(h).0;
         let energy = |i: usize| {
             if self.beams[i].broken {
@@ -813,6 +958,49 @@ impl DynamicSim {
             phi += (0..self.beams.len()).map(energy).sum::<f64>();
         }
         phi
+    }
+
+    /// Contact terms of a free node, if it touches the ground or is held by
+    /// friction.
+    fn contact_terms(&self, gr: &Ground, bi: usize, h: f64) -> Option<crate::contact::Terms> {
+        let b = &self.bodies[bi];
+        if b.inv_mass <= 0.0 {
+            return None;
+        }
+        let c = &self.contacts[bi];
+        gr.terms(c, b.x0, b.x, contact_mass(b), h)
+    }
+
+    fn commit_contacts(&mut self, gr: &Ground, h: f64) {
+        for (bi, b) in self.bodies.iter_mut().enumerate() {
+            if b.inv_mass <= 0.0 {
+                continue;
+            }
+            let c = &mut self.contacts[bi];
+            // Pushing a node out of the ground must not launch it: the
+            // outward velocity that only undoes last substep's penetration is
+            // removed, so landings do not bounce off the penalty.
+            if let Some((depth, n)) = gr.deepest(c, b.x0, b.x_prev) {
+                let vn = b.v.dot(&n);
+                if vn > 0.0 {
+                    b.v -= n * vn.min(depth / h);
+                }
+            }
+            // Approach speed: the velocity this substep started with, into
+            // the surface it is now touching.
+            let speed = gr
+                .deepest(c, b.x0, b.x)
+                .map_or(0.0, |(_, n)| -(b.x_tilde - b.x_prev).dot(&n) / h);
+            let m = contact_mass(b);
+            if gr.commit(c, b.x0, b.x, m, h) && speed > MIN_IMPACT_SPEED {
+                self.contact_events.push(ContactEvent {
+                    node: bi,
+                    time: self.time,
+                    speed,
+                    mass: 1.0 / b.inv_mass,
+                });
+            }
+        }
     }
 
     fn runs_parallel(&self) -> bool {
@@ -844,6 +1032,19 @@ impl DynamicSim {
                 for k in 0..3 {
                     sys.lin.add_diagonal(d + k, m);
                     sys.rhs[d + k] = -m * r[k];
+                }
+            }
+        }
+        if let Some(gr) = &self.config.ground {
+            // Ground contact: diagonal, non-negative, translation DOFs only,
+            // so it needs no change to the sparsity pattern.
+            for bi in 0..self.bodies.len() {
+                if let (Some(d), Some(t)) = (sys.trans[bi], self.contact_terms(gr, bi, h)) {
+                    phi += t.energy;
+                    for k in 0..3 {
+                        sys.lin.add_diagonal(d + k, t.hess[k]);
+                        sys.rhs[d + k] -= t.grad[k];
+                    }
                 }
             }
         }
@@ -1060,6 +1261,7 @@ impl DynamicSim {
         }
     }
 
+    #[allow(clippy::needless_range_loop)]
     fn update_material(&mut self, i: usize, h: f64) {
         let gm = self.geom(i);
         let st = self.strains(i, &gm);
@@ -1069,11 +1271,22 @@ impl DynamicSim {
         let resp = self.response(i, &st, plastic.then_some(r));
         let bm = &mut self.beams[i];
         bm.plastic_elongation += resp.dp_axial;
+        // Rotation at an end where the joint is weaker than the member is the
+        // joint yielding; the material model only sees the member's own.
+        let mut member_dp = resp.dp;
         for axis in 0..2 {
             for end in 0..2 {
-                bm.hinge[axis][end] += resp.dp[axis][end];
+                let dp = resp.dp[axis][end];
+                bm.hinge[axis][end] += dp;
+                bm.joint_rotation[end] += dp.abs();
+                if bm.joints[end].moment_capacity[axis] < bm.mp_now[axis] {
+                    bm.joint_hinge[axis][end] += dp;
+                    member_dp[axis][end] = 0.0;
+                }
             }
         }
+        let member_hinge: [[f64; 2]; 2] =
+            std::array::from_fn(|a| [0, 1].map(|e| bm.hinge[a][e] - bm.joint_hinge[a][e]));
         bm.yield_mask = resp.yield_mask;
         let mut mech = Mech {
             k_axial: bm.k_axial,
@@ -1086,8 +1299,8 @@ impl DynamicSim {
             n: resp.n,
             m: resp.m,
             dp_axial: resp.dp_axial,
-            dp: resp.dp,
-            hinge: bm.hinge,
+            dp: member_dp,
+            hinge: member_hinge,
             l0: bm.l0,
             len: gm.len,
         };
@@ -1104,6 +1317,32 @@ impl DynamicSim {
         bm.ei_l = mech.ei_l;
         bm.n_cap = mech.n_cap;
         bm.mp_now = mech.mp;
+
+        // Connections: force and moment against their capacities, and the
+        // plastic rotation at each end against the joint's rotation capacity.
+        let mut failure = failure;
+        let v = [
+            (resp.m[0][0] + resp.m[0][1]) / gm.len,
+            (resp.m[1][0] + resp.m[1][1]) / gm.len,
+        ];
+        for end in 0..2 {
+            let j = &bm.joints[end];
+            if j.is_rigid() {
+                continue;
+            }
+            let u = j
+                .utilization(resp.n, v, [resp.m[0][end], resp.m[1][end]])
+                .max(bm.joint_rotation[end] / j.rotation_capacity);
+            bm.damage.joint[end] = bm.damage.joint[end].max(u.min(1.0));
+            let force = (resp.n * resp.n + v[0] * v[0] + v[1] * v[1]).sqrt();
+            if failure.is_none()
+                && (force > j.force_capacity || bm.joint_rotation[end] > j.rotation_capacity)
+            {
+                failure = Some((BreakCause::Connection, end as f64));
+                bm.damage.state = damage::DamageState::Broken;
+                bm.damage.damage = 1.0;
+            }
+        }
 
         if let Some((cause, position)) = failure {
             bm.broken = true;
@@ -1182,6 +1421,19 @@ impl DirectSystem {
             ],
         })
     }
+}
+
+/// Touch-downs slower than this (m/s) are not reported as contact events.
+const MIN_IMPACT_SPEED: f64 = 0.05;
+
+/// Mass that sets a node's ground penalty stiffness: its own mass plus the
+/// mass equivalent of the load on it, so a heavily loaded light node does not
+/// sink into the floor. Weight carried through the members is not included:
+/// a lagged stiffness that follows it costs 2 to 4 times the CG iterations
+/// for a resting tower, and the column bases of a 3x3x8 steel tower standing
+/// on the floor only sink 4 mm without it.
+fn contact_mass(b: &Body) -> f64 {
+    1.0 / b.inv_mass + b.force.norm() / 9.81
 }
 
 fn rotate(q: UnitQuaternion<f64>, phi: Vec3) -> UnitQuaternion<f64> {

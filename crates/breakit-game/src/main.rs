@@ -13,6 +13,7 @@ mod hud;
 mod perf;
 mod render;
 mod sound;
+mod test_scenario;
 mod visuals;
 
 use bevy::prelude::*;
@@ -46,6 +47,7 @@ fn main() {
             visuals::VisualsPlugin,
             hud::HudPlugin,
             capture::CapturePlugin,
+            test_scenario::TestScenarioPlugin,
             perf::PerfPlugin,
             sound::SoundPlugin,
         ))
@@ -56,10 +58,14 @@ fn main() {
 fn toggle_mode(
     keys: Res<ButtonInput<KeyCode>>,
     mode: Res<State<Mode>>,
+    check: Res<test_scenario::ScenarioCheck>,
     mut next: ResMut<NextState<Mode>>,
 ) {
     match mode.get() {
-        Mode::Build if keys.just_pressed(KeyCode::Space) => next.set(Mode::Simulate),
+        // The HUD lists what blocks the test.
+        Mode::Build if keys.just_pressed(KeyCode::Space) && !check.blocks_test() => {
+            next.set(Mode::Simulate)
+        }
         Mode::Simulate if keys.any_just_pressed([KeyCode::Space, KeyCode::KeyR]) => {
             next.set(Mode::Build)
         }

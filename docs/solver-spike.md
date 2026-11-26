@@ -151,7 +151,44 @@ Also measured in that study and not adopted: symmetric block Gauss-Seidel precon
 
 Current defaults, single thread, mean ms per frame elastic / collapse (collapse max): tower 1,272 members 4.6 / 4.2 (17); bridge 2,172 members 8.2 / 13 (44); tower 3,856 members 15 / 14 (61); bridge 5,776 members 23 / 41 (129).
 
+## Node-block Cholesky (`src/blockchol.rs`)
+
+faer's scalar sparse Cholesky ran at about 1.5 GFlop/s on the bridges: the factor of a chain-like structure is too sparse for supernodes, and the simplicial code pays an indirection per entry. `Backend::Cholesky` now factorises on 6x6 node blocks instead (the faer path is kept as the hidden `Backend::CholeskyScalar`, bench configs `scalar` and `scalar-1e-4`):
+
+- Every node owns six unknowns; a fixed translation or rotation stays in the numbering with a unit diagonal. The ordering is faer's AMD on the node graph, the symbolic factorisation is by block columns, both built once.
+- The numeric factorisation is left-looking over block columns with fixed-size 6x6 kernels; the inverse of each diagonal block's factor is stored, so the triangular solves and the product with the matrix are branch-free and index once per block.
+- The kernels are compiled twice, for the baseline instruction set and for AVX2 with FMA, chosen at start-up (three small `unsafe` calls). The two copies differ in the last bits, as faer's kernels do between CPUs.
+- The refactorisation policy, the CG loop and the statistics are unchanged and shared by both paths. The cost of a factorisation in CG iterations is now estimated from block counts; it comes out at 3 on the bridges (it was 4), so in a collapse the solver refactorises more often and iterates less.
+
+Kernel times in microseconds (`bench --kernels`, minimum of 3 runs, single thread; a direct solve is a triangular solve pair, a CG iteration adds the product with the matrix and the vector updates):
+
+| Structure | Members | Factor entries (faer / blocks) | Factorisation (faer / blocks) | Direct solve (faer / blocks) | CG iteration (faer / blocks) |
+| --- | --- | --- | --- | --- | --- |
+| tower 3x3x8 | 368 | 46,356 / 46,356 | 1,422 / 144 | 51 / 13 | 53 / 16 |
+| bridge 20 panels | 488 | 35,466 / 36,120 | 456 / 67 | 43 / 13 | 64 / 19 |
+| tower 5x5x12 | 1,272 | 385,884 / 286,704 | 3,866 / 2,013 | 225 / 112 | 197 / 132 |
+| bridge 60 panels | 2,172 | 173,622 / 174,492 | 2,170 / 321 | 222 / 83 | 367 / 141 |
+| tower 8x8x16 | 3,856 | 2,057,940 / 1,567,260 | 22,925 / 26,708 | 1,245 / 927 | 1,359 / 935 |
+| bridge 120 panels | 5,776 | 481,218 / 482,304 | 5,883 / 1,016 | 684 / 375 | 1,099 / 492 |
+
+On the bridges the fill is the same and the factorisation is 6 to 7 times faster, the solves 2 to 2.7 times. On tower 8x8x16, whose factor is dense enough for faer's supernodal kernels, the block factorisation is 15% slower and the solves 30% faster; that structure goes to block Jacobi anyway.
+
+Frames, `linear_tolerance` 1e-4, mean ms per frame elastic / collapse (collapse p99 / max), minimum of 3 runs. Settled probe displacements and break counts are identical between the two paths in all six cases.
+
+| Structure | faer scalar | Node blocks |
+| --- | --- | --- |
+| tower 3x3x8 | 1.15 / 1.49 (4.0 / 5.5) | 0.71 / 0.81 (1.3 / 1.7) |
+| bridge 20 panels | 1.40 / 2.09 (5.6 / 6.5) | 0.99 / 1.15 (2.6 / 3.0) |
+| tower 5x5x12 | 3.92 / 9.04 (20 / 23) | 3.15 / 4.71 (8.2 / 9.9) |
+| bridge 60 panels | 8.95 / 12.2 (28 / 36) | 5.52 / 7.29 (16 / 20) |
+| tower 8x8x16 | 19.0 / 35.6 (100 / 106) | 15.5 / 29.1 (74 / 85) |
+| bridge 120 panels | 23.3 / 37.4 (95 / 121) | 18.8 / 18.3 (44 / 52) |
+
+`Backend::Auto` still decides by fill, now computed from the block structure, and the threshold moved from 12 to 30: tower 3x3x8 (fill 17) now gets Cholesky, which is 1.4 to 1.8 times faster there than block Jacobi; tower 5x5x12 (43) is a tie (Cholesky 3.2 / 4.7, Jacobi 4.7 / 4.2) and stays on Jacobi for its lower collapse p99; tower 8x8x16 (112) is clearly Jacobi's.
+
+On the bridges assembly is now the largest part of a frame (bridge 60: 3.0 of 5.5 ms elastic). What is left in the solver: the triangular solves on bridge 120 are bound by memory (a 3.9 MB factor), where a single-precision copy of the factor for preconditioning would help; supernodes would be needed to beat faer on dense factors.
+
 ## Next
 
-1. Speed: what is left is spread evenly between assembly and the solve. Collapse spikes on long bridges come from refactorisations; threads need re-measuring on a desktop CPU. Large 3D grids (tower 8x8x16) are limited by fill in the factorisation; a nested-dissection ordering or a looser `linear_tolerance` (1e-4 gave the same displacements and break counts in the bench) are the next levers there.
+1. Speed: on bridges assembly is now the largest part of a frame (about half), so that is the next thing to cut; the remaining collapse spikes are step-check retries, each paying an assembly and a factorisation. Bridge 120's solves are memory-bound (a single-precision copy of the factor for preconditioning is untried); threads need re-measuring on a desktop CPU. Large 3D grids (tower 8x8x16) are limited by fill in the factorisation; a nested-dissection ordering or a looser `linear_tolerance` (1e-4 gave the same displacements and break counts in the bench) are the next levers there.
 2. Done: sparse static solve; axial-bending interaction Mp,N = Mp (1 - n²). Open: biaxial interaction, plastic torsion.
