@@ -17,13 +17,25 @@
 
 use breakit_core::loads::seismic::{GroundMotion, Quake};
 use breakit_core::loads::traffic::{Axle as CoreAxle, Drive, Lane, LaneLine, Traffic, Vehicle};
+use breakit_core::loads::water::{Airy, Solitary, Water, Waves};
+use breakit_core::loads::wind::{Gusts, Profile, Wind, AIR_DENSITY};
 use breakit_core::loads::{LoadCase, LoadKind, LoadSet, Window, G};
 use breakit_core::{Structure, Vec3};
 
-use crate::scenario::{Deck, Event, Scenario};
+use crate::scenario::{Deck, Event, Scenario, Wave};
 
 fn v(p: [f64; 3]) -> Vec3 {
     Vec3::new(p[0], p[1], p[2])
+}
+
+/// Horizontal unit vector along `p` (+x if it has no horizontal part).
+fn horizontal(p: [f64; 3]) -> Vec3 {
+    let h = Vec3::new(p[0], 0.0, p[2]);
+    if h.norm() > 1e-12 {
+        h.normalize()
+    } else {
+        Vec3::x()
+    }
 }
 
 /// The core lane for a scenario deck: a strip `width` either side of the
@@ -183,6 +195,90 @@ impl Binding {
                         direction: v(*direction),
                     })),
                 )),
+                Event::Wind {
+                    name,
+                    start,
+                    duration,
+                    ramp,
+                    speed,
+                    direction,
+                    gusts,
+                    jet,
+                } => {
+                    let mut w = Wind::new(*speed, v(*direction));
+                    if *gusts > 0.0 {
+                        w.gusts = Some(Gusts {
+                            intensity: *gusts,
+                            ..Default::default()
+                        });
+                    }
+                    if let Some(j) = jet {
+                        w.profile = Profile::Jet {
+                            center: v(j.center),
+                            half_width: j.half_width,
+                            half_height: j.half_height,
+                            edge: 1.0,
+                        };
+                    }
+                    cases.push(LoadCase::new(
+                        name.clone(),
+                        Window::new(start + settle, *duration, *ramp),
+                        LoadKind::Wind(w),
+                    ));
+                }
+                Event::Water {
+                    name,
+                    start,
+                    duration,
+                    ramp,
+                    bed,
+                    level,
+                    current,
+                    wave,
+                    paddle,
+                } => {
+                    let waves = wave.map(|w| match w {
+                        Wave::Surge { height, direction } => {
+                            // Crest 4/K behind the paddle, so the paddle
+                            // makes the whole stroke as the wave leaves it.
+                            let d = (level - bed).max(1e-6);
+                            let kappa = (3.0 * height.max(0.0) / (4.0 * d.powi(3))).sqrt();
+                            let lead = if kappa > 0.0 { 4.0 / kappa } else { 0.0 };
+                            Waves::Solitary(Solitary {
+                                height,
+                                start: paddle - lead,
+                                direction: horizontal(direction),
+                            })
+                        }
+                        Wave::Regular {
+                            height,
+                            period,
+                            direction,
+                        } => {
+                            let dir = horizontal(direction);
+                            Waves::Airy(Airy {
+                                height,
+                                period,
+                                direction: dir,
+                                origin: dir * *paddle,
+                            })
+                        }
+                    });
+                    let w = Water {
+                        bed: *bed,
+                        level0: *level,
+                        level1: *level,
+                        current: v(*current),
+                        waves,
+                        paddle: *paddle,
+                        ..Default::default()
+                    };
+                    cases.push(LoadCase::new(
+                        name.clone(),
+                        Window::new(start + settle, *duration, *ramp),
+                        LoadKind::Water(w),
+                    ));
+                }
                 Event::DeckLoad { .. } => {}
             }
         }
@@ -203,6 +299,35 @@ impl Binding {
                 _ => None,
             })
             .sum()
+    }
+
+    /// Wind force on each payload (indexed like `scenario.payloads`) at
+    /// solver time `t`, N: `½ ρ C_d A |v| v` with the core wind velocity
+    /// (gusts included) at the item's centre `centres[k]`.
+    pub fn payload_wind(
+        scenario: &Scenario,
+        loads: &LoadSet,
+        centres: &[Vec3],
+        t: f64,
+    ) -> Vec<Vec3> {
+        let mut out = vec![Vec3::zeros(); scenario.payloads.len()];
+        for c in &loads.cases {
+            let LoadKind::Wind(w) = &c.kind else { continue };
+            let ramp = c.window.factor(t);
+            if ramp <= 0.0 {
+                continue;
+            }
+            let dir = [w.direction.x, w.direction.y, w.direction.z];
+            for ((p, at), f) in scenario.payloads.iter().zip(centres).zip(&mut out) {
+                let a = p.wind_area(dir);
+                if a <= 0.0 {
+                    continue;
+                }
+                let u = w.velocity(*at, t - c.window.start, ramp);
+                *f += u * (0.5 * w.air_density * p.drag * a * u.norm() * c.factor * loads.factor);
+            }
+        }
+        out
     }
 
     /// The loads the core does not model, per node at test time `t`:
@@ -247,6 +372,34 @@ impl Binding {
     /// brief use it; the test itself runs the core models.
     pub fn forces_at(&self, scenario: &Scenario, t: f64) -> Vec<Vec3> {
         let mut out = self.deck_forces(scenario, t);
+        // Mean wind on payloads, shared between the feet (no gusts, no
+        // overturning couple).
+        for e in &scenario.events {
+            if let Event::Wind {
+                start,
+                duration,
+                ramp,
+                speed,
+                direction,
+                ..
+            } = e
+            {
+                let r = Window::new(*start, *duration, *ramp).factor(t);
+                let d = horizontal(*direction);
+                for (p, feet) in scenario.payloads.iter().zip(&self.payload_feet) {
+                    let Some(feet) = feet else { continue };
+                    let f = d
+                        * (0.5
+                            * AIR_DENSITY
+                            * p.drag
+                            * p.wind_area(*direction)
+                            * (speed * r).powi(2));
+                    for &n in feet {
+                        out[n] += f / feet.len() as f64;
+                    }
+                }
+            }
+        }
         if t > scenario.duration && scenario.overload.is_some() {
             return out;
         }
@@ -351,6 +504,12 @@ pub fn event_window(e: &Event, deck_length: f64) -> (f64, f64) {
         Event::GroundShake {
             start, duration, ..
         } => (*start, start + duration),
+        Event::Wind {
+            start, duration, ..
+        }
+        | Event::Water {
+            start, duration, ..
+        } => (*start, duration.map_or(f64::INFINITY, |d| start + d)),
     }
 }
 

@@ -40,6 +40,8 @@ The load physics is `breakit_core::loads` (see `docs/loads.md`); `breakit-scenar
 
 - `Convoy`: a core `Traffic` case. Each vehicle has sprung (quarter-car) axles driving along the deck lane, so trucks bounce on a flexible deck. The lane is `deck_lane(deck)`: a core `LaneLine::strip` that captures nodes within `width` sideways and `height` vertically of the lane line and shares each station's load between its nodes (two trusses), so scenario files never name node ids.
 - `GroundShake`: a core `Quake` with harmonic ground motion, a(t) = peak sin(2 pi f t) with fades; every free node feels -m a. `TestRun::table_offset` gives the table displacement for drawing, `Binding::ground_accel` the acceleration the equipment model uses.
+- `Wind`: a core `Wind` case (fan wall jet, Kaimal gusts, shielding, vortex shedding) on every member. Payloads with a `size` also catch it: `½ ρ C_d A |v| v` on the box face (`drag`, default 1.2; 1.8 for a sign board) with the core gusting velocity at the item's centre, applied at `height` above the feet with its overturning couple, so bolts can tear and resting items tip. The fan wall parks upstream along `-direction`.
+- `Water`: a core `Water` case in the flume: bed, still level (filled over `ramp`), current and a `Surge` (solitary wave) or `Regular` (Airy) waves from the paddle at `paddle` (default -13.6 m, the lab flume's upstream wall). Morison drag and inertia plus buoyancy on every submerged member; payloads feel no water.
 - `DeckLoad` (uniform N/m along the lane), the proof test's deck stand-in and sandbox player loads stay in `Binding::deck_forces`: the core has no uniform deck load.
 - Proof test: the traffic cases are switched off (`factor` 0) and the deck stand-in takes over; the `LoadSet` factor follows the proof ramp.
 - `Binding::forces_at(scenario, t)` is a static preview (axle loads by the lever rule, no bounce or shaking) for build mode's static check and the brief. The test itself runs the core models.
@@ -58,6 +60,16 @@ The load physics is `breakit_core::loads` (see `docs/loads.md`); `breakit-scenar
 | P-01 | Pump platform on the shake table: 2.5 t pump skid resting on friction 0.35 (critical), 400 kg cabinet bolted, 0.3 g at 2.5 Hz | Braced platform, 40x4 tube | pass, 3 stars, 871: pump sag 13.6 mm, tilt 0.1° |
 | | | Unbraced (sway) platform, 60x5 tube | the deck amplifies the shaking, the pump slides off at 2.1 s: fail |
 | Q-01 | Water tower on the shake table: 4 t tank at 6 m, 0.4 g at 1.5 Hz | 2-level braced mast, 25x2.5 tube | pass, 2 stars, 782 |
+
+| W-01 | Billboard in the fan wall: 6 x 3 m board (1.2 t, bolted, C_d 1.8) 8 m up, 40 m/s with 15 % gusts along +x | 4-leg tower, 2 storeys, 35x3.5 tube | pass, 3 stars, 929, util 0.49 |
+| | | 40x4 tube | pass, 2 stars, 762 (heavy) |
+| | | 30x3 tube | pass, 2 stars, 806, util 0.93 |
+| | | 25x2.5 tube | survives yielding, board sways 400 mm, 1 star |
+| | | 20x2 tube | blows over at 3.3 s |
+| F-01 | Pump jetty in the flume: 3 t pump house resting (friction 0.35) on a deck 1 m up, legs from the bed at -3.2 m, 2.6 m deep water, 1.5 m/s current, 1.8 m surge whose crest reaches the deck | X-braced legs, 30x3 tube | pass, 3 stars, 916, util 0.70 |
+| | | X-braced, 40x4 | pass, 2 stars, 739 |
+| | | X-braced, 25x2.5 | yields (util 1.19), pump drifts 89 mm, 1 star |
+| | | Unbraced legs, 60x5 | pass, 2 stars, 799, pump drifts 74 mm |
 
 Q-01 is easy for a braced tower; the budget is what bites. Make it harder with a heavier tank, a lower frequency nearer the tower's own, or fewer footings once the part catalog has thinner sections.
 

@@ -43,6 +43,11 @@ pub const BUILTIN: &[(&str, &str)] = &[
         "plant_platform.ron",
         include_str!("../scenarios/plant_platform.ron"),
     ),
+    ("sign_wind.ron", include_str!("../scenarios/sign_wind.ron")),
+    (
+        "flood_jetty.ron",
+        include_str!("../scenarios/flood_jetty.ron"),
+    ),
 ];
 
 /// Parses every built-in scenario. Panics on a malformed file, which the

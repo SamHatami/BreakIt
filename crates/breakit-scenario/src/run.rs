@@ -312,6 +312,15 @@ impl TestRun {
                 c.factor = if proof { 0.0 } else { 1.0 };
             }
         }
+        let centres: Vec<Vec3> = self
+            .equipment
+            .iter()
+            .map(|e| e.centre(&self.sim) + Vec3::y() * e.height)
+            .collect();
+        let wind = Binding::payload_wind(&self.scenario, &self.loads, &centres, self.sim.time());
+        for (e, w) in self.equipment.iter_mut().zip(wind) {
+            e.wind = if e.lost { Vec3::zeros() } else { w };
+        }
         self.loads.apply(&self.structure, &mut self.sim, dt);
         let mut f = self.binding.deck_forces(&self.scenario, self.clock);
         for (a, b) in f.iter_mut().zip(self.loads.forces()) {
