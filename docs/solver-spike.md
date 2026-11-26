@@ -143,7 +143,15 @@ Elastic / collapse mean ms per frame (collapse max in brackets), 4 substeps, sin
 
 Also measured in that study and not adopted: symmetric block Gauss-Seidel preconditioning (half the iterations at twice the cost each), Chebyshev iteration, matrix-free products, and rayon over the sparse product (slower than serial at these sizes on a shared 4-core machine). A separate f32 block-sparse implementation of the same method was about twice as fast per iteration as the f64 one adopted here; that is available headroom.
 
+## Follow-up: 32-bit block Jacobi, leaner assembly, optional threads
+
+- The block-Jacobi iteration now runs in f32 (node blocks are assembled and inverted in f64, then cast). Same iteration counts, displacements and break counts; the solve part is 10 to 25% faster at 3,856 members and unchanged at 1,272, where everything already fits in cache.
+- Assembly computes each beam's block and forces first and scatters afterwards. That alone cut assembly by about a quarter (tower 5x5x12: 2.1 to 1.5 ms per frame).
+- The same split lets assembly and the step-check objective run on the rayon pool (`SimConfig::parallel_min_members`), with results independent of the thread count. It is off by default: on the 4-core cloud machine used here, 4 threads gained at most 15% on the two largest cases and nothing or a loss below that. Worth re-measuring on a desktop CPU before turning it on. The material update was left serial because other threads are editing it.
+
+Current defaults, single thread, mean ms per frame elastic / collapse (collapse max): tower 1,272 members 4.6 / 4.2 (17); bridge 2,172 members 8.2 / 13 (44); tower 3,856 members 15 / 14 (61); bridge 5,776 members 23 / 41 (129).
+
 ## Next
 
-1. Speed: assembly is now as expensive as the solve and is a per-member loop with no shared state, so it is the obvious thing to run in parallel (rayon), together with the step-check objective and the material update. Large 3D grids (tower 8x8x16) are limited by fill in the factorisation; a nested-dissection ordering or a looser `linear_tolerance` (1e-4 gave the same displacements and break counts in the bench) are the next levers there.
+1. Speed: what is left is spread evenly between assembly and the solve. Collapse spikes on long bridges come from refactorisations; threads need re-measuring on a desktop CPU. Large 3D grids (tower 8x8x16) are limited by fill in the factorisation; a nested-dissection ordering or a looser `linear_tolerance` (1e-4 gave the same displacements and break counts in the bench) are the next levers there.
 2. Done: sparse static solve; axial-bending interaction Mp,N = Mp (1 - n²). Open: biaxial interaction, plastic torsion.

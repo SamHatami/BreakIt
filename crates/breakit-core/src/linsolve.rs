@@ -45,6 +45,8 @@ const MAX_HOLD: usize = 64;
 /// than this many times the flops of one triangular solve pair.
 const JACOBI_FILL_RATIO: f64 = 12.0;
 const JACOBI_MAX_ITERS: usize = 500;
+/// Scalar type of the block-Jacobi iteration.
+type S = f32;
 
 /// Which linear solver handles the substep systems.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -490,23 +492,26 @@ impl LinSolver {
 /// plus one 6x6 coupling block per beam, preconditioned by the inverse of the
 /// node blocks. Fixed DOFs stay in the numbering with a unit diagonal.
 struct BlockJacobi {
+    /// Node blocks in double precision, as assembled; `diag` is the copy
+    /// the iteration uses.
+    diag64: Vec<Matrix6<f64>>,
     /// Compact DOF -> (node, component).
     loc: Vec<(u32, u8)>,
     free: Vec<[bool; 6]>,
-    diag: Vec<Matrix6<f64>>,
-    inv: Vec<Matrix6<f64>>,
+    diag: Vec<Matrix6<S>>,
+    inv: Vec<Matrix6<S>>,
     /// Per beam: its end nodes (None = fully fixed end).
     ends: Vec<[Option<u32>; 2]>,
     /// Per beam: coupling block, rows at end b, columns at end a.
-    off: Vec<Matrix6<f64>>,
+    off: Vec<Matrix6<S>>,
     live: Vec<bool>,
     /// Previous solution, used as the starting guess.
-    x: Vec<Vector6<f64>>,
-    b: Vec<Vector6<f64>>,
-    r: Vec<Vector6<f64>>,
-    z: Vec<Vector6<f64>>,
-    p: Vec<Vector6<f64>>,
-    ap: Vec<Vector6<f64>>,
+    x: Vec<Vector6<S>>,
+    b: Vec<Vector6<S>>,
+    r: Vec<Vector6<S>>,
+    z: Vec<Vector6<S>>,
+    p: Vec<Vector6<S>>,
+    ap: Vec<Vector6<S>>,
 }
 
 impl BlockJacobi {
@@ -569,6 +574,7 @@ impl BlockJacobi {
         Self {
             loc,
             free,
+            diag64: vec![Matrix6::zeros(); nn],
             diag: vec![Matrix6::zeros(); nn],
             inv: vec![Matrix6::zeros(); nn],
             off: vec![Matrix6::zeros(); ends.len()],
@@ -584,14 +590,14 @@ impl BlockJacobi {
     }
 
     fn clear(&mut self) {
-        self.diag.fill(Matrix6::zeros());
+        self.diag64.fill(Matrix6::zeros());
         self.live.fill(false);
     }
 
     #[inline]
     fn add_diagonal(&mut self, dof: usize, v: f64) {
         let (nd, k) = self.loc[dof];
-        self.diag[nd as usize][(k as usize, k as usize)] += v;
+        self.diag64[nd as usize][(k as usize, k as usize)] += v;
     }
 
     fn add_block(&mut self, beam: usize, lower: &[f64; BLOCK_NNZ]) {
@@ -600,7 +606,7 @@ impl BlockJacobi {
             let Some(nd) = end else { continue };
             let nd = nd as usize;
             let f = self.free[nd];
-            let d = &mut self.diag[nd];
+            let d = &mut self.diag64[nd];
             for r in 0..6 {
                 for c in 0..=r {
                     if f[r] && f[c] {
@@ -619,7 +625,7 @@ impl BlockJacobi {
             for r in 0..6 {
                 for c in 0..6 {
                     m[(r, c)] = if fb[r] && fa[c] {
-                        lower[tri(6 + r, c)]
+                        lower[tri(6 + r, c)] as S
                     } else {
                         0.0
                     };
@@ -629,7 +635,7 @@ impl BlockJacobi {
         }
     }
 
-    fn matvec(&self, v: &[Vector6<f64>], y: &mut [Vector6<f64>]) {
+    fn matvec(&self, v: &[Vector6<S>], y: &mut [Vector6<S>]) {
         for ((y, d), v) in y.iter_mut().zip(&self.diag).zip(v) {
             *y = d * v;
         }
@@ -647,16 +653,18 @@ impl BlockJacobi {
     /// Returns the CG iteration count, or None if a node block is not
     /// positive definite.
     fn solve(&mut self, rhs: &[f64], out: &mut [f64], tolerance: f64) -> Option<usize> {
-        for ((d, inv), f) in self.diag.iter_mut().zip(&mut self.inv).zip(&self.free) {
+        for i in 0..self.diag64.len() {
+            let d = &mut self.diag64[i];
             for k in 0..6 {
-                if !f[k] {
+                if !self.free[i][k] {
                     d[(k, k)] = 1.0;
                 }
             }
-            *inv = Cholesky::new(*d)?.inverse();
+            self.inv[i] = Cholesky::new(*d)?.inverse().cast::<S>();
+            self.diag[i] = d.cast::<S>();
         }
-        let dot = |a: &[Vector6<f64>], b: &[Vector6<f64>]| {
-            a.iter().zip(b).map(|(x, y)| x.dot(y)).sum::<f64>()
+        let dot = |a: &[Vector6<S>], b: &[Vector6<S>]| {
+            a.iter().zip(b).map(|(x, y)| x.dot(y) as f64).sum::<f64>()
         };
         let (mut x, mut b, mut r, mut z, mut p, mut ap) = (
             std::mem::take(&mut self.x),
@@ -668,7 +676,7 @@ impl BlockJacobi {
         );
         b.fill(Vector6::zeros());
         for (d, &(nd, k)) in self.loc.iter().enumerate() {
-            b[nd as usize][k as usize] = rhs[d];
+            b[nd as usize][k as usize] = rhs[d] as S;
         }
         let target = dot(&b, &b) * tolerance * tolerance;
         let mut iters = 0;
@@ -687,7 +695,7 @@ impl BlockJacobi {
                 if iters == 0 {
                     p.copy_from_slice(&z);
                 } else {
-                    let beta = rz_new / rz;
+                    let beta = (rz_new / rz) as S;
                     for i in 0..p.len() {
                         p[i] = z[i] + p[i] * beta;
                     }
@@ -698,7 +706,7 @@ impl BlockJacobi {
                 if pap <= 0.0 || !pap.is_finite() {
                     break;
                 }
-                let alpha = rz / pap;
+                let alpha = (rz / pap) as S;
                 for i in 0..x.len() {
                     x[i] += p[i] * alpha;
                     r[i] -= ap[i] * alpha;
@@ -709,7 +717,7 @@ impl BlockJacobi {
             x.fill(Vector6::zeros());
         }
         for (d, &(nd, k)) in self.loc.iter().enumerate() {
-            out[d] = x[nd as usize][k as usize];
+            out[d] = x[nd as usize][k as usize] as f64;
         }
         (self.x, self.b, self.r, self.z, self.p, self.ap) = (x, b, r, z, p, ap);
         Some(iters)

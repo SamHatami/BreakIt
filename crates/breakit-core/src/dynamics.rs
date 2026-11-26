@@ -62,8 +62,10 @@ pub struct SimConfig {
     pub refactor_every: usize,
     /// Direct solver only: structures with at least this many members run
     /// assembly and the step check on the rayon thread pool. Results do not
-    /// depend on the thread count. `usize::MAX` keeps everything on the
-    /// calling thread.
+    /// depend on the thread count. The default, `usize::MAX`, keeps everything
+    /// on the calling thread: on the 4-core cloud machine this was measured
+    /// on, threads gained at most 15% at 4,000 to 6,000 members and nothing
+    /// below.
     pub parallel_min_members: usize,
     /// Direct solver only: which linear solver to use. The default picks per
     /// structure.
@@ -112,7 +114,7 @@ impl Default for SimConfig {
             substeps: 4,
             iterations: 1,
             refactor_every: 0,
-            parallel_min_members: 256,
+            parallel_min_members: usize::MAX,
             linear_backend: Backend::Auto,
             linear_tolerance: 1e-4,
             refactor_cost: 0,

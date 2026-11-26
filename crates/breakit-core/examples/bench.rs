@@ -194,9 +194,9 @@ fn configs() -> Vec<(&'static str, SimConfig)> {
     vec![
         ("default", d()),
         (
-            "serial",
+            "parallel",
             SimConfig {
-                parallel_min_members: usize::MAX,
+                parallel_min_members: 0,
                 ..d()
             },
         ),
