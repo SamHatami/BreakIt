@@ -13,8 +13,8 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use super::{
-    park, send, spawn_rig, yaw_to, FanSetup, LabRigs, Part, Rest, Rig, RigClock, RigMaterials,
-    RigModel, RigModels, RigSlot, Role, Site,
+    park, send, spawn_rig, yaw_to, FanSetup, LabRigs, Owner, Part, Rest, Rig, RigClock,
+    RigMaterials, RigModel, RigModels, RigSlot, Role, Site,
 };
 use crate::palette::Mat;
 use crate::scenery::{Rng, Scenery};
@@ -326,7 +326,7 @@ pub fn model(floor: f32) -> RigModel {
     }
 
     // On the far side from where the player usually looks from.
-    console(&mut fixed, floor, Vec3::new(-6.0, 0.0, -(half_w + 7.5)));
+    console(&mut fixed, floor, Vec3::new(-1.0, 0.0, -(half_w + 7.5)));
     parts.push(Part::fixed(fixed));
     RigModel { parts }
 }
@@ -428,7 +428,6 @@ const STREAMER_STEP: f32 = 0.5;
 
 /// Keeps the fan wall in the scene and sends it to the table or the park
 /// as the setup changes.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn call(
     mut commands: Commands,
     rigs: Res<LabRigs>,
@@ -558,7 +557,8 @@ pub(crate) fn drive(
     clock: Res<RigClock>,
     extra: Res<RigMaterials>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut parts: Query<(&Role, &Rest, &mut Transform, &mut Visibility)>,
+    owners: Query<&Rig>,
+    mut parts: Query<(&Role, &Rest, &Owner, &mut Transform, &mut Visibility)>,
     mut motion: Local<FanMotion>,
 ) {
     let wind = rigs.live.wind.unwrap_or_default();
@@ -575,7 +575,10 @@ pub(crate) fn drive(
     }
     let running = drive > 0.02;
     let t = rigs.live.time;
-    for (role, rest, mut at, mut vis) in &mut parts {
+    for (role, rest, owner, mut at, mut vis) in &mut parts {
+        if owners.get(owner.0).map(|r| r.0) != Ok(RigSlot::FanWall) {
+            continue;
+        }
         match *role {
             Role::Rotor(i) => {
                 // Alternate fans are a touch out of step, as real ones are.
@@ -692,10 +695,15 @@ mod tests {
         let (mut lo, mut downstream) = (f32::MAX, f32::MIN);
         for p in all.bufs.values().flat_map(|b| b.positions.iter()) {
             lo = lo.min(p[1]);
-            downstream = downstream.max(p[0]);
+            // The console stands beside the table, clear of its end.
+            if p[2].abs() < 8.4 {
+                downstream = downstream.max(p[0]);
+            } else {
+                assert!(p[2] < -9.0, "{p:?} is neither wall nor console");
+            }
         }
         assert!((lo - floor).abs() < 1e-3, "lowest point {lo}");
-        // Nothing reaches the table rim.
+        // Nothing in front of the table reaches its rim.
         assert!(downstream < STANDOFF);
         assert!(fan_centre(0).y > 0.0);
     }

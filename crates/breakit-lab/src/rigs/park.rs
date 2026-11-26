@@ -15,7 +15,7 @@ use crate::scenery::Scenery;
 use crate::{LabMaterials, LabSettings, MaterialMaker, HALL_LAYER};
 
 /// The bay, world x and z: (min, max).
-pub const BAY: (Vec2, Vec2) = (Vec2::new(-43.5, -37.5), Vec2::new(-19.0, -12.5));
+pub const BAY: (Vec2, Vec2) = (Vec2::new(-42.0, -37.6), Vec2::new(-14.6, -12.5));
 
 /// Where the fan wall parks: at the back of the bay, facing the table.
 pub fn fan_pose() -> Transform {
@@ -24,17 +24,17 @@ pub fn fan_pose() -> Transform {
 
 /// Where the instrument cart parks.
 pub fn cart_pose() -> Transform {
-    Transform::from_xyz(-24.5, 0.0, -24.5).with_rotation(Quat::from_rotation_y(0.9))
+    Transform::from_xyz(-21.5, 0.0, -25.5).with_rotation(Quat::from_rotation_y(0.5))
 }
 
 /// Middle of the paddle's trolley, world x and z, and its top above the
 /// floor.
-const TROLLEY: (Vec2, f32) = (Vec2::new(-39.0, -25.5), 1.6);
+const TROLLEY: (Vec2, f32) = (Vec2::new(-37.0, -26.0), 1.6);
 
 /// Where the paddle rests on its trolley: turned across the bay, the foot
 /// of its plate on the trolley top.
 pub fn paddle_pose(setup: &PaddleSetup, floor: f32) -> Transform {
-    let turn = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+    let turn = Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2);
     let foot = Vec3::new(setup.rest, setup.bed + 0.05, 0.0);
     let on = Vec3::new(TROLLEY.0.x, floor + TROLLEY.1, TROLLEY.0.y);
     Transform::from_translation(on - turn * foot).with_rotation(turn)
@@ -42,7 +42,7 @@ pub fn paddle_pose(setup: &PaddleSetup, floor: f32) -> Transform {
 
 /// Where the spare vehicle `k` stands (its front axle), heading +x.
 pub fn truck_spot(k: usize, floor: f32) -> Vec3 {
-    Vec3::new(-24.0, floor, -14.6 - 2.3 * k as f32)
+    Vec3::new(-24.0, floor, -14.2 - 2.0 * k as f32)
 }
 
 /// The bay's fixtures and the spare vehicles, in world units.
@@ -69,7 +69,7 @@ pub fn build(floor: f32) -> Scenery {
             Quat::from_rotation_y(0.7),
         );
     }
-    // Guard rail along the back and the far side.
+    // Guard rail along the far side.
     let rail = |s: &mut Scenery, a: Vec3, b: Vec3| {
         let n = (a.distance(b) / 6.0).ceil() as i32;
         for k in 0..=n {
@@ -85,13 +85,8 @@ pub fn build(floor: f32) -> Scenery {
     };
     rail(
         &mut s,
-        Vec3::new(lo.x - 1.2, floor, lo.y - 1.0),
-        Vec3::new(lo.x - 1.2, floor, hi.y),
-    );
-    rail(
-        &mut s,
-        Vec3::new(lo.x - 1.2, floor, lo.y - 1.0),
-        Vec3::new(hi.x, floor, lo.y - 1.0),
+        Vec3::new(lo.x - 0.9, floor, lo.y + 1.0),
+        Vec3::new(lo.x - 0.9, floor, hi.y),
     );
 
     // Trolley for the paddle: a low steel table on castors.

@@ -19,8 +19,14 @@ pub struct VisualsPlugin;
 
 impl Plugin for VisualsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(BreakitRenderPlugin)
-            .add_systems(Update, feed_renderer.after(BreakitSet::Physics));
+        app.add_plugins(BreakitRenderPlugin).add_systems(
+            Update,
+            // After the rigs, so the structure and the shake platform
+            // move in the same frame.
+            feed_renderer
+                .after(BreakitSet::Physics)
+                .after(crate::rigs::RigDrive),
+        );
     }
 }
 
@@ -38,6 +44,7 @@ fn feed_renderer(
     visual: Option<ResMut<StructureVisual>>,
     mut frame: ResMut<MemberFrame>,
     mut settings: ResMut<RenderSettings>,
+    rigs: Res<breakit_lab::LabRigs>,
     mut built_for: Local<Option<(u64, bool)>>,
 ) {
     let simulating = *mode.get() == Mode::Simulate && sim.is_some();
@@ -77,6 +84,14 @@ fn feed_renderer(
             current.frame_from_positions(positions, &utilization)
         }
     };
+
+    // The solver works in the shake table's frame; on screen the structure
+    // rides the platform.
+    if let Some(table) = rigs.live.table.filter(|_| simulating) {
+        for p in &mut frame.0.node_positions {
+            *p += table.displacement;
+        }
+    }
 
     let stress_view = !simulating || heat.0;
     let highlighted: Vec<usize> = match (tool.hovered, tool.hovered_beam.or(tool.selected_beam)) {

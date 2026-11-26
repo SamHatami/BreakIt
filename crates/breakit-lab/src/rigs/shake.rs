@@ -59,7 +59,7 @@ pub fn actuators(size: f32) -> RigModel {
         for s in [-0.45, 0.45] {
             fixed.m(Mat::MachineGrey).bar(
                 at(-(p + 3.3), 0.85, s),
-                at(-(p + 2.8), 0.06, s),
+                at(-(p + 2.8), 0.2, s),
                 0.08,
                 0.3,
                 Vec3::Y,
@@ -85,7 +85,7 @@ pub fn actuators(size: f32) -> RigModel {
         for (s, mat) in [(-0.1, Mat::Dark), (0.1, Mat::PipeRed)] {
             let top = at(-(p + 2.3), axis_y + 0.56, s);
             let knee = at(-(p + 2.9), axis_y + 0.75, s + 0.9 * across.signum());
-            let down = at(-(p + 3.2), 0.06, s + 1.3 * across.signum());
+            let down = at(-(p + 3.2), 0.1, s + 1.3 * across.signum());
             fixed.m(mat).cylinder(top, knee, 0.045, 6, false);
             fixed.m(mat).cylinder(knee, down, 0.045, 6, false);
         }
@@ -254,7 +254,7 @@ pub fn cart(floor: f32) -> RigModel {
 /// Where the cart stands at the table: behind it, turned towards the
 /// player's side.
 pub fn cart_pose(half: Vec2) -> Transform {
-    Transform::from_xyz(half.x - 3.0, 0.0, -(half.y + 6.5))
+    Transform::from_xyz(half.x * 0.4, 0.0, -(half.y + 6.5))
         .with_rotation(Quat::from_rotation_y(0.3))
 }
 
@@ -272,7 +272,6 @@ pub(crate) struct Trace {
 }
 
 /// Keeps the cart and the actuators in step with the setup.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn call(
     mut commands: Commands,
     rigs: Res<LabRigs>,
@@ -441,11 +440,11 @@ pub(crate) fn trace(
             v / peak * (SCREEN.y * 0.5 - 0.3),
         )
     };
-    let half = 0.045;
+    let half = 0.03;
     let mut positions = Vec::with_capacity((TRACE_SAMPLES - 1) * 4);
     let mut prev = point(0, trace.samples[0]);
-    for k in 1..TRACE_SAMPLES {
-        let next = point(k, trace.samples[k]);
+    for (k, &v) in trace.samples.iter().enumerate().skip(1) {
+        let next = point(k, v);
         let dir = (next - prev).normalize_or(Vec2::X);
         let n = Vec2::new(-dir.y, dir.x) * half;
         // Overlap a little so the corners of a steep line stay closed.

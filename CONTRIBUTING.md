@@ -76,6 +76,7 @@ minimal and say so in the PR description, or ask that area's owner to do it.
 | Ground contact | `breakit-core/src/contact.rs` | `docs/contact.md` |
 | Sound | `crates/breakit-audio/`, `breakit-game/src/sound.rs` | `docs/audio.md` |
 | Lab and play tables | `crates/breakit-lab/` | `docs/lab.md` |
+| Load rigs | `breakit-lab/src/rigs/`, `breakit-game/src/rigs.rs` | `docs/rigs.md` |
 | Game UI and flow | `breakit-game/src/ui/`, `flow.rs`, `history.rs` | `docs/game-ui.md` |
 | Game shell | the rest of `breakit-game/src/` | `README.md` |
 

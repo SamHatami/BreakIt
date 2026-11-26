@@ -476,7 +476,6 @@ fn emissive(mat: Mat) -> bool {
 
 /// Spawns a rig root at `pose` with the slot's hero model if there is one,
 /// its procedural `model` otherwise.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_rig(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -667,6 +666,32 @@ mod tests {
         assert!((t.pose().translation - Vec3::new(5.0, 3.0, 0.0)).length() < 1e-4);
         t.progress = 1.0;
         assert!((t.pose().translation - Vec3::new(10.0, 0.0, 0.0)).length() < 1e-4);
+    }
+
+    #[test]
+    fn model_nodes_under_a_rig_get_their_roles() {
+        let mut app = App::new();
+        app.add_systems(Update, bind_model_nodes);
+        let world = app.world_mut();
+        let rig = world
+            .spawn((Rig(RigSlot::FanWall), Transform::IDENTITY))
+            .id();
+        let scene = world.spawn((Transform::IDENTITY, ChildOf(rig))).id();
+        let at = Transform::from_xyz(1.0, 2.0, 3.0);
+        let rotor = world.spawn((Name::new("Rotor.2"), at, ChildOf(scene))).id();
+        let plain = world
+            .spawn((Name::new("housing"), Transform::IDENTITY, ChildOf(scene)))
+            .id();
+        let stray = world
+            .spawn((Name::new("rotor.5"), Transform::IDENTITY))
+            .id();
+        app.update();
+        let world = app.world();
+        assert_eq!(world.get::<Role>(rotor), Some(&Role::Rotor(2)));
+        assert_eq!(world.get::<Owner>(rotor), Some(&Owner(rig)));
+        assert_eq!(world.get::<Rest>(rotor).map(|r| r.0), Some(at));
+        assert!(world.get::<Role>(plain).is_none());
+        assert!(world.get::<Role>(stray).is_none());
     }
 
     #[test]

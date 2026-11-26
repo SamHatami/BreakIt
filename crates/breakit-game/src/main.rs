@@ -20,6 +20,7 @@ mod history;
 mod perf;
 mod release;
 mod render;
+mod rigs;
 mod scenario;
 mod sound;
 mod testrun;
@@ -62,6 +63,7 @@ fn main() {
             analysis::AnalysisPlugin,
             testrun::TestRunPlugin,
             render::FrameRenderPlugin,
+            rigs::RigsPlugin,
             visuals::VisualsPlugin,
             ui::GameUiPlugin,
             capture::CapturePlugin,

@@ -165,7 +165,6 @@ pub fn working_pose(setup: &PaddleSetup) -> Transform {
 
 /// Builds the paddle for the setup, parks it, cranes it over to the table
 /// and back.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn call(
     mut commands: Commands,
     rigs: Res<LabRigs>,

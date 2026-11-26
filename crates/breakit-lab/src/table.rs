@@ -422,10 +422,11 @@ impl TableInsert for Flume {
                 Vec3::new(x1, y(x1), -w),
             ]);
         }
-        // A paddle housing at the -x end.
+        // A bulkhead at the -x end, behind the paddle (`rigs::paddle`), whose
+        // plate rests with its face at -h.x + 0.4.
         top.out
             .m(Mat::MachineBlue)
-            .aabb(Vec3::new(-h.x, wl - 0.5, -w), Vec3::new(-h.x + 0.4, 0.6, w));
+            .aabb(Vec3::new(-h.x, wl - 0.5, -w), Vec3::new(-h.x + 0.2, 0.6, w));
     }
 }
 

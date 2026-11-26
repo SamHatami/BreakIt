@@ -102,7 +102,7 @@ pub fn model(kind: VehicleKind, axles: &[f32], width: f32) -> RigModel {
         VehicleKind::Crane => Mat::Yellow,
     };
     let cab_top = frame_top + 1.15 * w;
-    let cab_back = -1.0 * r;
+    let cab_back = -r;
     if kind != VehicleKind::Crane {
         cab(&mut b, cab_colour, cab_back, nose, frame_top, cab_top, w);
     }
@@ -500,7 +500,6 @@ pub fn pose(front: Vec3, forward: Vec3) -> Transform {
 }
 
 /// Spawns, moves and removes the vehicles to match `RigLive::vehicles`.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn drive(
     mut commands: Commands,
     rigs: Res<LabRigs>,

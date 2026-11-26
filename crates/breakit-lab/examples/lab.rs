@@ -69,8 +69,8 @@ impl Demo {
     /// The built-in table the rig belongs with.
     fn table(self) -> usize {
         match self {
-            Demo::None | Demo::Trucks => 0,
-            Demo::Wind => 1,
+            Demo::None => 0,
+            Demo::Wind | Demo::Trucks => 1,
             Demo::Flume => 2,
             Demo::Quake => 3,
         }
