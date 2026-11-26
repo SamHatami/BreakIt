@@ -63,6 +63,9 @@ pub enum BreakCause {
     FibreRupture,
     /// Composite: interlaminar shear failure.
     Delamination,
+    /// A joint failed: the pin or bolts sheared, or the weld or connection
+    /// ran out of rotation. `BreakEvent.position` says which end (0 or 1).
+    Connection,
 }
 
 /// Worst condition a member has reached. Ordered, and never goes back.
@@ -119,6 +122,9 @@ pub struct MemberDamage {
     pub axial: f64,
     /// Remaining bending stiffness over the intact value, 0..1 (lowest axis).
     pub stiffness: f64,
+    /// Peak utilisation of the connections at ends a and b, 0..1 (force,
+    /// moment or plastic rotation over capacity). 0 for rigid joints.
+    pub joint: [f64; 2],
 }
 
 impl MemberDamage {
@@ -137,6 +143,7 @@ impl MemberDamage {
             moment: [[0.0; 2]; 2],
             axial: 0.0,
             stiffness: 1.0,
+            joint: [0.0; 2],
         }
     }
 }
