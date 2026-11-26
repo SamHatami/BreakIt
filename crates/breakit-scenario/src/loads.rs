@@ -159,8 +159,9 @@ pub struct VehiclePose {
 #[derive(Clone, Debug)]
 pub struct Binding {
     pub deck: Option<DeckNodes>,
-    /// Carrying node per payload, in scenario order.
-    pub payload_nodes: Vec<Option<usize>>,
+    /// Carrying node per foot of each payload, in scenario order; `None`
+    /// when a foot has no node within tolerance (or two feet share one).
+    pub payload_feet: Vec<Option<Vec<usize>>>,
     /// Translational mass per node including payloads, kg; 0 when fixed.
     pub node_mass: Vec<f64>,
     /// Constant extra loads (sandbox), ramped in over the first second.
@@ -171,23 +172,35 @@ pub struct Binding {
 impl Binding {
     pub fn new(scenario: &Scenario, s: &Structure) -> Self {
         let deck = scenario.deck.as_ref().map(|d| DeckNodes::find(d, s));
-        let payload_nodes = scenario
+        let payload_feet = scenario
             .payloads
             .iter()
             .map(|p| {
-                let at = v(p.at);
-                s.nodes
-                    .iter()
-                    .enumerate()
-                    .map(|(i, n)| (i, (n - at).norm()))
-                    .filter(|&(_, d)| d <= p.tolerance)
-                    .min_by(|a, b| a.1.total_cmp(&b.1))
-                    .map(|(i, _)| i)
+                let feet: Option<Vec<usize>> = p
+                    .foot_positions()
+                    .into_iter()
+                    .map(|f| {
+                        let at = v(f);
+                        s.nodes
+                            .iter()
+                            .enumerate()
+                            .map(|(i, n)| (i, (n - at).norm()))
+                            .filter(|&(_, d)| d <= p.tolerance)
+                            .min_by(|a, b| a.1.total_cmp(&b.1))
+                            .map(|(i, _)| i)
+                    })
+                    .collect();
+                feet.filter(|f| {
+                    let mut u = f.clone();
+                    u.sort_unstable();
+                    u.dedup();
+                    u.len() == f.len()
+                })
             })
             .collect();
         Self {
             deck,
-            payload_nodes,
+            payload_feet,
             node_mass: vec![0.0; s.nodes.len()],
             extra: Vec::new(),
             nodes: s.nodes.len(),
@@ -276,6 +289,31 @@ impl Binding {
             out[n] += f * r;
         }
         out
+    }
+
+    /// Ground (shake table) acceleration at test time `t`, m/s². Zero in
+    /// the proof test.
+    pub fn ground_accel(scenario: &Scenario, t: f64) -> Vec3 {
+        if scenario.overload.is_some() && t > scenario.duration {
+            return Vec3::zeros();
+        }
+        let mut a = Vec3::zeros();
+        for e in &scenario.events {
+            if let Event::GroundShake {
+                start,
+                duration,
+                peak,
+                frequency,
+                direction,
+                fade,
+                ..
+            } = e
+            {
+                a += v(*direction).normalize()
+                    * shake(t - start, *duration, *peak, *frequency, *fade);
+            }
+        }
+        a
     }
 
     /// Load factor at test time `t`: 1 during the test, rising in the proof

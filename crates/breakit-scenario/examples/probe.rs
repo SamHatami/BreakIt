@@ -8,7 +8,7 @@ use breakit_scenario::{builtin, evaluate, CostModel, PlayMode};
 
 #[path = "../tests/common/mod.rs"]
 mod common;
-use common::{mast, warren};
+use common::{mast, platform, warren};
 
 fn main() {
     let scenarios = builtin();
@@ -26,6 +26,11 @@ fn main() {
         ("mast 20x2 x3", 1, mast(0.02, 0.002, 3)),
         ("mast 40x4 x2", 1, mast(0.04, 0.004, 2)),
         ("mast 25x2.5 x2", 1, mast(0.025, 0.0025, 2)),
+        ("platform 80x8 braced", 2, platform(0.08, 0.008, true)),
+        ("platform 60x5 braced", 2, platform(0.06, 0.005, true)),
+        ("platform 40x4 braced", 2, platform(0.04, 0.004, true)),
+        ("platform 100x10 unbraced", 2, platform(0.1, 0.01, false)),
+        ("platform 60x5 unbraced", 2, platform(0.06, 0.005, false)),
     ];
     for (name, k, s) in cases {
         let t = Instant::now();

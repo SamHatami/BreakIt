@@ -46,6 +46,19 @@ Stars: 1 for a pass, 2 and 3 at score fractions `stars` (0.6, 0.85).
 
 The "Simulate wind, quake and wave loads" work is adding richer load models in `breakit-core`; the plan is to replace the `Event` enum with those load cases (they carry name, start, duration and a factor for the proof test).
 
+## Equipment (payloads)
+
+Sam, 2026-11-26: a scenario can require static weights or equipment that must ride out the external loads. A `Payload` is a rigid item standing on the player's nodes:
+
+- `at` (footprint centre), `feet` (offsets; empty = one foot), `tolerance` (each foot needs its own node within it, else the test is blocked), `mass`, `height` (centre of mass above the feet), `size` (for drawing).
+- `mount`: `Fixed` (never comes off; the default, as for the Q-01 tank), `Bolted { capacity }` (N per foot in pull-out or shear; past it the bolts fail and it rests on friction 0.3), `Resting { friction }`.
+- `limits`: `tilt_deg`, `sag` (downward movement under a foot), `drift` (movement of the footprint centre). Each becomes a report row; with `strict: true` a breach fails the test, otherwise it is scored with the objectives.
+- `critical: true`: losing it fails the test at once.
+
+Model (`src/equipment.rs`): the mass is lumped on the foot nodes as point masses, so weight and sideways inertia reach the structure through the solver. The centre-of-mass height turns sideways inertia H = -m (a_table + a_deck) into a moment h ŷ × H, applied to the feet as the least-squares set of vertical forces with that moment and no net force. Foot reactions (weight share minus that couple) decide tipping (a foot lifts) and sliding (|H| > μ ΣR). Instability accumulates over time (`LOSS_TIME` 0.4 s, paid back at half rate when stable), so a single rocking peak does not throw the item off. When it goes, its mass leaves the solver (`add_point_mass` with negative kg) and the timeline gets `Happening::PayloadLost { name, mass, radius, position, velocity }`. The loads module turns that into a falling `Impactor` (`LoadSet::add_case`, PR #25) so it lands on the deck or the table.
+
+Limits of the model: the item is rigid and its rotational inertia and vertical acceleration are ignored; feet in a straight line only resist overturning along that line. `Binding::forces_at` does not include the overturning couples (they depend on the deck's motion), so a chart of scenario forces leaves them out.
+
 ## Cost
 
 `CostModel`, in kronor at real installed rates (Sam's choice, 2026-11-26): price per kg per material (steel 50, timber 24, concrete 5, composite 600) plus a price per member end by joint kind (pinned 400, dowelled 600, bolted 800, monolithic 1 200, welded 1 600, rigid 1 600; ratios from the components design, kept in step with `breakit-parts` prices). `estimate_with_joints` takes the joint kind per member end; `estimate` prices every end as bolted. Joints dominate small structures at these prices.
@@ -58,6 +71,8 @@ The "Simulate wind, quake and wave loads" work is adding richer load models in `
 | | | 30x3 tube | pass, 3 stars, 917 |
 | | | 25x2.5 tube | pass, yields (margin 0.95), sag 118 mm |
 | | | 20x2 tube | collapses at 8.7 s (tipper) |
+| P-01 | Pump platform on the shake table: 2.5 t pump skid resting on friction 0.35 (critical), 400 kg cabinet bolted, 0.3 g at 2.5 Hz | Braced platform, 40x4 tube | pass, 3 stars, 871: pump sag 13.6 mm, tilt 0.1° |
+| | | Unbraced (sway) platform, 60x5 tube | the deck amplifies the shaking, the pump slides off at 2.1 s: fail |
 | Q-01 | Water tower on the shake table: 4 t tank at 6 m, 0.4 g at 1.5 Hz | 2-level braced mast, 25x2.5 tube | pass, 2 stars, 783, tank sway 12 mm |
 
 Q-01 is easy for a braced tower; the budget is what bites. Make it harder with a heavier tank, a lower frequency nearer the tower's own, or fewer footings once the part catalog has thinner sections.

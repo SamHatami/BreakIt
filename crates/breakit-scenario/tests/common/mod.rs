@@ -67,3 +67,46 @@ pub fn mast(r: f64, t: f64, levels: usize) -> Structure {
     }
     s
 }
+
+/// Platform 3 m up on four columns at the corners of a 3 m square, with a
+/// deck grid that has nodes under the P-01 pump and cabinet feet. `braced`
+/// adds X bracing on all four sides.
+pub fn platform(r: f64, t: f64, braced: bool) -> Structure {
+    let (m, sec) = (Material::steel(), Section::tube(r, t));
+    let mut s = Structure::new();
+    let xs = [-1.5, -1.0, -0.5, 0.5, 1.0, 1.5];
+    let zs = [-1.5, -0.5, 0.5, 1.5];
+    let mut grid = vec![vec![0; zs.len()]; xs.len()];
+    for (i, &x) in xs.iter().enumerate() {
+        for (k, &z) in zs.iter().enumerate() {
+            grid[i][k] = s.add_node(Vec3::new(x, 3.0, z));
+        }
+    }
+    for i in 0..xs.len() {
+        for k in 0..zs.len() {
+            if i + 1 < xs.len() {
+                s.add_member(grid[i][k], grid[i + 1][k], m.clone(), sec.clone());
+            }
+            if k + 1 < zs.len() {
+                s.add_member(grid[i][k], grid[i][k + 1], m.clone(), sec.clone());
+            }
+        }
+    }
+    let (last_x, last_z) = (xs.len() - 1, zs.len() - 1);
+    let corners = [(0, 0), (last_x, 0), (last_x, last_z), (0, last_z)];
+    let mut feet = Vec::new();
+    for &(i, k) in &corners {
+        let f = s.add_node(Vec3::new(xs[i], 0.0, zs[k]));
+        s.add_member(f, grid[i][k], m.clone(), sec.clone());
+        s.add_support(Support::fixed(f));
+        feet.push(f);
+    }
+    if braced {
+        for c in 0..4 {
+            let (a, b) = (corners[c], corners[(c + 1) % 4]);
+            s.add_member(feet[c], grid[b.0][b.1], m.clone(), sec.clone());
+            s.add_member(feet[(c + 1) % 4], grid[a.0][a.1], m.clone(), sec.clone());
+        }
+    }
+    s
+}

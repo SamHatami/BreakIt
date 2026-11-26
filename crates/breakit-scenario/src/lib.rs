@@ -15,6 +15,7 @@
 //! Like `breakit-core`, this crate has no engine dependency.
 
 pub mod cost;
+pub mod equipment;
 pub mod limits;
 pub mod loads;
 pub mod report;
@@ -25,7 +26,7 @@ pub use cost::{Bill, CostModel, JointClass, JointPrices};
 pub use limits::{check_limits, PlayMode, Violation};
 pub use loads::{Binding, DeckNodes, VehiclePose};
 pub use report::{Criterion, Report};
-pub use run::{evaluate, Happening, Phase, TestRun, TimelineEntry};
+pub use run::{evaluate, Happening, PayloadMeasured, Phase, TestRun, TimelineEntry};
 pub use scenario::*;
 
 /// The scenarios that ship with the game, as (file name, RON text).
@@ -37,6 +38,10 @@ pub const BUILTIN: &[(&str, &str)] = &[
     (
         "quake_tower.ron",
         include_str!("../scenarios/quake_tower.ron"),
+    ),
+    (
+        "plant_platform.ron",
+        include_str!("../scenarios/plant_platform.ron"),
     ),
 ];
 
