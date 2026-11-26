@@ -22,7 +22,7 @@ use faer::dyn_stack::{MemBuffer, MemStack, StackReq};
 use faer::linalg::cholesky::llt::factor::LltRegularization;
 use faer::sparse::linalg::cholesky::{
     factorize_symbolic_cholesky, CholeskySymbolicParams, LltRef, SymbolicCholesky,
-    SymmetricOrdering,
+    SymbolicCholeskyRaw, SymmetricOrdering,
 };
 use faer::sparse::{SparseColMat, Triplet};
 use faer::{ColMut, Conj, Par, Side};
@@ -37,6 +37,8 @@ pub const fn tri(r: usize, c: usize) -> usize {
 }
 
 const ABSENT: u32 = u32::MAX;
+const MIN_HOLD: usize = 4;
+const MAX_HOLD: usize = 64;
 
 /// How hard the solver works per call.
 #[derive(Clone, Copy, Debug)]
@@ -46,9 +48,11 @@ pub struct Policy {
     pub tolerance: f64,
     /// Cost of a numeric factorisation, in CG iterations. Once the extra
     /// iterations spent because the factorisation is old add up to this, a
-    /// new one is computed before the next solve.
+    /// new one is computed before the next solve. 0 = estimate it from the
+    /// fill of the factorisation.
     pub refactor_cost: usize,
     /// Give up on CG at this many iterations: refactorise and solve directly.
+    /// 0 = twice the refactor cost.
     pub max_iters: usize,
     /// Refactorise at least every this many solves (0 = no limit).
     pub max_age: usize,
@@ -80,11 +84,18 @@ pub struct LinSolver {
     l_values: Vec<f64>,
     has_factor: bool,
     want_factor: bool,
+    /// Estimated cost of a factorisation in CG iterations, from the fill.
+    auto_refactor_cost: usize,
     age: usize,
     /// CG iterations of the first solve after the last factorisation, and
     /// the iterations spent beyond that since.
     base_iters: usize,
     wasted_iters: usize,
+    /// While the matrix changes too fast for an old factorisation to pay
+    /// (a violent collapse), factorise every solve for `direct_left` solves,
+    /// then probe again; `direct_hold` is the length of the next such run.
+    direct_left: usize,
+    direct_hold: usize,
     stack: MemBuffer,
     r: Vec<f64>,
     z: Vec<f64>,
@@ -116,7 +127,10 @@ impl LinSolver {
         let sym = mat.symbolic();
         let (cp, ri) = (sym.col_ptr(), sym.row_idx());
         let find = |r: usize, c: usize| {
-            (cp[c] + ri[cp[c]..cp[c + 1]].binary_search(&r).expect("entry in pattern")) as u32
+            (cp[c]
+                + ri[cp[c]..cp[c + 1]]
+                    .binary_search(&r)
+                    .expect("entry in pattern")) as u32
         };
         let diag_pos = (0..n).map(|i| find(i, i)).collect();
         let block_pos = blocks
@@ -140,6 +154,35 @@ impl LinSolver {
             CholeskySymbolicParams::default(),
         )
         .ok()?;
+        let (mut f_factor, mut f_solve) = (0.0f64, 2.0 * mat.compute_nnz() as f64);
+        let mut count = |c: usize| {
+            f_factor += (c * c) as f64;
+            f_solve += 4.0 * c as f64;
+        };
+        match symbolic.raw() {
+            SymbolicCholeskyRaw::Simplicial(s) => {
+                for w in s.col_ptr().windows(2) {
+                    count(w[1] - w[0]);
+                }
+            }
+            SymbolicCholeskyRaw::Supernodal(s) => {
+                for i in 0..s.n_supernodes() {
+                    let width = s.supernode_end()[i] - s.supernode_begin()[i];
+                    let below = s.supernode(i).pattern().len();
+                    for j in 0..width {
+                        count(below + width - j);
+                    }
+                }
+            }
+        }
+        // Measured on frames of 100 to 5,000 members: per flop, a supernodal
+        // factorisation runs about three times faster than the triangular
+        // solves, a simplicial one slightly slower.
+        let speed = match symbolic.raw() {
+            SymbolicCholeskyRaw::Simplicial(_) => 1.2,
+            SymbolicCholeskyRaw::Supernodal(_) => 0.33,
+        };
+        let auto_refactor_cost = (speed * f_factor / f_solve).clamp(2.0, 40.0).round() as usize;
         let par = Par::Seq;
         let req = StackReq::any_of(&[
             symbolic.factorize_numeric_llt_scratch::<f64>(par, Default::default()),
@@ -155,9 +198,12 @@ impl LinSolver {
             symbolic,
             has_factor: false,
             want_factor: true,
+            auto_refactor_cost,
             age: 0,
             base_iters: 0,
             wasted_iters: 0,
+            direct_left: 0,
+            direct_hold: MIN_HOLD,
             r: vec![0.0; n],
             z: vec![0.0; n],
             p: vec![0.0; n],
@@ -198,21 +244,34 @@ impl LinSolver {
     }
 
     /// Solve A x = b for the matrix assembled since the last [`clear`].
-    /// `b` is overwritten with scratch data. Returns false if the matrix is
+    /// Returns false if the matrix is
     /// not positive definite.
-    pub fn solve(&mut self, b: &mut [f64], x: &mut [f64], policy: &Policy) -> bool {
+    pub fn solve(&mut self, b: &[f64], x: &mut [f64], policy: &Policy) -> bool {
         let t0 = std::time::Instant::now();
         let f0 = self.stats.factor_seconds;
         let ok = self.solve_inner(b, x, policy);
-        self.stats.solve_seconds +=
-            t0.elapsed().as_secs_f64() - (self.stats.factor_seconds - f0);
+        self.stats.solve_seconds += t0.elapsed().as_secs_f64() - (self.stats.factor_seconds - f0);
         ok
     }
 
-    fn solve_inner(&mut self, b: &mut [f64], x: &mut [f64], policy: &Policy) -> bool {
+    fn solve_inner(&mut self, b: &[f64], x: &mut [f64], policy: &Policy) -> bool {
+        let refactor_cost = if policy.refactor_cost == 0 {
+            self.auto_refactor_cost
+        } else {
+            policy.refactor_cost
+        };
+        let max_iters = if policy.max_iters == 0 {
+            2 * refactor_cost.max(3)
+        } else {
+            policy.max_iters
+        };
         self.stats.solves += 1;
         if self.n == 0 {
             return true;
+        }
+        if self.direct_left > 0 {
+            self.direct_left -= 1;
+            self.want_factor = true;
         }
         let stale = self.has_factor
             && !self.want_factor
@@ -227,15 +286,20 @@ impl LinSolver {
             return true;
         }
         self.age += 1;
-        let iters = self.pcg(b, x, policy);
-        self.stats.cg_iterations += iters.unwrap_or(policy.max_iters);
+        let iters = self.pcg(b, x, policy.tolerance, max_iters);
+        self.stats.cg_iterations += iters.unwrap_or(max_iters);
         match iters {
             Some(k) => {
                 if self.age == 2 {
                     self.base_iters = k;
+                    if k >= refactor_cost {
+                        self.hold_direct();
+                    } else {
+                        self.direct_hold = MIN_HOLD;
+                    }
                 }
                 self.wasted_iters += k.saturating_sub(self.base_iters);
-                if self.wasted_iters >= policy.refactor_cost {
+                if self.wasted_iters >= refactor_cost {
                     self.want_factor = true;
                 }
                 true
@@ -243,6 +307,7 @@ impl LinSolver {
             None => {
                 // The old factorisation is no longer a useful preconditioner.
                 self.stats.fallbacks += 1;
+                self.hold_direct();
                 if !self.factor() {
                     return false;
                 }
@@ -258,6 +323,11 @@ impl LinSolver {
                 true
             }
         }
+    }
+
+    fn hold_direct(&mut self) {
+        self.direct_left = self.direct_hold;
+        self.direct_hold = (2 * self.direct_hold).min(MAX_HOLD);
     }
 
     fn factor(&mut self) -> bool {
@@ -316,9 +386,9 @@ impl LinSolver {
     }
 
     /// Preconditioned CG from x = 0. Returns the iteration count, or None if
-    /// it did not converge within `policy.max_iters`; `self.r` then holds the
+    /// it did not converge within `max_iters`; `self.r` then holds the
     /// residual of the returned x.
-    fn pcg(&mut self, b: &[f64], x: &mut [f64], policy: &Policy) -> Option<usize> {
+    fn pcg(&mut self, b: &[f64], x: &mut [f64], tolerance: f64, max_iters: usize) -> Option<usize> {
         let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f64>();
         let (mut r, mut z, mut p, mut ap) = (
             std::mem::take(&mut self.r),
@@ -328,11 +398,11 @@ impl LinSolver {
         );
         x.fill(0.0);
         r.copy_from_slice(b);
-        let target = dot(b, b) * policy.tolerance * policy.tolerance;
+        let target = dot(b, b) * tolerance * tolerance;
         let mut result = if target > 0.0 { None } else { Some(0) };
         let mut rz = 0.0;
         if result.is_none() {
-            for k in 1..=policy.max_iters {
+            for k in 1..=max_iters {
                 z.copy_from_slice(&r);
                 self.apply_factor(&mut z);
                 let rz_new = dot(&r, &z);

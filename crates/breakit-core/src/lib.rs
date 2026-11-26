@@ -20,7 +20,7 @@ pub mod model;
 pub mod section;
 pub mod statics;
 
-pub use dynamics::{BreakCause, BreakEvent, DynamicSim, SimConfig, Solver};
+pub use dynamics::{BreakCause, BreakEvent, DynamicSim, SimConfig, Solver, SolverStats};
 pub use material::Material;
 pub use model::{Member, NodeLoad, Structure, Support};
 pub use section::Section;
