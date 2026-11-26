@@ -99,7 +99,7 @@ impl ParticlePool {
                     position: b.origin + offset,
                     velocity: radial * r.range(0.2, 1.2) + Vec3::Y * r.range(0.0, 0.6),
                     life: r.range(1.5, 3.5),
-                    size: r.range(0.3, 0.8) * b.scale,
+                    size: (r.range(0.25, 0.6) * b.scale).max(0.06),
                     color: Vec4::new(0.55, 0.53, 0.5, 1.0) * r.range(0.85, 1.1),
                     glow: 0.0,
                     drag: 2.5,

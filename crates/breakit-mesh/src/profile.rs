@@ -179,7 +179,10 @@ impl Profile {
         let unique = |lp: &[OutlineVertex]| {
             let mut pts: Vec<Vec2> = Vec::with_capacity(lp.len());
             for v in lp {
-                if pts.last().map_or(true, |q| (*q - v.p).length_squared() > 1e-14) {
+                if pts
+                    .last()
+                    .map_or(true, |q| (*q - v.p).length_squared() > 1e-14)
+                {
                     pts.push(v.p);
                 }
             }
@@ -212,15 +215,18 @@ impl Profile {
         let at = |k: usize, i: usize| (k * n + i % n) as u32;
         for k in 0..levels - 1 {
             for i in 0..n {
-                cap.triangles.push([at(k, i), at(k, i + 1), at(k + 1, i + 1)]);
-                cap.triangles.push([at(k, i), at(k + 1, i + 1), at(k + 1, i)]);
+                cap.triangles
+                    .push([at(k, i), at(k, i + 1), at(k + 1, i + 1)]);
+                cap.triangles
+                    .push([at(k, i), at(k + 1, i + 1), at(k + 1, i)]);
             }
         }
         if inner.is_none() {
             let centre = cap.points.len() as u32;
             cap.points.push(Vec2::ZERO);
             for i in 0..n {
-                cap.triangles.push([at(levels - 1, i), at(levels - 1, i + 1), centre]);
+                cap.triangles
+                    .push([at(levels - 1, i), at(levels - 1, i + 1), centre]);
             }
         }
         cap

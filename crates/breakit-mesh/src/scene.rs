@@ -11,7 +11,7 @@
 //! * `debris` and `particles`: loose chunks, sparks, dust, splinters, fibres.
 //!
 //! The per-frame cost is one 176-byte record per slot (see
-//! `examples/bench.rs`); the meshes themselves are never touched.
+//! `examples/visual_bench.rs`); the meshes themselves are never touched.
 
 use glam::{Quat, Vec3, Vec4};
 
@@ -21,9 +21,7 @@ use crate::fracture::{fracture, BreakInput, DebrisPiece, PiecePart, Rng};
 use crate::particles::ParticlePool;
 use crate::pose::{flags, GpuMember, MemberPose};
 use crate::profile::Profile;
-use crate::state::{
-    MaterialKind, MemberVisualState, VisualBreak, VisualFrame, VisualStructure,
-};
+use crate::state::{MaterialKind, MemberVisualState, VisualBreak, VisualFrame, VisualStructure};
 
 /// Which template a slot draws with.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -152,7 +150,13 @@ impl VisualScene {
     /// every member's flags (e.g. [`flags::STRESS_VIEW`]).
     pub fn update(&mut self, frame: &VisualFrame, dt: f32, member_flags: u32) {
         self.time += dt;
-        let node_rot = |n: usize| frame.node_rotations.get(n).copied().unwrap_or(Quat::IDENTITY);
+        let node_rot = |n: usize| {
+            frame
+                .node_rotations
+                .get(n)
+                .copied()
+                .unwrap_or(Quat::IDENTITY)
+        };
 
         for br in &frame.breaks {
             if br.member < self.broken.len() && !self.broken[br.member] {
@@ -180,7 +184,12 @@ impl VisualScene {
                 ta: pose.ta.extend(st.hinge_damage[0]),
                 tb: pose.tb.extend(st.hinge_damage[1]),
                 damage0: Vec4::new(st.utilization, st.crack[0], st.crack[1], st.crack_span),
-                damage1: Vec4::new(st.crush[0], st.crush[1], st.delamination, st.yielded as u32 as f32),
+                damage1: Vec4::new(
+                    st.crush[0],
+                    st.crush[1],
+                    st.delamination,
+                    st.yielded as u32 as f32,
+                ),
                 info: Vec4::new(
                     pose.rest_length,
                     r.seed,
@@ -246,7 +255,13 @@ impl VisualScene {
             _ => 0.0,
         };
 
-        let node_q = |n: usize| frame.node_rotations.get(n).copied().unwrap_or(Quat::IDENTITY);
+        let node_q = |n: usize| {
+            frame
+                .node_rotations
+                .get(n)
+                .copied()
+                .unwrap_or(Quat::IDENTITY)
+        };
         let to_local = |p: &MemberPose, n: usize| {
             let inv = node_q(n).inverse();
             p.transformed(inv, -(inv * frame.node_positions[n]))
@@ -273,11 +288,18 @@ impl VisualScene {
             ..pose
         };
         let ring_of = |rng: &mut Rng, free_len: f32, axis: Vec3| {
-            let side = axis.cross(rng.unit_vec()).try_normalize().unwrap_or(Vec3::Y);
+            let side = axis
+                .cross(rng.unit_vec())
+                .try_normalize()
+                .unwrap_or(Vec3::Y);
             // The swing is that of the whole pose's far end; scale it so the
             // visible free end moves a few percent of its length.
-            let amp = (0.05 * free_len).min(0.6 * depth) / (free_len / l).max(0.05).powi(2).max(0.2);
-            (side * amp.min(0.25 * l), (70.0 / (1.0 + 5.0 * free_len)).clamp(9.0, 45.0))
+            let amp =
+                (0.05 * free_len).min(0.6 * depth) / (free_len / l).max(0.05).powi(2).max(0.2);
+            (
+                side * amp.min(0.25 * l),
+                (70.0 / (1.0 + 5.0 * free_len)).clamp(9.0, 45.0),
+            )
         };
         let (ring_a, omega_a) = ring_of(&mut rng, sb * l, pose.ta);
         let (ring_b, omega_b) = ring_of(&mut rng, (1.0 - sb) * l, pose.tb);
@@ -343,8 +365,8 @@ impl VisualScene {
                     let start = c + q * Vec3::new(0.0, cy, cz);
                     let len = depth * rng.range(1.0, 2.0);
                     let out = q * Vec3::new(0.0, cy.signum(), cz.signum()) * 0.7;
-                    let bend = (out * rng.range(0.05, 0.3) + Vec3::NEG_Y * rng.range(0.05, 0.35))
-                        * depth;
+                    let bend =
+                        (out * rng.range(0.05, 0.3) + Vec3::NEG_Y * rng.range(0.05, 0.35)) * depth;
                     let t = t * dir;
                     let end = start + t * len + bend;
                     let tip_dir = (t * len * 0.35 + bend * 2.0).normalize();
@@ -388,11 +410,7 @@ impl VisualScene {
         // Loose pieces and particle bursts.
         let vel = |n: usize| match self.prev_positions.get(n) {
             Some(p) if dt > 0.0 => (frame.node_positions[n] - *p) / dt,
-            _ => frame
-                .node_velocities
-                .get(n)
-                .copied()
-                .unwrap_or(Vec3::ZERO),
+            _ => frame.node_velocities.get(n).copied().unwrap_or(Vec3::ZERO),
         };
         let f = fracture(&BreakInput {
             profile: &profile,
@@ -435,6 +453,7 @@ mod tests {
                 rest_length: 4.0,
                 seed: 0.42,
             }],
+            node_count: 2,
             consumed_breaks: 0,
         };
         let frame = VisualFrame {
@@ -519,7 +538,10 @@ mod tests {
         }
         assert!(moved > 0.01, "free end should swing, moved {moved}");
         scene.update(&frame, 1.0 / 60.0, 0);
-        assert!((scene.gpu[0].pb - last.pb).length() < 1e-5, "should have settled");
+        assert!(
+            (scene.gpu[0].pb - last.pb).length() < 1e-5,
+            "should have settled"
+        );
         // Relaxed half is straight: end tangents agree.
         assert!((last.ta.truncate() - last.tb.truncate()).length() < 1e-3);
     }

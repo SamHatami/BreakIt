@@ -11,7 +11,7 @@
 //! * composite: delaminated ends whose plies splay apart (brooming), fibre dust
 //!
 //! Generating the pieces of one break costs tens of microseconds (see
-//! `examples/bench.rs`), so nothing is pre-cut.
+//! `examples/visual_bench.rs`), so nothing is pre-cut.
 
 use glam::{Quat, Vec2, Vec3};
 

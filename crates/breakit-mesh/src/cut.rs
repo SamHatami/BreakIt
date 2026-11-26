@@ -22,7 +22,11 @@ fn fract(x: f32) -> f32 {
 
 /// Cheap 2D hash to 0..1, identical in the shader.
 pub fn hash2(p: Vec2) -> f32 {
-    let (mut x, mut y, mut z) = (fract(p.x * 0.1031), fract(p.y * 0.1031), fract(p.x * 0.1031));
+    let (mut x, mut y, mut z) = (
+        fract(p.x * 0.1031),
+        fract(p.y * 0.1031),
+        fract(p.x * 0.1031),
+    );
     let d = x * (y + 33.33) + y * (z + 33.33) + z * (x + 33.33);
     x += d;
     y += d;
@@ -49,8 +53,10 @@ pub fn cut_offset(kind: MaterialKind, yz: Vec2, depth: f32, seed: f32) -> f32 {
     let q = yz / d + Vec2::splat(seed * 37.0);
     match kind {
         MaterialKind::Steel => {
-            let tilt = Vec2::new(hash2(Vec2::splat(seed * 91.0)), hash2(Vec2::splat(seed * 53.0)))
-                - Vec2::splat(0.5);
+            let tilt = Vec2::new(
+                hash2(Vec2::splat(seed * 91.0)),
+                hash2(Vec2::splat(seed * 53.0)),
+            ) - Vec2::splat(0.5);
             d * (0.5 * tilt.dot(yz / d) + 0.12 * (vnoise(q * 9.0) - 0.5))
         }
         MaterialKind::Timber => {

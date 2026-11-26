@@ -149,7 +149,8 @@ impl MemberPose {
         } else {
             self.qb
         };
-        let q = self.qa.slerp(qb, s);
+        // Normalised lerp, as in the shader.
+        let q = (self.qa + (qb - self.qa) * s).normalize();
         let x = q * Vec3::X;
         (Quat::from_rotation_arc(x, tangent) * q).normalize()
     }

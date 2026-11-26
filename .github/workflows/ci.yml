@@ -17,6 +17,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo test --release -p breakit-core
+      - run: cargo test --release -p breakit-mesh
 
   # Bevy app: needs system libs for windowing/input (audio is off, so no ALSA).
   game:
@@ -32,4 +33,5 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo check -p breakit-game --all-targets
+      - run: cargo check -p breakit-render --all-targets
       - run: cargo test -p breakit-game

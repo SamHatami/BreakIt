@@ -91,6 +91,7 @@ pub struct VisualBreak {
 #[derive(Clone, Debug)]
 pub struct VisualStructure {
     pub members: Vec<VisualMember>,
+    pub node_count: usize,
     /// Number of solver break events already turned into debris.
     pub consumed_breaks: usize,
 }
@@ -146,6 +147,7 @@ impl VisualStructure {
             .collect();
         Self {
             members,
+            node_count: s.nodes.len(),
             consumed_breaks: 0,
         }
     }
@@ -165,8 +167,8 @@ impl VisualStructure {
     }
 
     /// Read this frame's state from the dynamic solver.
-    pub fn capture(&mut self, sim: &DynamicSim, structure: &Structure) -> VisualFrame {
-        let n = structure.nodes.len();
+    pub fn capture(&mut self, sim: &DynamicSim) -> VisualFrame {
+        let n = self.node_count;
         let mut f = VisualFrame {
             node_positions: (0..n).map(|i| v3(sim.position(i))).collect(),
             node_rotations: (0..n)
