@@ -244,6 +244,7 @@ fn main() {
     let sizes = arg("--sizes").unwrap_or("s,m,l".into());
     let only = arg("--only");
     let with_static = args.iter().any(|a| a == "--static");
+    let worst = args.iter().any(|a| a == "--worst");
     let short = args.iter().any(|a| a == "--short");
     let frames_elastic = if short { 2 } else { 180 };
     let frames_collapse = if short { 2 } else { 300 };
@@ -301,6 +302,7 @@ fn main() {
                 let mut sim = DynamicSim::new(s, cfg.clone());
                 let mut scale = 1.0;
                 let mut t = Vec::new();
+                let mut frame_stats: Vec<(SolverStats, SolverStats)> = Vec::new();
                 for _ in 0..frames_collapse {
                     if sim.break_events().is_empty() {
                         scale *= 1.03;
@@ -308,9 +310,32 @@ fn main() {
                             sim.set_force(n, push * scale);
                         }
                     }
+                    let before = sim.solver_stats();
                     let t0 = Instant::now();
                     sim.step(dt);
                     t.push(t0.elapsed().as_secs_f64() * 1e3);
+                    frame_stats.push((before, sim.solver_stats()));
+                }
+                if worst {
+                    // The slowest collapse frames and what they spent.
+                    let mut order: Vec<usize> = (0..t.len()).collect();
+                    order.sort_by(|&a, &b| t[b].partial_cmp(&t[a]).unwrap());
+                    for &f in order.iter().take(8) {
+                        let (a, b) = &frame_stats[f];
+                        eprintln!(
+                            "  frame {f}: {:.1} ms, solves {}, factorisations {}, cg {}, fallbacks {}, backtracks {}, extra iterations {}, assembly {:.1} factor {:.1} solve {:.1} ms",
+                            t[f],
+                            b.linear.solves - a.linear.solves,
+                            b.linear.factorizations - a.linear.factorizations,
+                            b.linear.cg_iterations - a.linear.cg_iterations,
+                            b.linear.fallbacks - a.linear.fallbacks,
+                            b.backtracks - a.backtracks,
+                            b.extra_iterations - a.extra_iterations,
+                            (b.linear.assembly_seconds - a.linear.assembly_seconds) * 1e3,
+                            (b.linear.factor_seconds - a.linear.factor_seconds) * 1e3,
+                            (b.linear.solve_seconds - a.linear.solve_seconds) * 1e3,
+                        );
+                    }
                 }
                 let co = timing(t);
                 let st_co = sim.solver_stats().linear;
