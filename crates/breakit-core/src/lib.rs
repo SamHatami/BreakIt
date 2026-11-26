@@ -22,13 +22,14 @@ pub mod concrete;
 pub mod damage;
 pub mod dynamics;
 pub mod frame;
+pub mod linsolve;
 pub mod material;
 pub mod model;
 pub mod section;
 pub mod statics;
 
 pub use damage::{DamageState, MemberDamage};
-pub use dynamics::{BreakCause, BreakEvent, DynamicSim, SimConfig, Solver};
+pub use dynamics::{BreakCause, BreakEvent, DynamicSim, SimConfig, Solver, SolverStats};
 pub use material::{Material, MaterialKind};
 pub use model::{Member, NodeLoad, Structure, Support};
 pub use section::{Section, Shape};
