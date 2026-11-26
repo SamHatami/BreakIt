@@ -37,10 +37,37 @@
 //!
 //! The case's window ramp scales the depth above the bed, the wave height and
 //! the current together from 0 to full.
+//!
+//! # Simulated water
+//!
+//! The analytic waves above pass through the structure and never break. A
+//! water simulation (the `breakit-water` crate) can replace them: put its
+//! current state into [`Water::field`] each frame and the same Morison and
+//! buoyancy loads are evaluated on the simulated surface and velocities
+//! instead, so what the player sees is what pushes on the structure. The
+//! window ramp then scales the forces, since the simulated water is already
+//! there.
+
+use std::sync::Arc;
 
 use super::{smooth_ramp, View, G};
 use crate::section::Shape;
 use crate::Vec3;
+
+/// Water kinematics from a simulation, read by [`Water::apply`] in place of
+/// the analytic [`Sea`]. See the module docs.
+pub trait WaterField: std::fmt::Debug + Send + Sync {
+    /// Lowest bed level under the water, absolute y, m.
+    fn bed(&self) -> f64;
+    /// Upper bound of the water surface anywhere, absolute y, m.
+    fn max_surface(&self) -> f64;
+    /// Water surface at horizontal position (x, z), absolute y, m, or
+    /// `None` where it is dry.
+    fn surface(&self, x: f64, z: f64) -> Option<f64>;
+    /// Water velocity (m/s) and local acceleration `∂u/∂t` (m/s²) at `p`,
+    /// or `None` if `p` is dry (above the surface or below the bed).
+    fn kinematics(&self, p: Vec3) -> Option<(Vec3, Vec3)>;
+}
 
 /// Shape of the current velocity over the depth.
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
@@ -153,6 +180,11 @@ pub struct Water {
     pub samples: usize,
     /// Rest position of the paddle face along the wave direction (`ξ = p·dir`), m.
     pub paddle: f64,
+    /// Simulated water to take the kinematics from instead of the analytic
+    /// waves (see [`WaterField`]). Runtime state: set each frame by whoever
+    /// runs the simulation, `None` for the analytic model.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub field: Option<Arc<dyn WaterField>>,
     #[cfg_attr(feature = "serde", serde(skip))]
     pub state: PaddleState,
 }
@@ -172,6 +204,7 @@ impl Default for Water {
             sealed: true,
             samples: 8,
             paddle: -5.0,
+            field: None,
             state: PaddleState::default(),
         }
     }
@@ -614,15 +647,25 @@ impl Water {
     pub fn apply(&mut self, v: &View, t: f64, ramp: f64, scale: f64, _dt: f64, out: &mut [Vec3]) {
         let sea = self.sea(t, ramp);
         self.advance_paddle(&sea);
-        if sea.depth <= 0.0 || scale == 0.0 {
+        // Simulated water is already in the flume: the ramp fades the
+        // forces in instead of the depth.
+        let field = self.field.clone();
+        let (scale, top, bed) = match &field {
+            Some(f) => (scale * ramp.clamp(0.0, 1.0), f.max_surface(), f.bed()),
+            None => (scale, sea.max_surface(), sea.bed),
+        };
+        if (field.is_none() && sea.depth <= 0.0) || scale == 0.0 {
             return;
         }
+        let kinematics = |p: Vec3| match &field {
+            Some(f) => f.kinematics(p),
+            None => sea.kinematics(p),
+        };
         let rho = self.density;
-        let top = sea.max_surface();
         let co = &self.coefficients;
         for m in 0..v.structure.members.len() {
             let Some(mn) = v.member(m) else { continue };
-            if mn.xa.y.min(mn.xb.y) > top || mn.xa.y.max(mn.xb.y) < sea.bed {
+            if mn.xa.y.min(mn.xb.y) > top || mn.xa.y.max(mn.xb.y) < bed {
                 continue;
             }
             let g = &v.geometry.members[m];
@@ -641,7 +684,7 @@ impl Water {
             let shape = g.shape;
             let (dy, dz) = (g.depth_y, g.depth_z);
             View::distribute(&mn, self.samples, out, |_, p, vel| {
-                let Some((u, a)) = sea.kinematics(p) else {
+                let Some((u, a)) = kinematics(p) else {
                     return Vec3::zeros();
                 };
                 let ur = u - vel;

@@ -247,6 +247,15 @@ impl TestRun {
     pub fn loads(&self) -> &LoadSet {
         &self.loads
     }
+    /// The load cases, for runtime hooks such as handing a water case the
+    /// simulated water each step. Not for changing what the sheet asks.
+    pub fn loads_mut(&mut self) -> &mut LoadSet {
+        &mut self.loads
+    }
+    /// The structure under test.
+    pub fn structure(&self) -> &Structure {
+        &self.structure
+    }
     /// Test time, s. Negative while settling.
     pub fn time(&self) -> f64 {
         self.clock

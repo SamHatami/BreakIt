@@ -2116,6 +2116,8 @@ dependencies = [
  "breakit-playground",
  "breakit-render",
  "breakit-scenario",
+ "breakit-water",
+ "breakit-water-render",
 ]
 
 [[package]]
@@ -2170,6 +2172,22 @@ dependencies = [
  "breakit-core",
  "ron",
  "serde",
+]
+
+[[package]]
+name = "breakit-water"
+version = "0.1.0"
+dependencies = [
+ "breakit-core",
+]
+
+[[package]]
+name = "breakit-water-render"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "breakit-lab",
+ "breakit-water",
 ]
 
 [[package]]

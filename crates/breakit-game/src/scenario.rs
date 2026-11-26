@@ -25,16 +25,18 @@ pub use breakit_scenario::Report;
 pub enum Rig {
     Bridges,
     Towers,
+    Water,
     Sandbox,
 }
 
 impl Rig {
-    pub const ALL: [Rig; 3] = [Rig::Bridges, Rig::Towers, Rig::Sandbox];
+    pub const ALL: [Rig; 4] = [Rig::Bridges, Rig::Towers, Rig::Water, Rig::Sandbox];
 
     pub fn label(self) -> &'static str {
         match self {
             Rig::Bridges => "Bridges",
             Rig::Towers => "Towers",
+            Rig::Water => "Water",
             Rig::Sandbox => "Sandbox",
         }
     }
@@ -44,6 +46,7 @@ impl Rig {
         match self {
             Rig::Bridges => 0,
             Rig::Towers => 3,
+            Rig::Water => 2,
             Rig::Sandbox => 1,
         }
     }
@@ -51,6 +54,7 @@ impl Rig {
     fn from_group(group: &str) -> Self {
         match group {
             "Towers" => Rig::Towers,
+            "Water" => Rig::Water,
             _ => Rig::Bridges,
         }
     }

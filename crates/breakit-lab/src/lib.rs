@@ -36,7 +36,7 @@ pub use palette::Mat;
 pub use rigs::{LabRigs, RigModels, RigSet, RigSlot};
 pub use scenery::{Anchor, Scenery};
 pub use surface::{LabMaterial, LabSurface, LabWater, SurfaceKind};
-pub use table::{Flat, Flume, PlayTable, Ravine, ShakeTable, TableInsert, TableTop};
+pub use table::{Flat, Flume, PlayTable, Ravine, ShakeTable, TableInsert, TableTop, TableWater};
 
 #[derive(Resource, Clone, Debug)]
 pub struct LabSettings {

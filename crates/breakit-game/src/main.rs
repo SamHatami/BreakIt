@@ -27,6 +27,7 @@ mod sound;
 mod testrun;
 mod ui;
 mod visuals;
+mod water;
 
 use bevy::prelude::*;
 use breakit_lab::{LabPlugin, PlayTable};
@@ -72,6 +73,7 @@ fn main() {
             perf::PerfPlugin,
             playground::PlaygroundPlugin,
             sound::SoundPlugin,
+            water::WaterPlugin,
         ))
         .add_systems(Update, cycle_table.run_if(in_state(flow::Screen::Build)))
         .run();
@@ -86,6 +88,6 @@ fn cycle_table(
 ) {
     if keys.just_pressed(KeyCode::KeyT) {
         *index += 1;
-        *table = PlayTable::builtin(*index);
+        *table = water::play_table(*index);
     }
 }

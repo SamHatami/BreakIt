@@ -10,6 +10,8 @@ members = [
     "crates/breakit-playground",
     "crates/breakit-render",
     "crates/breakit-scenario",
+    "crates/breakit-water",
+    "crates/breakit-water-render",
 ]
 
 [workspace.package]

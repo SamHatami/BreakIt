@@ -247,7 +247,7 @@ fn sync_table(
     let rig = sheets.current().rig;
     if *shown != Some(rig) {
         *shown = Some(rig);
-        *table = breakit_lab::PlayTable::builtin(rig.table());
+        *table = crate::water::play_table(rig.table());
     }
 }
 
