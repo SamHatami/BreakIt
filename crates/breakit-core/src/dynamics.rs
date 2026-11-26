@@ -20,7 +20,8 @@
 //! elongation the same way. Members break when accumulated plastic deformation
 //! passes the material's capacity, or at first yield for brittle materials.
 //!
-//! Simplifications for now: no axial-bending interaction in the yield check,
+//! Axial force reduces the plastic moment, Mp,N = Mp (1 − (N/Ny)²).
+//! Simplifications for now: the two bending planes yield independently,
 //! torsion stays elastic, and supports fix either all translations and/or all
 //! rotations of a node.
 
@@ -51,8 +52,8 @@ pub struct SimConfig {
     pub iterations: usize,
     /// Direct solver only: refactorise the system matrix every this many
     /// solves and reuse the factorisation in between. The matrix only changes
-    /// as members rotate, but a stale one currently diverges under heavy
-    /// compression (see docs/solver-spike.md), so the default is 1.
+    /// as members rotate, so a factorisation a few substeps old still
+    /// converges. 4 with 16 substeps passes every test, including buckling.
     pub refactor_every: usize,
     pub gravity: Vec3,
     /// Linear velocity damping, 1/s. Keeps collapses readable and lets
@@ -68,7 +69,7 @@ impl Default for SimConfig {
             solver: Solver::Direct,
             substeps: 16,
             iterations: 1,
-            refactor_every: 1,
+            refactor_every: 4,
             gravity: Vec3::new(0.0, -9.81, 0.0),
             damping: 0.5,
             plasticity: true,
@@ -267,7 +268,7 @@ impl DynamicSim {
     pub fn is_broken(&self, member: usize) -> bool {
         self.beams[member].broken
     }
-    /// Linear interaction utilisation from the last substep (1.0 = yield).
+    /// Utilisation from the last substep: (N/Ny)² + My/Mpy + Mz/Mpz (1.0 = yield).
     pub fn utilization(&self, member: usize) -> f64 {
         self.beams[member].utilization
     }
@@ -306,18 +307,27 @@ impl DynamicSim {
     fn substep(&mut self, h: f64) {
         let damp = (-self.config.damping * h).exp();
         let g = self.config.gravity;
+        let direct = self.config.solver == Solver::Direct;
         for b in &mut self.bodies {
             b.x_prev = b.x;
             b.q_prev = b.q;
             if b.inv_mass > 0.0 {
-                b.v = b.v * damp + h * (g + b.force * b.inv_mass);
-                b.x += h * b.v;
+                let coast = b.v * damp;
+                b.v = coast + h * (g + b.force * b.inv_mass);
+                b.x_tilde = b.x + h * b.v;
+                // XPBD projects from the full prediction x̃. The direct solver
+                // instead starts from the force-free coast position and lets the
+                // linear solve take in the forces: a large load on a light node
+                // would otherwise throw x̃ a whole member length away, too far
+                // for one Gauss-Newton step to recover.
+                b.x = if direct { b.x + h * coast } else { b.x_tilde };
+            } else {
+                b.x_tilde = b.x;
             }
             if b.inv_inertia > 0.0 {
                 b.w *= damp;
                 b.q = rotate(b.q, b.w * h);
             }
-            b.x_tilde = b.x;
             b.q_tilde = b.q;
         }
         match self.config.solver {
@@ -602,7 +612,8 @@ impl DynamicSim {
             }
         }
 
-        let mut util = n.abs() / bm.n_yield;
+        let ratio = (n.abs() / bm.n_yield).min(1.0);
+        let mut util = ratio * ratio;
         for axis in 0..2 {
             let u = gm.axes[axis];
             let k4 = 4.0 * bm.ei_l[axis];
@@ -615,7 +626,10 @@ impl DynamicSim {
             for end in 0..2 {
                 let other = 1 - end;
                 let m = k4 * th[end] + k2 * th[other];
-                let mp = bm.m_plastic[axis];
+                // Axial force reduces the plastic moment: Mp,N = Mp (1 - n²),
+                // exact for a rectangle and close for tubes.
+                let ratio = (n.abs() / bm.n_yield).min(1.0);
+                let mp = bm.m_plastic[axis] * (1.0 - ratio * ratio).max(0.05);
                 if plastic && m.abs() > mp {
                     if bm.brittle {
                         cause = Some(BreakCause::Brittle);

@@ -234,3 +234,44 @@ fn broken_pieces_fall_freely() {
         "tip should have fallen away"
     );
 }
+
+#[test]
+fn axial_tension_lowers_the_plastic_moment() {
+    // Short and stiff, so the tension barely straightens the beam (P-delta).
+    let l = 0.5;
+    let (ny, mp) = (355e6 * tube().area, 355e6 * tube().zz);
+    let hinge = |axial: f64| {
+        let (s, ids) = cantilever(l, 8, Material::steel());
+        let mut sim = DynamicSim::new(&s, quiet(true));
+        // 80% of Mp at the root from the vertical load, plus axial tension.
+        ramp_load(
+            &mut sim,
+            ids[8],
+            Vec3::new(axial * ny, -0.8 * mp / l, 0.0),
+            1.0,
+            2.0,
+        );
+        sim.hinge_rotation(0)
+    };
+    assert_eq!(hinge(0.0), 0.0, "bending alone stays elastic");
+    // (0.6)² + 0.8 > 1, so the same moment yields once 60% of Ny is added.
+    assert!(hinge(0.6) > 0.0, "combined load should form a hinge");
+}
+
+#[test]
+fn short_stiff_members_survive_a_sudden_heavy_load() {
+    // 62 mm steel elements with a 25.6 kN load dropped on in one frame: a
+    // light, very stiff tip node. Regression test for the solver throwing the
+    // tip a whole element length in one substep.
+    let mut s = Structure::new();
+    let mat = Material::steel().elastic_only();
+    let ids = s.add_line(Vec3::zeros(), Vec3::new(0.5, 0.0, 0.0), 8, &mat, &tube());
+    s.add_support(Support::fixed(ids[0]));
+    let f = Vec3::new(0.0, -25_600.0, 0.0);
+    let stat = solve_static(&s, &[NodeLoad::force(ids[8], f)]).unwrap();
+    let mut sim = DynamicSim::new(&s, quiet(false));
+    sim.set_force(ids[8], f);
+    assert!(sim.settle(5.0, 1e-6));
+    let (d, e) = (sim.displacement(ids[8]).y, stat.displacements[ids[8]].y);
+    assert!(rel_err(d, e) < 0.01, "xpbd {d:e} vs static {e:e}");
+}

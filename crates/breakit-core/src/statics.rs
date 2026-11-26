@@ -1,10 +1,9 @@
 //! Linear static analysis of a 3D frame with the direct stiffness method.
 //!
 //! Each member is a 12-DOF Euler-Bernoulli beam element. The global system is
-//! assembled densely and solved with Cholesky; this is fine for the few
-//! hundred nodes of a prototype and gets replaced by a sparse solver later.
+//! assembled as a sparse matrix and solved with faer's sparse Cholesky.
 
-use nalgebra::{DMatrix, DVector, SMatrix, SVector};
+use nalgebra::{SMatrix, SVector};
 
 use crate::frame::member_axes;
 use crate::{NodeLoad, Structure, Vec3};
@@ -26,7 +25,8 @@ pub struct MemberForces {
     /// Shear forces along local y and z, N.
     pub vy: f64,
     pub vz: f64,
-    /// Linear interaction utilisation |N|/Ny + |My|/Mpy + |Mz|/Mpz (1.0 = yield).
+    /// Utilisation (N/Ny)² + |My|/Mpy + |Mz|/Mpz, matching the dynamic
+    /// solver's yield rule (1.0 = yield).
     pub utilization: f64,
 }
 
@@ -111,12 +111,17 @@ pub fn transformation(s: &Structure, m: usize) -> Mat12 {
     t
 }
 
-/// Solve K·u = f for the given nodal loads.
+/// Solve K·u = f for the given nodal loads (sparse Cholesky).
 pub fn solve_static(s: &Structure, loads: &[NodeLoad]) -> Result<StaticResult, SolveError> {
+    use faer::linalg::solvers::Solve;
+    use faer::sparse::{SparseColMat, Triplet};
+    use faer::{Mat, Side};
+
     let n = s.nodes.len() * 6;
-    let mut kg = DMatrix::<f64>::zeros(n, n);
-    let mut f = DVector::<f64>::zeros(n);
+    let mut f = vec![0.0; n];
+    let mut diag = vec![0.0; n];
     let mut ke_global = Vec::with_capacity(s.members.len());
+    let mut entries: Vec<(usize, usize, f64)> = Vec::with_capacity(s.members.len() * 78);
 
     for m in 0..s.members.len() {
         let t = transformation(s, m);
@@ -125,8 +130,11 @@ pub fn solve_static(s: &Structure, loads: &[NodeLoad]) -> Result<StaticResult, S
         let mem = &s.members[m];
         let dofs = element_dofs(mem.a, mem.b);
         for r in 0..12 {
+            diag[dofs[r]] += k[(r, r)];
             for c in 0..12 {
-                kg[(dofs[r], dofs[c])] += k[(r, c)];
+                if dofs[r] >= dofs[c] {
+                    entries.push((dofs[r], dofs[c], k[(r, c)]));
+                }
             }
         }
         ke_global.push((kl, t));
@@ -145,21 +153,35 @@ pub fn solve_static(s: &Structure, loads: &[NodeLoad]) -> Result<StaticResult, S
             restrained[sup.node * 6 + i] |= sup.fixed[i];
         }
     }
+    let mut map = vec![usize::MAX; n];
     let free: Vec<usize> = (0..n)
-        .filter(|&d| !restrained[d] && kg[(d, d)] != 0.0)
+        .filter(|&d| !restrained[d] && diag[d] != 0.0)
         .collect();
-    let nf = free.len();
-    let kff = DMatrix::from_fn(nf, nf, |r, c| kg[(free[r], free[c])]);
-    let ff = DVector::from_fn(nf, |r, _| f[free[r]]);
-    let chol = kff.cholesky().ok_or(SolveError::Unstable)?;
-    let uf = chol.solve(&ff);
-    // Reject near-singular systems that Cholesky still accepted.
-    if !uf.iter().all(|v| v.is_finite()) || uf.amax() > 1e6 {
-        return Err(SolveError::Unstable);
-    }
-    let mut u = DVector::<f64>::zeros(n);
     for (i, &d) in free.iter().enumerate() {
-        u[d] = uf[i];
+        map[d] = i;
+    }
+    let nf = free.len();
+    let mut u = vec![0.0; n];
+    if nf > 0 {
+        let trip: Vec<_> = entries
+            .iter()
+            .filter(|(r, c, _)| map[*r] != usize::MAX && map[*c] != usize::MAX)
+            .map(|&(r, c, v)| Triplet::new(map[r], map[c], v))
+            .collect();
+        let kff = SparseColMat::<usize, f64>::try_new_from_triplets(nf, nf, &trip)
+            .map_err(|_| SolveError::Unstable)?;
+        let llt = kff
+            .sp_cholesky(Side::Lower)
+            .map_err(|_| SolveError::Unstable)?;
+        let mut x = Mat::<f64>::from_fn(nf, 1, |i, _| f[free[i]]);
+        llt.solve_in_place(x.as_mut());
+        for (i, &d) in free.iter().enumerate() {
+            u[d] = x[(i, 0)];
+        }
+        // Reject near-singular systems that Cholesky still accepted.
+        if !u.iter().all(|v| v.is_finite()) || u.iter().fold(0.0f64, |a, v| a.max(v.abs())) > 1e6 {
+            return Err(SolveError::Unstable);
+        }
     }
 
     let displacements = (0..s.nodes.len())
@@ -212,5 +234,6 @@ fn utilization(mem: &crate::Member, f: &MemberForces) -> f64 {
     let sec = &mem.section;
     let my = f.my[0].abs().max(f.my[1].abs());
     let mz = f.mz[0].abs().max(f.mz[1].abs());
-    f.axial.abs() / (fy * sec.area) + my / (fy * sec.zy) + mz / (fy * sec.zz)
+    let n = f.axial.abs() / (fy * sec.area);
+    n * n + my / (fy * sec.zy) + mz / (fy * sec.zz)
 }
