@@ -55,6 +55,9 @@ pub struct SimConfig {
     /// as members rotate, so a factorisation a few substeps old still
     /// converges. 4 with 16 substeps passes every test, including buckling.
     pub refactor_every: usize,
+    /// Direct solver only: check every step for sufficient decrease of the
+    /// substep objective; refactorise early or shorten the step when it fails.
+    pub step_check: bool,
     pub gravity: Vec3,
     /// Linear velocity damping, 1/s. Keeps collapses readable and lets
     /// structures settle.
@@ -65,11 +68,18 @@ pub struct SimConfig {
 
 impl Default for SimConfig {
     fn default() -> Self {
+        let env = |k: &str, d: usize| {
+            std::env::var(k)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(d)
+        };
         Self {
             solver: Solver::Direct,
-            substeps: 16,
-            iterations: 1,
-            refactor_every: 4,
+            substeps: env("BK_SUB", 16),
+            iterations: env("BK_IT", 1),
+            refactor_every: env("BK_REF", 4),
+            step_check: env("BK_CHECK", 1) != 0,
             gravity: Vec3::new(0.0, -9.81, 0.0),
             damping: 0.5,
             plasticity: true,
@@ -161,7 +171,26 @@ pub struct DynamicSim {
     events: Vec<BreakEvent>,
     time: f64,
     direct: Option<direct::Cache>,
+    stats: SolverStats,
 }
+
+/// Work counters of the direct solver since the simulation was created.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SolverStats {
+    pub substeps: usize,
+    /// Numeric factorisations of the system matrix.
+    pub factorizations: usize,
+    /// Steps from a reused factorisation that failed the decrease test and
+    /// were redone with a fresh one.
+    pub stale_rejects: usize,
+    /// Step halvings after a fresh-factorisation step failed the test.
+    pub backtracks: usize,
+}
+
+/// Sufficient-decrease constant of the step check: accepts steps whose true
+/// curvature is up to 2(1 − ARMIJO) = 1.5 times the factorised one.
+const ARMIJO: f64 = 0.25;
+const MAX_BACKTRACKS: usize = 4;
 
 impl DynamicSim {
     pub fn new(s: &Structure, config: SimConfig) -> Self {
@@ -245,7 +274,12 @@ impl DynamicSim {
             events: Vec::new(),
             time: 0.0,
             direct: None,
+            stats: SolverStats::default(),
         }
+    }
+
+    pub fn solver_stats(&self) -> SolverStats {
+        self.stats
     }
 
     /// Constant external force on a node (N), replacing any previous one.
@@ -305,6 +339,7 @@ impl DynamicSim {
     }
 
     fn substep(&mut self, h: f64) {
+        self.stats.substeps += 1;
         let damp = (-self.config.damping * h).exp();
         let g = self.config.gravity;
         let direct = self.config.solver == Solver::Direct;
@@ -467,20 +502,53 @@ impl DynamicSim {
         out
     }
 
-    /// One Gauss-Newton step of the substep problem
-    /// min ½|x − x̃|²_M / h² + Σ ½ k C(x)², solved with sparse Cholesky.
-    fn solve_direct(&mut self, h: f64) {
-        if self.direct.is_none() {
-            self.direct = Some(direct::Cache::new(&self.bodies, &self.beams));
+    /// The substep objective Φ = ½|x − x̃|²_M / h² + Σ ½ k C(x)² at the
+    /// current state (same residual definitions as `assemble_direct`).
+    fn objective(&self, h: f64) -> f64 {
+        let ih2 = 1.0 / (h * h);
+        let mut phi = 0.0;
+        for b in &self.bodies {
+            if b.inv_mass > 0.0 {
+                phi += 0.5 * ih2 / b.inv_mass * (b.x - b.x_tilde).norm_squared();
+            }
+            if b.inv_inertia > 0.0 {
+                let dq = b.q * b.q_tilde.inverse();
+                phi += 0.5 * ih2 / b.inv_inertia * 4.0 * dq.imag().norm_squared();
+            }
         }
-        let mut cache = self.direct.take().unwrap();
+        for i in 0..self.beams.len() {
+            if !self.beams[i].broken {
+                for (c, k, _) in self.beam_constraints(i) {
+                    phi += 0.5 * k * c * c;
+                }
+            }
+        }
+        phi
+    }
+
+    /// Right-hand side −∇Φ, the objective Φ, the mass diagonal and (only when
+    /// `with_blocks`) the Gauss-Newton stiffness block of every live beam.
+    #[allow(clippy::type_complexity)]
+    fn assemble_direct(
+        &self,
+        cache: &direct::Cache,
+        h: f64,
+        with_blocks: bool,
+    ) -> (
+        Vec<f64>,
+        f64,
+        Vec<f64>,
+        Vec<([Option<usize>; 4], [f64; 144])>,
+    ) {
         let ih2 = 1.0 / (h * h);
         let mut diag = vec![0.0; cache.ndof];
         let mut rhs = vec![0.0; cache.ndof];
+        let mut phi = 0.0;
         for (bi, b) in self.bodies.iter().enumerate() {
             if let Some(d) = cache.trans[bi] {
                 let m = ih2 / b.inv_mass;
                 let r = b.x - b.x_tilde;
+                phi += 0.5 * m * r.norm_squared();
                 for k in 0..3 {
                     diag[d + k] = m;
                     rhs[d + k] = -m * r[k];
@@ -490,14 +558,14 @@ impl DynamicSim {
                 let m = ih2 / b.inv_inertia;
                 let dq = b.q * b.q_tilde.inverse();
                 let r = dq.imag() * if dq.w < 0.0 { -2.0 } else { 2.0 };
+                phi += 0.5 * m * r.norm_squared();
                 for k in 0..3 {
                     diag[d + k] = m;
                     rhs[d + k] = -m * r[k];
                 }
             }
         }
-        let refactor = cache.needs_factor(self.config.refactor_every);
-        let mut blocks = Vec::with_capacity(if refactor { self.beams.len() } else { 0 });
+        let mut blocks = Vec::with_capacity(if with_blocks { self.beams.len() } else { 0 });
         for i in 0..self.beams.len() {
             if self.beams[i].broken {
                 continue;
@@ -506,7 +574,8 @@ impl DynamicSim {
             let slots = [cache.trans[a], cache.rot[a], cache.trans[b], cache.rot[b]];
             let mut kb = [[0.0f64; 144]; 1];
             for (c, k, g) in self.beam_constraints(i) {
-                if refactor {
+                phi += 0.5 * k * c * c;
+                if with_blocks {
                     let flat: [f64; 12] = std::array::from_fn(|j| g[j / 3][j % 3]);
                     for r in 0..12 {
                         for col in 0..=r {
@@ -522,7 +591,7 @@ impl DynamicSim {
                     }
                 }
             }
-            if refactor {
+            if with_blocks {
                 // Mirror the lower triangle so any (row, col) lookup works.
                 for r in 0..12 {
                     for col in r + 1..12 {
@@ -532,22 +601,94 @@ impl DynamicSim {
                 blocks.push((slots, kb[0]));
             }
         }
-        let delta = if refactor && cache.factor(&diag, &blocks).is_none() {
-            None
-        } else {
-            cache.back_solve(rhs)
-        };
-        self.direct = Some(cache);
-        let Some(delta) = delta else { return };
-        let cache = self.direct.as_ref().unwrap();
+        (rhs, phi, diag, blocks)
+    }
+
+    /// Move every free body by `t`·`delta`, starting from `base` if given.
+    fn apply_delta(
+        &mut self,
+        cache: &direct::Cache,
+        delta: &[f64],
+        t: f64,
+        base: Option<&[(Vec3, UnitQuaternion<f64>)]>,
+    ) {
         for (bi, b) in self.bodies.iter_mut().enumerate() {
+            if let Some(base) = base {
+                (b.x, b.q) = base[bi];
+            }
             if let Some(d) = cache.trans[bi] {
-                b.x += Vec3::new(delta[d], delta[d + 1], delta[d + 2]);
+                b.x += Vec3::new(delta[d], delta[d + 1], delta[d + 2]) * t;
             }
             if let Some(d) = cache.rot[bi] {
-                b.q = rotate(b.q, Vec3::new(delta[d], delta[d + 1], delta[d + 2]));
+                b.q = rotate(b.q, Vec3::new(delta[d], delta[d + 1], delta[d + 2]) * t);
             }
         }
+    }
+
+    /// One Gauss-Newton step of the substep problem
+    /// min Φ = ½|x − x̃|²_M / h² + Σ ½ k C(x)², solved with sparse Cholesky.
+    ///
+    /// The factorisation is reused between substeps. With `step_check` the step
+    /// must then pass a sufficient-decrease test on Φ; a step from a stale
+    /// factorisation that fails it is thrown away and redone with a fresh one,
+    /// and a fresh step that fails is shortened by backtracking.
+    fn solve_direct(&mut self, h: f64) {
+        if self.direct.is_none() {
+            self.direct = Some(direct::Cache::new(&self.bodies, &self.beams));
+        }
+        let mut cache = self.direct.take().unwrap();
+        let check = self.config.step_check;
+        let mut refactor = cache.needs_factor(self.config.refactor_every);
+        let base: Vec<(Vec3, UnitQuaternion<f64>)> = if check {
+            self.bodies.iter().map(|b| (b.x, b.q)).collect()
+        } else {
+            Vec::new()
+        };
+        loop {
+            let (rhs, phi0, diag, blocks) = self.assemble_direct(&cache, h, refactor);
+            if refactor {
+                self.stats.factorizations += 1;
+                if cache.factor(&diag, &blocks).is_none() {
+                    break;
+                }
+            }
+            let Some(delta) = cache.back_solve(rhs.clone()) else {
+                break;
+            };
+            self.apply_delta(&cache, &delta, 1.0, None);
+            if !check {
+                break;
+            }
+            // Armijo test. For a quadratic Φ the decrease is slope·(1 − ρ/2),
+            // where ρ is the true curvature along the step over the curvature
+            // the factorised matrix assumed: 1 for an exact Newton step, 2 at
+            // the edge of divergence.
+            let slope: f64 = rhs.iter().zip(&delta).map(|(r, d)| r * d).sum();
+            let ok = |phi1: f64, t: f64| phi1 <= phi0 - ARMIJO * t * slope + 1e-10 * phi0.abs();
+            if ok(self.objective(h), 1.0) {
+                break;
+            }
+            if !refactor {
+                // Stale matrix: undo and redo this step with a fresh one.
+                self.stats.stale_rejects += 1;
+                self.apply_delta(&cache, &delta, 0.0, Some(&base));
+                refactor = true;
+                continue;
+            }
+            // Fresh matrix and still too far: the problem is not quadratic
+            // enough at this step length, so shorten the step.
+            let mut t = 1.0;
+            for _ in 0..MAX_BACKTRACKS {
+                t *= 0.5;
+                self.stats.backtracks += 1;
+                self.apply_delta(&cache, &delta, t, Some(&base));
+                if ok(self.objective(h), t) {
+                    break;
+                }
+            }
+            break;
+        }
+        self.direct = Some(cache);
     }
 
     /// One XPBD projection of a scalar constraint with stiffness `k`.

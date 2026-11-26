@@ -57,13 +57,27 @@ fn tower(nx: usize, nz: usize, floors: usize, sub: usize) -> Case {
             for i in 0..=nx {
                 link(&mut s, id(i, j, k), id(i, j, k + 1), sub, &mat, &col);
                 if i < nx {
-                    link(&mut s, id(i, j, k + 1), id(i + 1, j, k + 1), sub, &mat, &beam);
+                    link(
+                        &mut s,
+                        id(i, j, k + 1),
+                        id(i + 1, j, k + 1),
+                        sub,
+                        &mat,
+                        &beam,
+                    );
                     if (j == 0 || j == nz) && (i + k) % 2 == 0 {
                         link(&mut s, id(i, j, k), id(i + 1, j, k + 1), sub, &mat, &brace);
                     }
                 }
                 if j < nz {
-                    link(&mut s, id(i, j, k + 1), id(i, j + 1, k + 1), sub, &mat, &beam);
+                    link(
+                        &mut s,
+                        id(i, j, k + 1),
+                        id(i, j + 1, k + 1),
+                        sub,
+                        &mat,
+                        &beam,
+                    );
                     if (i == 0 || i == nx) && (j + k) % 2 == 0 {
                         link(&mut s, id(i, j, k), id(i, j + 1, k + 1), sub, &mat, &brace);
                     }
@@ -109,8 +123,22 @@ fn bridge(panels: usize, sub: usize) -> Case {
         for side in 0..2 {
             link(&mut s, id(i, side, 0), id(i, side, 1), sub, &mat, &web);
             if i < panels {
-                link(&mut s, id(i, side, 0), id(i + 1, side, 0), sub, &mat, &chord);
-                link(&mut s, id(i, side, 1), id(i + 1, side, 1), sub, &mat, &chord);
+                link(
+                    &mut s,
+                    id(i, side, 0),
+                    id(i + 1, side, 0),
+                    sub,
+                    &mat,
+                    &chord,
+                );
+                link(
+                    &mut s,
+                    id(i, side, 1),
+                    id(i + 1, side, 1),
+                    sub,
+                    &mat,
+                    &chord,
+                );
                 let (lo, hi) = if i % 2 == 0 { (i, i + 1) } else { (i + 1, i) };
                 link(&mut s, id(lo, side, 0), id(hi, side, 1), sub, &mat, &web);
             }
@@ -119,7 +147,14 @@ fn bridge(panels: usize, sub: usize) -> Case {
         link(&mut s, id(i, 0, 1), id(i, 1, 1), sub, &mat, &lat);
         if i < panels {
             link(&mut s, id(i, 0, 0), id(i + 1, 1, 0), sub, &mat, &lat);
-            link(&mut s, id(i, i % 2, 1), id(i + 1, 1 - i % 2, 1), sub, &mat, &lat);
+            link(
+                &mut s,
+                id(i, i % 2, 1),
+                id(i + 1, 1 - i % 2, 1),
+                sub,
+                &mat,
+                &lat,
+            );
         }
     }
     for i in [0, panels] {

@@ -36,6 +36,10 @@ fn main() {
             plasticity: false,
             substeps: subs,
             iterations: it,
+            refactor_every: std::env::var("BK_REF")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(4),
             ..Default::default()
         },
     );
@@ -54,4 +58,5 @@ fn main() {
             );
         }
     }
+    println!("{:?}", sim.solver_stats());
 }
