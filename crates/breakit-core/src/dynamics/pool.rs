@@ -18,7 +18,7 @@ use std::sync::Mutex;
 /// Which thread computes a slot varies from run to run; what is computed
 /// and the order it is consumed in do not, so the result is the same on any
 /// number of threads.
-pub(super) fn ordered_chunks<T, C, K>(slots: &mut [T], helpers: usize, compute: C, mut consume: K)
+pub(crate) fn ordered_chunks<T, C, K>(slots: &mut [T], helpers: usize, compute: C, mut consume: K)
 where
     T: Send,
     C: Fn(usize, &mut T) + Sync,
