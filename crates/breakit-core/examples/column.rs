@@ -1,3 +1,5 @@
+//! Tip-loaded column near its Euler load.
+//! cargo run --release --example column -- [P/Pcr] [substeps] [iterations] [refactor_every] [step_check 0|1]
 use breakit_core::*;
 fn main() {
     let ratio: f64 = std::env::args()
@@ -12,6 +14,12 @@ fn main() {
         .nth(3)
         .map(|a| a.parse().unwrap())
         .unwrap_or(1);
+    // Refactorise every this many solves, and step check on (1) or off (0).
+    let refactor: usize = std::env::args()
+        .nth(4)
+        .map(|a| a.parse().unwrap())
+        .unwrap_or(4);
+    let check = std::env::args().nth(5).is_none_or(|a| a != "0");
     let sec = Section::tube(0.05, 0.005);
     let mut s = Structure::new();
     let ids = s.add_line(
@@ -36,6 +44,8 @@ fn main() {
             plasticity: false,
             substeps: subs,
             iterations: it,
+            refactor_every: refactor,
+            step_check: check,
             ..Default::default()
         },
     );
@@ -54,4 +64,5 @@ fn main() {
             );
         }
     }
+    println!("{:?}", sim.solver_stats());
 }

@@ -1,12 +1,12 @@
 //! Per-member damage and failure, by material.
 //!
-//! The dynamic solver keeps every member as stiff elastic constraints and
-//! hands the material model the current deformation once per substep. The
-//! model then moves the member's rest shape (axial offset and plastic hinge
-//! rotations) and lowers its stiffness so that the internal forces follow the
-//! material law, the same return-mapping idea that drives steel plasticity.
-//! Stiffness only ever goes down, so a factorisation the direct solver reuses
-//! for a few substeps over-estimates stiffness and stays stable.
+//! The dynamic solver does the plastic return of every member itself (inside
+//! the substep solve, with the tangent stiffness) against yield caps the
+//! material model sets: an axial yield force per sense and a plastic moment
+//! per bending axis. After each substep the model reads the committed forces
+//! and plastic increments, books damage, checks for failure and sets the
+//! stiffness and caps for the next substep. Brittle limits (cracking,
+//! splintering, fibre rupture, shear) are checks, not caps.
 //!
 //! What each material does:
 //!
@@ -181,11 +181,8 @@ pub(crate) enum Law {
 pub(crate) struct ConcreteLaw {
     rc: RcSection,
     plain: bool,
-    /// E_c A, N per unit strain.
-    ec_a: f64,
     /// E_s A_s, N per unit strain.
     es_as: f64,
-    eps_crack: f64,
     crush_capacity: f64,
     rebar_rupture: f64,
     ft: f64,
@@ -217,9 +214,7 @@ impl Law {
                 let es = c.rebar.as_ref().map_or(200e9, |r| r.youngs_modulus);
                 Law::Concrete(std::sync::Arc::new(ConcreteLaw {
                     plain: c.rebar.is_none(),
-                    ec_a: mat.youngs_modulus * sec.area,
                     es_as: es * rc.steel_area,
-                    eps_crack: c.tension / mat.youngs_modulus,
                     crush_capacity: c.ultimate_strain - c.peak_strain,
                     rebar_rupture: c.rebar.as_ref().map_or(0.0, |r| r.rupture_strain),
                     ft: c.tension,
@@ -346,7 +341,9 @@ fn timber_interaction(n: f64, sm: f64, nt: f64, nc: f64, fm: f64) -> f64 {
     if n >= 0.0 {
         n / nt + sm / fm
     } else {
-        (n / nc).powi(2) + sm / fm
+        // Compression above f_c is crushing (a plastic plateau, booked
+        // separately), not an interaction failure.
+        (n / nc).abs().min(1.0).powi(2) + sm / fm
     }
 }
 
@@ -407,57 +404,70 @@ impl MatState {
     }
 }
 
-/// The solver-side quantities a material model may change.
+/// What the solver needs from the material for the next substep. The solver
+/// does the plastic return against these caps inside its solve (or once
+/// after it), and the material model resets them after every substep.
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct Mech {
+    /// Axial stiffness EA/L in compression (and in tension while uncracked).
     pub k_axial: f64,
+    /// Axial stiffness in tension: lower once concrete has cracked through.
+    pub k_tension: f64,
+    /// EI/L about local y and z.
     pub ei_l: [f64; 2],
-    pub plastic_elongation: f64,
-    pub hinge: [[f64; 2]; 2],
+    /// Axial yield force [tension, compression], N; infinite for none.
+    pub n_cap: [f64; 2],
+    /// Plastic end moment per bending axis, N·m; infinite for none.
+    pub mp: [f64; 2],
 }
 
-/// Current deformation of a member.
-pub(crate) struct Kin {
-    /// Chord length minus rest length, m (before any plastic offset).
-    pub stretch: f64,
+impl Mech {
+    /// Stiffness and yield caps of an undamaged member.
+    pub fn new(law: &Law, k_axial: f64, ei_l: [f64; 2], plastic: bool) -> Self {
+        let inf = f64::INFINITY;
+        let (n_cap, mp) = if !plastic {
+            ([inf; 2], [inf; 2])
+        } else {
+            match law {
+                Law::Ductile { ny, mp, .. } => ([*ny; 2], *mp),
+                Law::Timber { nc, .. } => ([inf, *nc], [inf; 2]),
+                Law::Concrete(c) if !c.plain => (
+                    [inf, c.rc.squash_load],
+                    [0, 1].map(|a| concrete_cap(&c.rc.axes[a], 0.0)),
+                ),
+                Law::Concrete(c) => ([inf, c.rc.squash_load], [inf; 2]),
+                _ => ([inf; 2], [inf; 2]),
+            }
+        };
+        Self {
+            k_axial,
+            k_tension: k_axial,
+            ei_l,
+            n_cap,
+            mp,
+        }
+    }
+}
+
+/// A substep's internal forces after the solver's plastic return, which the
+/// solver has already added to the member's rest shape.
+pub(crate) struct Committed {
+    /// Axial force, N, tension positive.
+    pub n: f64,
+    /// End moments `[axis][end]`, N·m.
+    pub m: [[f64; 2]; 2],
+    /// Plastic elongation added this substep, m.
+    pub dp_axial: f64,
+    /// Plastic hinge rotation added this substep, rad, `[axis][end]`.
+    pub dp: [[f64; 2]; 2],
+    /// Total plastic hinge rotation, rad, `[axis][end]`.
+    pub hinge: [[f64; 2]; 2],
     pub l0: f64,
     pub len: f64,
-    /// End rotations relative to the chord, rad, `[axis][end]`, before
-    /// subtracting plastic hinges.
-    pub theta: [[f64; 2]; 2],
-}
-
-fn moments(ei_l: &[f64; 2], th: &[[f64; 2]; 2]) -> [[f64; 2]; 2] {
-    std::array::from_fn(|a| {
-        let k = ei_l[a];
-        [
-            k * (4.0 * th[a][0] + 2.0 * th[a][1]),
-            k * (2.0 * th[a][0] + 4.0 * th[a][1]),
-        ]
-    })
 }
 
 fn shears(m: &[[f64; 2]; 2], len: f64) -> [f64; 2] {
     [(m[0][0] + m[0][1]) / len, (m[1][0] + m[1][1]) / len]
-}
-
-/// Plastic hinge flow on one bending axis: wherever an end moment exceeds
-/// `cap`, add hinge rotation so it sits at the cap. Returns the |increment|
-/// per end.
-fn flow_hinges(mech: &mut Mech, th: &mut [[f64; 2]; 2], axis: usize, cap: f64) -> [f64; 2] {
-    let k4 = 4.0 * mech.ei_l[axis];
-    let k2 = 2.0 * mech.ei_l[axis];
-    let mut inc = [0.0; 2];
-    for end in 0..2 {
-        let other = 1 - end;
-        let m = k4 * th[axis][end] + k2 * th[axis][other];
-        if m.abs() > cap {
-            let d = (m.abs() - cap) / k4 * m.signum();
-            mech.hinge[axis][end] += d;
-            th[axis][end] -= d;
-            inc[end] = d.abs();
-        }
-    }
-    inc
 }
 
 type Failure = Option<(BreakCause, f64)>;
@@ -468,20 +478,37 @@ fn first(f: &mut Failure, cause: BreakCause, pos: f64) {
     }
 }
 
-/// Advance a member's material by one substep. Returns the failure mode and
-/// position along the member (0 = end a, 1 = end b) if it broke.
+/// Book the hinge rotation added this substep. Returns the |increment| per
+/// `[axis][end]`.
+fn book_hinges(st: &mut MatState, c: &Committed) -> [[f64; 2]; 2] {
+    let inc: [[f64; 2]; 2] = std::array::from_fn(|a| [c.dp[a][0].abs(), c.dp[a][1].abs()]);
+    for a in 0..2 {
+        for e in 0..2 {
+            if inc[a][e] > 0.0 {
+                st.yielded = true;
+                st.hinge_rotation += inc[a][e];
+                st.hinge_end[a][e] += inc[a][e];
+            }
+        }
+    }
+    inc
+}
+
+/// Advance a member's material by one substep from the forces the solver
+/// committed, and set the stiffness and yield caps for the next one. Returns
+/// the failure mode and position along the member (0 = end a, 1 = end b) if
+/// it broke.
 pub(crate) fn update(
     law: &Law,
     st: &mut MatState,
     dmg: &mut MemberDamage,
     mech: &mut Mech,
-    kin: &Kin,
+    c: &Committed,
     plastic: bool,
 ) -> Failure {
-    let mut th: [[f64; 2]; 2] =
-        std::array::from_fn(|a| [0, 1].map(|e| kin.theta[a][e] - mech.hinge[a][e]));
     let mut fail = None;
-    let mut n = mech.k_axial * (kin.stretch - mech.plastic_elongation);
+    let (n, m) = (c.n, c.m);
+    let inf = f64::INFINITY;
 
     match law {
         Law::Elastic => {}
@@ -491,35 +518,28 @@ pub(crate) fn update(
             rupture_strain,
             hinge_capacity,
         } => {
-            if plastic && n.abs() > *ny {
-                let dp = (n.abs() - ny) / mech.k_axial * n.signum();
-                mech.plastic_elongation += dp;
-                dmg.plastic_strain += dp.abs() / kin.l0;
-                n = ny * n.signum();
+            if c.dp_axial != 0.0 {
+                dmg.plastic_strain += c.dp_axial.abs() / c.l0;
                 st.yielded = true;
                 if dmg.plastic_strain > *rupture_strain {
                     first(&mut fail, BreakCause::Rupture, 0.5);
                 }
             }
+            book_hinges(st, c);
+            if st.hinge_rotation > *hinge_capacity {
+                // Snaps at the end that has rotated most.
+                let h = |e: usize| st.hinge_end[0][e] + st.hinge_end[1][e];
+                first(
+                    &mut fail,
+                    BreakCause::Hinge,
+                    if h(1) > h(0) { 1.0 } else { 0.0 },
+                );
+            }
             if plastic {
+                // Axial force reduces the plastic moment: Mp,N = Mp (1 − n²),
+                // exact for a rectangle and close for tubes.
                 let r = (n.abs() / ny).min(1.0);
-                for (axis, &mpa) in mp.iter().enumerate() {
-                    let cap = mpa * (1.0 - r * r).max(0.05);
-                    let inc = flow_hinges(mech, &mut th, axis, cap);
-                    for end in 0..2 {
-                        if inc[end] > 0.0 {
-                            st.yielded = true;
-                            st.hinge_rotation += inc[end];
-                            st.hinge_end[axis][end] += inc[end];
-                            if st.hinge_rotation > *hinge_capacity {
-                                // Snaps at the end that has rotated most.
-                                let h = |e: usize| st.hinge_end[0][e] + st.hinge_end[1][e];
-                                let at = if h(1) > h(0) { 1.0 } else { 0.0 };
-                                first(&mut fail, BreakCause::Hinge, at);
-                            }
-                        }
-                    }
-                }
+                mech.mp = mp.map(|m| m * (1.0 - r * r).max(0.05));
             }
             let progress =
                 (dmg.plastic_strain / rupture_strain).max(st.hinge_rotation / hinge_capacity);
@@ -529,19 +549,18 @@ pub(crate) fn update(
             }
         }
         Law::Timber {
+            area,
             nt,
             nc,
             w,
             fm,
+            fv,
+            shear_factor,
             crush_capacity,
-            ..
         } => {
-            if plastic && n < -nc {
-                let dp = (n + nc) / mech.k_axial;
-                mech.plastic_elongation += dp;
-                st.crush_strain += dp.abs() / kin.l0;
+            if c.dp_axial < 0.0 {
+                st.crush_strain += -c.dp_axial / c.l0;
                 dmg.plastic_strain = st.crush_strain;
-                n = -nc;
                 if st.crush_strain > *crush_capacity {
                     first(&mut fail, BreakCause::Crushing, 0.5);
                 }
@@ -549,7 +568,6 @@ pub(crate) fn update(
             if plastic && n > *nt {
                 first(&mut fail, BreakCause::Splinter, 0.5);
             }
-            let m = moments(&mech.ei_l, &th);
             let mut worst = (0.0, 0);
             for e in 0..2 {
                 let sm = m[0][e].abs() / w[0] + m[1][e].abs() / w[1];
@@ -559,20 +577,14 @@ pub(crate) fn update(
                     worst = (u, e);
                 }
             }
-            if plastic && worst.0 > 1.0 {
+            // A little slack so a crushing post with numerical noise in its
+            // moments does not count as a bending failure.
+            if plastic && worst.0 > 1.0 + 1e-3 {
                 first(&mut fail, BreakCause::Splinter, worst.1 as f64);
             }
-            let v = shears(&m, kin.len);
-            if let Law::Timber {
-                area,
-                fv,
-                shear_factor,
-                ..
-            } = law
-            {
-                if plastic && shear_factor * v[0].hypot(v[1]) / area > *fv {
-                    first(&mut fail, BreakCause::TimberSplit, 0.5);
-                }
+            let v = shears(&m, c.len);
+            if plastic && shear_factor * v[0].hypot(v[1]) / area > *fv {
+                first(&mut fail, BreakCause::TimberSplit, 0.5);
             }
             let crush = (st.crush_strain / crush_capacity).min(1.0);
             dmg.crush = [crush; 2];
@@ -582,59 +594,63 @@ pub(crate) fn update(
                 dmg.state = dmg.state.max(DamageState::Cracked);
             }
         }
-        Law::Concrete(c) => {
-            if plastic {
-                n = concrete_axial(c, st, mech, kin, &mut fail);
-            }
-            let rc = &c.rc;
+        Law::Concrete(cl) => {
+            let rc = &cl.rc;
             let ncomp = -n;
+            // Axial: crack through, then bars only in tension; yield and
+            // crushing come back from the solver's return as plastic strain.
+            if plastic && !st.axial_cracked && n > rc.tension_cracking {
+                if cl.plain {
+                    first(&mut fail, BreakCause::Brittle, 0.5);
+                } else {
+                    st.axial_cracked = true;
+                    mech.k_tension = cl.es_as / c.l0;
+                    mech.n_cap[0] = rc.tension_yield;
+                }
+            }
+            if c.dp_axial > 0.0 {
+                st.rebar_strain += c.dp_axial / c.l0;
+                st.yielded = true;
+                if st.rebar_strain > cl.rebar_rupture {
+                    first(&mut fail, BreakCause::RebarRupture, 0.5);
+                }
+            } else if c.dp_axial < 0.0 {
+                st.crush_strain += -c.dp_axial / c.l0;
+                if st.crush_strain > cl.crush_capacity {
+                    first(&mut fail, BreakCause::Crushing, 0.5);
+                }
+            }
+            let inc = book_hinges(st, c);
             let mut shear_sq = 0.0;
             let mut shear_end = 0;
             for axis in 0..2 {
                 let ax = &rc.axes[axis];
-                let mut m = moments(&mech.ei_l, &th);
                 for e in 0..2 {
                     st.peak_moment[axis][e] = st.peak_moment[axis][e].max(m[axis][e].abs());
                 }
-                if c.plain {
-                    let mcr = ((c.ft + ncomp / rc.area) * c.w[axis]).max(0.0);
+                if cl.plain {
+                    let mcr = ((cl.ft + ncomp / rc.area) * cl.w[axis]).max(0.0);
                     for e in 0..2 {
                         if plastic && m[axis][e].abs() > mcr {
                             first(&mut fail, BreakCause::Brittle, e as f64);
                         }
                     }
-                } else if plastic {
+                } else {
+                    for e in 0..2 {
+                        if inc[axis][e] > 0.0 && st.hinge_end[axis][e] > ax.hinge_capacity {
+                            first(&mut fail, BreakCause::Crushing, e as f64);
+                        }
+                    }
                     let pk = st.peak_moment[axis][0].max(st.peak_moment[axis][1]);
-                    if pk > ax.cracking_moment {
+                    if plastic && pk > ax.cracking_moment {
+                        // Branson's effective inertia for the peak moment.
                         let r = (ax.cracking_moment / pk).powi(3);
                         let scale = r + (1.0 - r) * ax.cracked_inertia / ax.gross_inertia;
-                        let ei = st.ei0[axis] * scale;
-                        if ei < mech.ei_l[axis] {
-                            mech.ei_l[axis] = ei;
-                            m = moments(&mech.ei_l, &th);
-                        }
+                        mech.ei_l[axis] = mech.ei_l[axis].min(st.ei0[axis] * scale);
                     }
-                    let inc = flow_hinges(mech, &mut th, axis, concrete_cap(ax, ncomp));
-                    for e in 0..2 {
-                        if inc[e] > 0.0 {
-                            st.yielded = true;
-                            st.hinge_rotation += inc[e];
-                            st.hinge_end[axis][e] += inc[e];
-                            if st.hinge_end[axis][e] > ax.hinge_capacity {
-                                first(&mut fail, BreakCause::Crushing, e as f64);
-                            }
-                        }
+                    if plastic {
+                        mech.mp[axis] = concrete_cap(ax, ncomp);
                     }
-                    if inc[0] + inc[1] > 0.0 {
-                        m = moments(&mech.ei_l, &th);
-                    }
-                }
-                let v = (m[axis][0] + m[axis][1]) / kin.len;
-                shear_sq += (v / ax.shear_capacity(ncomp, rc.area, rc.fck)).powi(2);
-                if m[axis][1].abs() > m[axis][0].abs() {
-                    shear_end = 1;
-                }
-                if !c.plain {
                     for e in 0..2 {
                         let pk = st.peak_moment[axis][e];
                         let span = (ax.yield_moment - ax.cracking_moment).max(1e-9);
@@ -644,20 +660,21 @@ pub(crate) fn update(
                         dmg.crush[e] = dmg.crush[e].max(cu);
                     }
                 }
+                let v = (m[axis][0] + m[axis][1]) / c.len;
+                shear_sq += (v / ax.shear_capacity(ncomp, rc.area, rc.fck)).powi(2);
+                if m[axis][1].abs() > m[axis][0].abs() {
+                    shear_end = 1;
+                }
             }
             if plastic && shear_sq.sqrt() > 1.0 {
                 first(&mut fail, BreakCause::ConcreteShear, shear_end as f64);
             }
-            let axial_crush = (st.crush_strain / c.crush_capacity).min(1.0);
+            let axial_crush = (st.crush_strain / cl.crush_capacity).min(1.0);
             for e in 0..2 {
                 dmg.crush[e] = dmg.crush[e].max(axial_crush);
             }
             if st.axial_cracked {
-                let t = if rc.tension_yield > 0.0 {
-                    (n / rc.tension_yield).clamp(0.1, 1.0)
-                } else {
-                    1.0
-                };
+                let t = (n / rc.tension_yield).clamp(0.1, 1.0);
                 dmg.tension_crack = dmg.tension_crack.max(t);
             }
             dmg.plastic_strain = st.rebar_strain + st.crush_strain;
@@ -673,7 +690,7 @@ pub(crate) fn update(
             if st.yielded || st.crush_strain > 0.0 {
                 let progress = dmg.crush[0]
                     .max(dmg.crush[1])
-                    .max(st.rebar_strain / c.rebar_rupture.max(1e-9));
+                    .max(st.rebar_strain / cl.rebar_rupture.max(1e-9));
                 dmg.damage = dmg.damage.max(0.5 + 0.5 * progress.min(1.0));
             }
         }
@@ -688,7 +705,6 @@ pub(crate) fn update(
             loss,
             delam_stiffness,
         } => {
-            let m = moments(&mech.ei_l, &th);
             let mut worst = (0.0, 0);
             for e in 0..2 {
                 let sb =
@@ -705,7 +721,7 @@ pub(crate) fn update(
             if plastic && worst.0 >= 1.0 {
                 first(&mut fail, BreakCause::FibreRupture, worst.1 as f64);
             }
-            let v = shears(&m, kin.len);
+            let v = shears(&m, c.len);
             if plastic {
                 for a in 0..2 {
                     if !st.delaminated[a] && shear_factor * v[a].abs() / area > *ilss {
@@ -715,17 +731,15 @@ pub(crate) fn update(
                         dmg.delamination += 0.5;
                     }
                 }
-                let crack = dmg.crack[0].max(dmg.crack[1]);
-                let s = 1.0 - loss * crack;
+                let s = 1.0 - loss * dmg.crack[0].max(dmg.crack[1]);
                 if s < st.mc_scale {
                     st.mc_scale = s;
                     mech.k_axial = st.k_axial0 * s;
+                    mech.k_tension = mech.k_axial;
                 }
                 for a in 0..2 {
                     let ei = st.ei0[a] * st.mc_scale * st.ei_factor[a];
-                    if ei < mech.ei_l[a] {
-                        mech.ei_l[a] = ei;
-                    }
+                    mech.ei_l[a] = mech.ei_l[a].min(ei);
                 }
             }
             if st.delaminated[0] || st.delaminated[1] {
@@ -735,14 +749,17 @@ pub(crate) fn update(
             }
         }
     }
+    if !plastic {
+        mech.n_cap = [inf; 2];
+        mech.mp = [inf; 2];
+    }
 
-    let m = moments(&mech.ei_l, &th);
-    let util = law.utilization(st, n, m, shears(&m, kin.len));
+    let util = law.utilization(st, n, m, shears(&m, c.len));
     st.peak_util = st.peak_util.max(util);
     dmg.utilization = util;
     dmg.moment = m;
     dmg.axial = n;
-    dmg.hinge = mech.hinge;
+    dmg.hinge = c.hinge;
     dmg.stiffness = (0..2)
         .map(|a| {
             if st.ei0[a] > 0.0 {
@@ -755,7 +772,7 @@ pub(crate) fn update(
     let pre = match law {
         Law::Elastic => 0.0,
         Law::Ductile { .. } => 0.5 * st.peak_util.min(1.0),
-        Law::Concrete(c) if !c.plain => 0.5 * st.peak_util.min(1.0),
+        Law::Concrete(cl) if !cl.plain => 0.5 * st.peak_util.min(1.0),
         _ => st.peak_util.min(1.0),
     };
     dmg.damage = dmg.damage.max(pre);
@@ -764,48 +781,4 @@ pub(crate) fn update(
         dmg.damage = 1.0;
     }
     fail
-}
-
-/// Reinforced or plain concrete under axial strain. Sets the rest-length
-/// offset so the solver's axial force equals the material's, and returns it.
-fn concrete_axial(
-    c: &ConcreteLaw,
-    st: &mut MatState,
-    mech: &mut Mech,
-    kin: &Kin,
-    fail: &mut Failure,
-) -> f64 {
-    let rc = &c.rc;
-    // Strain measured from the closed-crack reference, which moves with
-    // yielded bars (cracks stay open) and crushing (permanent shortening).
-    let e = kin.stretch / kin.l0 - (st.rebar_strain - st.crush_strain);
-    if !st.axial_cracked && e > c.eps_crack {
-        if c.plain {
-            first(fail, BreakCause::Brittle, 0.5);
-        } else {
-            st.axial_cracked = true;
-        }
-    }
-    let mut n = if e > 0.0 && st.axial_cracked {
-        c.es_as * e
-    } else {
-        c.ec_a * e
-    };
-    if !c.plain && n > rc.tension_yield {
-        st.rebar_strain += (n - rc.tension_yield) / c.es_as;
-        n = rc.tension_yield;
-        st.yielded = true;
-        if st.rebar_strain > c.rebar_rupture {
-            first(fail, BreakCause::RebarRupture, 0.5);
-        }
-    }
-    if n < -rc.squash_load {
-        st.crush_strain += (-n - rc.squash_load) / c.ec_a;
-        n = -rc.squash_load;
-        if st.crush_strain > c.crush_capacity {
-            first(fail, BreakCause::Crushing, 0.5);
-        }
-    }
-    mech.plastic_elongation = kin.stretch - n / mech.k_axial;
-    n
 }
