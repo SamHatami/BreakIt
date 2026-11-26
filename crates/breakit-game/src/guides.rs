@@ -69,7 +69,7 @@ fn draw_guides(
     let Some(sim) = sim.filter(|_| !building) else {
         return;
     };
-    let run = sim.run();
+    let Some(run) = sim.run() else { return };
     let deck = run.binding().deck.as_ref();
     for v in run.vehicles() {
         let mid = v.front - v.length * 0.5;

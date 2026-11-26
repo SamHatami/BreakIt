@@ -44,10 +44,12 @@ jobs:
       - run: >-
           cargo clippy --locked --all-targets --no-default-features
           -p breakit-core -p breakit-mesh -p breakit-parts -p breakit-scenario -p breakit-audio
+          -p breakit-playground
           -- -D warnings
       - run: >-
           cargo test --locked --release --no-default-features
           -p breakit-core -p breakit-mesh -p breakit-parts -p breakit-scenario -p breakit-audio
+          -p breakit-playground
 
   # The Bevy crates are checked and tested in two jobs, on two runners: clippy
   # and rustdoc only need metadata builds, tests need full builds, and doing

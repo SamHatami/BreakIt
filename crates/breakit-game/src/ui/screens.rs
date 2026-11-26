@@ -253,6 +253,7 @@ pub fn build_register(p: &mut ChildSpawnerCommands, v: &GameView) {
             f.spawn(text(note, TextRole::Mono, Swatch::Muted));
             let (label, kind) = match (open, cur.sandbox) {
                 (false, _) => ("Locked", ButtonKind::Disabled),
+                (true, true) if cur.playground => ("Open playground", ButtonKind::Primary),
                 (true, true) => ("Open bench", ButtonKind::Primary),
                 (true, false) => ("Open brief", ButtonKind::Primary),
             };

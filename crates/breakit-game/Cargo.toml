@@ -14,6 +14,7 @@ breakit-core = { path = "../breakit-core" }
 breakit-lab = { path = "../breakit-lab" }
 breakit-render = { path = "../breakit-render" }
 breakit-parts = { path = "../breakit-parts" }
+breakit-playground = { path = "../breakit-playground" }
 breakit-scenario = { path = "../breakit-scenario" }
 # Pinned on purpose: Bevy breaks its API every release. Upgrade deliberately,
 # following that release's migration guide.
