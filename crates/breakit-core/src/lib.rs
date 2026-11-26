@@ -14,6 +14,7 @@
 
 pub mod dynamics;
 pub mod frame;
+pub mod linsolve;
 pub mod material;
 pub mod model;
 pub mod section;

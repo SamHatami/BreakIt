@@ -149,7 +149,16 @@ fn cases(size: &str) -> Vec<Case> {
 
 /// Solver configurations under test: (name, config).
 fn configs() -> Vec<(&'static str, SimConfig)> {
-    vec![("direct", SimConfig::default())]
+    vec![
+        ("direct", SimConfig::default()),
+        (
+            "direct-fresh",
+            SimConfig {
+                refactor_every: 1,
+                ..Default::default()
+            },
+        ),
+    ]
 }
 
 struct Timing {
@@ -186,9 +195,9 @@ fn main() {
     let dt = 1.0 / 60.0;
 
     println!(
-        "| structure | members | dofs | solver | elastic ms/frame (mean / p99) | probe disp mm | static mm | collapse ms/frame (mean / p99 / max) | breaks |"
+        "| structure | members | dofs | solver | elastic ms/frame (mean / p99) | refactor % / CG iters per solve | probe disp mm | static mm | collapse ms/frame (mean / p99 / max) | refactor % / CG iters per solve | breaks |"
     );
-    println!("|---|---|---|---|---|---|---|---|---|");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|");
     for size in sizes.split(',') {
         for case in cases(size) {
             let s = &case.s;
@@ -227,6 +236,7 @@ fn main() {
                     t.push(t0.elapsed().as_secs_f64() * 1e3);
                 }
                 let el = timing(t);
+                let st_el = sim.solver_stats();
                 sim.settle(20.0, 1e-6);
                 let disp = sim.displacement(case.probe).norm() * 1e3;
 
@@ -246,19 +256,29 @@ fn main() {
                     t.push(t0.elapsed().as_secs_f64() * 1e3);
                 }
                 let co = timing(t);
+                let st_co = sim.solver_stats();
+                let work = |st: linsolve::Stats| {
+                    format!(
+                        "{:.1}% / {:.2}",
+                        100.0 * st.factorizations as f64 / st.solves.max(1) as f64,
+                        st.cg_iterations as f64 / st.solves.max(1) as f64
+                    )
+                };
                 println!(
-                    "| {} | {} | {} | {} | {:.2} / {:.2} | {:.4} | {} | {:.2} / {:.2} / {:.2} | {} |",
+                    "| {} | {} | {} | {} | {:.2} / {:.2} | {} | {:.4} | {} | {:.2} / {:.2} / {:.2} | {} | {} |",
                     case.name,
                     s.members.len(),
                     s.nodes.len() * 6,
                     name,
                     el.mean,
                     el.p99,
+                    work(st_el),
                     disp,
                     stat.map_or("-".into(), |v| format!("{v:.4}")),
                     co.mean,
                     co.p99,
                     co.max,
+                    work(st_co),
                     sim.break_events().len(),
                 );
             }

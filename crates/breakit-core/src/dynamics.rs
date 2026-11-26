@@ -28,6 +28,7 @@
 use nalgebra::{Quaternion, UnitQuaternion};
 
 use crate::frame::member_axes;
+use crate::linsolve::{LinSolver, Policy, Stats, BLOCK_NNZ};
 use crate::{Structure, Vec3};
 
 /// How each substep's constraint problem is solved.
@@ -50,11 +51,18 @@ pub struct SimConfig {
     pub substeps: usize,
     /// Gauss-Seidel sweeps or Gauss-Newton iterations per substep.
     pub iterations: usize,
-    /// Direct solver only: refactorise the system matrix every this many
-    /// solves and reuse the factorisation in between. The matrix only changes
-    /// as members rotate, so a factorisation a few substeps old still
-    /// converges. 4 with 16 substeps passes every test, including buckling.
+    /// Direct solver only: refactorise the system matrix at least every this
+    /// many solves. 0 (the default) leaves it to the solver, which keeps an
+    /// old factorisation as a preconditioner for as long as that is cheaper
+    /// than a new one; 1 factorises every substep.
     pub refactor_every: usize,
+    /// Direct solver only: relative accuracy of each linear solve. The old
+    /// factorisation only preconditions conjugate gradients on the current
+    /// matrix, so the answer is the current system's to this tolerance.
+    pub linear_tolerance: f64,
+    /// Direct solver only: refactorise once a solve needs more conjugate
+    /// gradient iterations than this.
+    pub refactor_after_iters: usize,
     pub gravity: Vec3,
     /// Linear velocity damping, 1/s. Keeps collapses readable and lets
     /// structures settle.
@@ -69,7 +77,9 @@ impl Default for SimConfig {
             solver: Solver::Direct,
             substeps: 16,
             iterations: 1,
-            refactor_every: 4,
+            refactor_every: 0,
+            linear_tolerance: 1e-6,
+            refactor_after_iters: 4,
             gravity: Vec3::new(0.0, -9.81, 0.0),
             damping: 0.5,
             plasticity: true,
@@ -160,7 +170,7 @@ pub struct DynamicSim {
     beams: Vec<Beam>,
     events: Vec<BreakEvent>,
     time: f64,
-    direct: Option<direct::Cache>,
+    direct: Option<DirectSystem>,
 }
 
 impl DynamicSim {
@@ -278,6 +288,13 @@ impl DynamicSim {
     }
     pub fn break_events(&self) -> &[BreakEvent] {
         &self.events
+    }
+    /// Linear solver counters (direct solver only), for benchmarks.
+    pub fn solver_stats(&self) -> Stats {
+        self.direct
+            .as_ref()
+            .map(|d| d.lin.stats)
+            .unwrap_or_default()
     }
     pub fn max_speed(&self) -> f64 {
         self.bodies.iter().map(|b| b.v.norm()).fold(0.0, f64::max)
@@ -470,84 +487,79 @@ impl DynamicSim {
     /// One Gauss-Newton step of the substep problem
     /// min ½|x − x̃|²_M / h² + Σ ½ k C(x)², solved with sparse Cholesky.
     fn solve_direct(&mut self, h: f64) {
-        if self.direct.is_none() {
-            self.direct = Some(direct::Cache::new(&self.bodies, &self.beams));
-        }
-        let mut cache = self.direct.take().unwrap();
+        let mut sys = match self.direct.take() {
+            Some(sys) => sys,
+            None => match DirectSystem::new(&self.bodies, &self.beams) {
+                Some(sys) => sys,
+                None => return,
+            },
+        };
         let ih2 = 1.0 / (h * h);
-        let mut diag = vec![0.0; cache.ndof];
-        let mut rhs = vec![0.0; cache.ndof];
+        sys.lin.clear();
         for (bi, b) in self.bodies.iter().enumerate() {
-            if let Some(d) = cache.trans[bi] {
+            if let Some(d) = sys.trans[bi] {
                 let m = ih2 / b.inv_mass;
                 let r = b.x - b.x_tilde;
                 for k in 0..3 {
-                    diag[d + k] = m;
-                    rhs[d + k] = -m * r[k];
+                    sys.lin.add_diagonal(d + k, m);
+                    sys.rhs[d + k] = -m * r[k];
                 }
             }
-            if let Some(d) = cache.rot[bi] {
+            if let Some(d) = sys.rot[bi] {
                 let m = ih2 / b.inv_inertia;
                 let dq = b.q * b.q_tilde.inverse();
                 let r = dq.imag() * if dq.w < 0.0 { -2.0 } else { 2.0 };
                 for k in 0..3 {
-                    diag[d + k] = m;
-                    rhs[d + k] = -m * r[k];
+                    sys.lin.add_diagonal(d + k, m);
+                    sys.rhs[d + k] = -m * r[k];
                 }
             }
         }
-        let refactor = cache.needs_factor(self.config.refactor_every);
-        let mut blocks = Vec::with_capacity(if refactor { self.beams.len() } else { 0 });
         for i in 0..self.beams.len() {
             if self.beams[i].broken {
                 continue;
             }
             let (a, b) = (self.beams[i].a, self.beams[i].b);
-            let slots = [cache.trans[a], cache.rot[a], cache.trans[b], cache.rot[b]];
-            let mut kb = [[0.0f64; 144]; 1];
+            let slots = [sys.trans[a], sys.rot[a], sys.trans[b], sys.rot[b]];
+            let mut kb = [0.0f64; BLOCK_NNZ];
             for (c, k, g) in self.beam_constraints(i) {
-                if refactor {
-                    let flat: [f64; 12] = std::array::from_fn(|j| g[j / 3][j % 3]);
-                    for r in 0..12 {
-                        for col in 0..=r {
-                            kb[0][r * 12 + col] += k * flat[r] * flat[col];
-                        }
+                let flat: [f64; 12] = std::array::from_fn(|j| g[j / 3][j % 3]);
+                let mut t = 0;
+                for r in 0..12 {
+                    let kr = k * flat[r];
+                    for col in 0..=r {
+                        kb[t] += kr * flat[col];
+                        t += 1;
                     }
                 }
                 for (s, slot) in slots.iter().enumerate() {
                     if let Some(d) = slot {
                         for k3 in 0..3 {
-                            rhs[d + k3] -= k * c * g[s][k3];
+                            sys.rhs[d + k3] -= k * c * g[s][k3];
                         }
                     }
                 }
             }
-            if refactor {
-                // Mirror the lower triangle so any (row, col) lookup works.
-                for r in 0..12 {
-                    for col in r + 1..12 {
-                        kb[0][r * 12 + col] = kb[0][col * 12 + r];
-                    }
-                }
-                blocks.push((slots, kb[0]));
-            }
+            sys.lin.add_block(i, &kb);
         }
-        let delta = if refactor && cache.factor(&diag, &blocks).is_none() {
-            None
-        } else {
-            cache.back_solve(rhs)
+        let policy = Policy {
+            tolerance: self.config.linear_tolerance,
+            refactor_after_iters: self.config.refactor_after_iters,
+            max_iters: 4 * self.config.refactor_after_iters.max(2),
+            max_age: self.config.refactor_every,
         };
-        self.direct = Some(cache);
-        let Some(delta) = delta else { return };
-        let cache = self.direct.as_ref().unwrap();
-        for (bi, b) in self.bodies.iter_mut().enumerate() {
-            if let Some(d) = cache.trans[bi] {
-                b.x += Vec3::new(delta[d], delta[d + 1], delta[d + 2]);
-            }
-            if let Some(d) = cache.rot[bi] {
-                b.q = rotate(b.q, Vec3::new(delta[d], delta[d + 1], delta[d + 2]));
+        if sys.lin.solve(&mut sys.rhs, &mut sys.delta, &policy) {
+            for (bi, b) in self.bodies.iter_mut().enumerate() {
+                let dl = &sys.delta;
+                if let Some(d) = sys.trans[bi] {
+                    b.x += Vec3::new(dl[d], dl[d + 1], dl[d + 2]);
+                }
+                if let Some(d) = sys.rot[bi] {
+                    b.q = rotate(b.q, Vec3::new(dl[d], dl[d + 1], dl[d + 2]));
+                }
             }
         }
+        self.direct = Some(sys);
     }
 
     /// One XPBD projection of a scalar constraint with stiffness `k`.
@@ -651,7 +663,6 @@ impl DynamicSim {
 
         if let Some(cause) = cause {
             bm.broken = true;
-            self.direct = None; // sparsity pattern changed
             self.events.push(BreakEvent {
                 member: i,
                 time: self.time,
@@ -661,144 +672,42 @@ impl DynamicSim {
     }
 }
 
-mod direct {
-    use super::{Beam, Body};
-    use faer::linalg::solvers::Solve;
-    use faer::sparse::linalg::solvers::{Llt, SymbolicLlt};
-    use faer::sparse::{SparseColMat, Triplet};
-    use faer::{Mat, Side};
+/// DOF numbering and the linear solver for [`Solver::Direct`]. Built once:
+/// broken beams keep their place in the pattern and contribute zeros.
+struct DirectSystem {
+    trans: Vec<Option<usize>>,
+    rot: Vec<Option<usize>>,
+    lin: LinSolver,
+    rhs: Vec<f64>,
+    delta: Vec<f64>,
+}
 
-    /// DOF numbering and the symbolic Cholesky factorisation, reused until a
-    /// member breaks and the sparsity pattern changes.
-    pub struct Cache {
-        pub ndof: usize,
-        pub trans: Vec<Option<usize>>,
-        pub rot: Vec<Option<usize>>,
-        symbolic: Option<SymbolicLlt<usize>>,
-        mat: Option<SparseColMat<usize, f64>>,
-        pos: Vec<usize>,
-        llt: Option<Llt<usize, f64>>,
-        age: usize,
-    }
-
-    impl Cache {
-        pub fn new(bodies: &[Body], _beams: &[Beam]) -> Self {
-            let mut ndof = 0;
-            let mut trans = Vec::with_capacity(bodies.len());
-            let mut rot = Vec::with_capacity(bodies.len());
-            for b in bodies {
-                trans.push(if b.inv_mass > 0.0 {
-                    ndof += 3;
-                    Some(ndof - 3)
-                } else {
-                    None
-                });
-                rot.push(if b.inv_inertia > 0.0 {
-                    ndof += 3;
-                    Some(ndof - 3)
-                } else {
-                    None
-                });
-            }
-            Self {
-                ndof,
-                trans,
-                rot,
-                symbolic: None,
-                mat: None,
-                pos: Vec::new(),
-                llt: None,
-                age: 0,
-            }
+impl DirectSystem {
+    fn new(bodies: &[Body], beams: &[Beam]) -> Option<Self> {
+        let mut ndof = 0;
+        let mut next = |free: bool| {
+            free.then(|| {
+                ndof += 3;
+                ndof - 3
+            })
+        };
+        let mut trans = Vec::with_capacity(bodies.len());
+        let mut rot = Vec::with_capacity(bodies.len());
+        for b in bodies {
+            trans.push(next(b.inv_mass > 0.0));
+            rot.push(next(b.inv_inertia > 0.0));
         }
-
-        pub fn needs_factor(&self, every: usize) -> bool {
-            self.ndof > 0 && (self.llt.is_none() || self.age >= every.max(1))
-        }
-
-        pub fn back_solve(&mut self, rhs: Vec<f64>) -> Option<Vec<f64>> {
-            let n = self.ndof;
-            if n == 0 {
-                return Some(rhs);
-            }
-            let llt = self.llt.as_ref()?;
-            self.age += 1;
-            let mut x = Mat::<f64>::from_fn(n, 1, |i, _| rhs[i]);
-            llt.solve_in_place(x.as_mut());
-            Some((0..n).map(|i| x[(i, 0)]).collect())
-        }
-
-        /// Factorise (diag + Σ blocks). Each block is a dense 12x12 over the four
-        /// 3-DOF slots of a beam (None = fixed); only the lower triangle is used.
-        pub fn factor(
-            &mut self,
-            diag: &[f64],
-            blocks: &[([Option<usize>; 4], [f64; 144])],
-        ) -> Option<()> {
-            let n = self.ndof;
-            // Entries in a fixed order: the diagonal, then each block's lower triangle.
-            let mut idx: Vec<(usize, usize)> = Vec::new();
-            let first = self.mat.is_none();
-            let mut vals = Vec::with_capacity(n + blocks.len() * 78);
-            for (i, &d) in diag.iter().enumerate() {
-                if first {
-                    idx.push((i, i));
-                }
-                vals.push(d);
-            }
-            for (slots, kb) in blocks {
-                for (sr, r0) in slots.iter().enumerate() {
-                    let Some(r0) = r0 else { continue };
-                    for (sc, c0) in slots.iter().enumerate() {
-                        let Some(c0) = c0 else { continue };
-                        for i in 0..3 {
-                            for j in 0..3 {
-                                let (r, c) = (r0 + i, c0 + j);
-                                if r >= c {
-                                    if first {
-                                        idx.push((r, c));
-                                    }
-                                    vals.push(kb[(sr * 3 + i) * 12 + sc * 3 + j]);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            if first {
-                // Build the pattern once, then map every entry to its slot in
-                // the CSC value array so later substeps only scatter values.
-                let trip: Vec<_> = idx.iter().map(|&(r, c)| Triplet::new(r, c, 0.0)).collect();
-                let mat = SparseColMat::<usize, f64>::try_new_from_triplets(n, n, &trip).ok()?;
-                let sym = mat.symbolic();
-                let (cp, ri) = (sym.col_ptr(), sym.row_idx());
-                self.pos = idx
-                    .iter()
-                    .map(|&(r, c)| {
-                        cp[c]
-                            + ri[cp[c]..cp[c + 1]]
-                                .binary_search(&r)
-                                .expect("entry in pattern")
-                    })
-                    .collect();
-                self.symbolic = SymbolicLlt::try_new(sym, Side::Lower).ok();
-                self.mat = Some(mat);
-            }
-            let mat = self.mat.as_mut()?;
-            {
-                let v = mat.val_mut();
-                v.fill(0.0);
-                for (k, &p) in self.pos.iter().enumerate() {
-                    v[p] += vals[k];
-                }
-            }
-            self.llt = Some(
-                Llt::try_new_with_symbolic(self.symbolic.clone()?, mat.as_ref(), Side::Lower)
-                    .ok()?,
-            );
-            self.age = 0;
-            Some(())
-        }
+        let blocks: Vec<_> = beams
+            .iter()
+            .map(|bm| [trans[bm.a], rot[bm.a], trans[bm.b], rot[bm.b]])
+            .collect();
+        Some(Self {
+            lin: LinSolver::new(ndof, &blocks)?,
+            trans,
+            rot,
+            rhs: vec![0.0; ndof],
+            delta: vec![0.0; ndof],
+        })
     }
 }
 
