@@ -88,7 +88,7 @@ impl fmt::Display for Violation {
             ),
             Violation::OverBudget { cost, budget } => write!(
                 f,
-                "Over budget: costs {cost:.0}, the budget is {budget:.0}."
+                "Over budget: costs {cost:.0} kr, the budget is {budget:.0} kr."
             ),
             Violation::OverMass { mass, max } => write!(
                 f,
