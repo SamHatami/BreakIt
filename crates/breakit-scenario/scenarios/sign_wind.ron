@@ -1,0 +1,65 @@
+// Test sheet W-01: a billboard in front of the fan wall.
+//
+// The board is all area and little mass: the wind on it, 9 m up, is what
+// the tower has to carry, and gusts make it sway. It is bolted to a base
+// frame; tear the bolts or let it swing too far and the test fails.
+(
+    id: "sign_wind",
+    sheet: "W-01",
+    group: "Wind",
+    title: "Billboard in the fan wall",
+    brief: "Hold a 6 x 3 m billboard 8 m up while the fan wall blows a 40 m/s storm with gusts. The board weighs 1.2 t, its frame needs nodes at x = ±0.5 m, z = ±1 m, and the wind blows along +x. Four fixed footings at the corners of a 2 m square. The top should not sway more than 15 cm.",
+    limits: (
+        volume: (min: (-1.5, 0.0, -1.5), max: (1.5, 8.5, 1.5)),
+        budget: Some(90000.0),
+        max_mass: Some(1500.0),
+        materials: None,
+    ),
+    anchors: [
+        (name: "A", position: (-1.0, 0.0, -1.0), kind: Fixed),
+        (name: "B", position: (1.0, 0.0, -1.0), kind: Fixed),
+        (name: "C", position: (1.0, 0.0, 1.0), kind: Fixed),
+        (name: "D", position: (-1.0, 0.0, 1.0), kind: Fixed),
+    ],
+    payloads: [
+        (
+            name: "billboard",
+            at: (0.0, 8.0, 0.0),
+            tolerance: 0.15,
+            mass: 1200.0,
+            feet: [(-0.5, 0.0, -1.0), (0.5, 0.0, -1.0), (0.5, 0.0, 1.0), (-0.5, 0.0, 1.0)],
+            height: 2.0,
+            size: Some((0.3, 3.0, 6.0)),
+            drag: 1.8,
+            mount: Bolted(capacity: 120000.0),
+            limits: (drift: Some(0.15)),
+            critical: true,
+        ),
+    ],
+    events: [
+        Wind(
+            name: "Storm 40 m/s",
+            start: 0.5,
+            ramp: 3.0,
+            speed: 40.0,
+            direction: (1.0, 0.0, 0.0),
+            gusts: 0.15,
+            jet: Some((center: (0.0, 5.0, 0.0), half_width: 6.0, half_height: 6.0)),
+        ),
+    ],
+    duration: 12.0,
+    settle: 1.0,
+    collapse: (displacement: 1.0, max_broken_fraction: 0.25),
+    overload: None,
+    objectives: [
+        PayloadDrift(payload: "billboard", limit: 0.15),
+        NoBreaks,
+    ],
+    scoring: (
+        target_cost: 55000.0,
+        target_mass: 500.0,
+        margin_band: (1.25, 2.0),
+        weights: (cost: 0.35, mass: 0.15, margin: 0.25, objectives: 0.25),
+        stars: (0.6, 0.85),
+    ),
+)

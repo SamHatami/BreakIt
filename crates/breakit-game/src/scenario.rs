@@ -109,6 +109,16 @@ fn event_load(e: &bs::Event) -> String {
         }
         bs::Event::DeckLoad { per_metre, .. } => format!("{:.0} kN/m", per_metre / 1000.0),
         bs::Event::GroundShake { peak, .. } => format!("{:.1} g", peak / 9.81),
+        bs::Event::Wind { speed, .. } => format!("{speed:.0} m/s"),
+        bs::Event::Water {
+            wave, level, bed, ..
+        } => match wave {
+            Some(bs::Wave::Surge { height, .. }) => format!("{height:.1} m surge"),
+            Some(bs::Wave::Regular { height, period, .. }) => {
+                format!("{height:.1} m waves, {period:.0} s")
+            }
+            None => format!("{:.1} m deep", level - bed),
+        },
     }
 }
 

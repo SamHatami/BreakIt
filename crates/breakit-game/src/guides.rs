@@ -64,30 +64,23 @@ fn draw_guides(
             if building { GUIDE } else { VEHICLE },
         );
     }
-    // Vehicles ride on the deflected deck: lift them onto the nearest deck
-    // node's current height.
+    // Vehicles ride on the deflected deck: the rig's wheel contacts already
+    // follow it.
     let Some(sim) = sim.filter(|_| !building) else {
         return;
     };
     let Some(run) = sim.run() else { return };
-    let deck = run.binding().deck.as_ref();
     for v in run.vehicles() {
-        let mid = v.front - v.length * 0.5;
-        let base = deck
-            .and_then(|d| {
-                d.stations
-                    .iter()
-                    .min_by(|a, b| (a.s - mid).abs().total_cmp(&(b.s - mid).abs()))
-                    .map(|st| from_core(run.sim().displacement(st.nodes[0])).y)
-            })
-            .unwrap_or(0.0)
-            .max(-1.0);
-        let dir = from_core(v.dir);
-        let centre = from_core(v.position) - dir * (v.length as f32 * 0.5) + Vec3::Y * (0.6 + base);
+        let length = match (v.wheels.first(), v.wheels.last()) {
+            (Some(a), Some(b)) => (a.contact - b.contact).norm() as f32,
+            _ => 0.0,
+        };
+        let dir = from_core(v.forward);
+        let centre = from_core(v.position) + Vec3::Y * 0.6;
         gizmos.cube(
             Transform::from_translation(centre)
                 .looking_to(dir, Vec3::Y)
-                .with_scale(Vec3::new(1.6, 1.2, v.length as f32 + 1.0)),
+                .with_scale(Vec3::new(1.6, 1.2, length + 1.0)),
             VEHICLE,
         );
     }

@@ -72,6 +72,55 @@ pub fn mast(r: f64, t: f64, levels: usize) -> Structure {
 /// deck grid that has nodes under the P-01 pump and cabinet feet. `braced`
 /// adds X bracing on all four sides.
 pub fn platform(r: f64, t: f64, braced: bool) -> Structure {
+    deck_on_legs(r, t, braced, 0.0, 3.0)
+}
+
+/// F-01 jetty: the P-01 deck at y = 1 on legs from the flume bed.
+pub fn jetty(r: f64, t: f64, braced: bool) -> Structure {
+    deck_on_legs(r, t, braced, -3.2, 1.0)
+}
+
+/// Four-legged tower for the W-01 sign: base at the corners of a 2 m
+/// square, top ring at x = ±0.5, z = ±1 m and y = 8 m (the sign's feet),
+/// `levels` braced storeys.
+pub fn sign_tower(r: f64, t: f64, levels: usize) -> Structure {
+    let (m, sec) = (Material::steel(), Section::tube(r, t));
+    let mut s = Structure::new();
+    let corners = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
+    let rings: Vec<Vec<usize>> = (0..=levels)
+        .map(|k| {
+            let f = k as f64 / levels as f64;
+            corners
+                .iter()
+                .map(|&(x, z)| s.add_node(Vec3::new(x * (1.0 - 0.5 * f), 8.0 * f, z)))
+                .collect()
+        })
+        .collect();
+    for k in 0..=levels {
+        for c in 0..4 {
+            if k > 0 {
+                s.add_member(rings[k][c], rings[k][(c + 1) % 4], m.clone(), sec.clone());
+            }
+            if k < levels {
+                s.add_member(rings[k][c], rings[k + 1][c], m.clone(), sec.clone());
+                s.add_member(
+                    rings[k][c],
+                    rings[k + 1][(c + 1) % 4],
+                    m.clone(),
+                    sec.clone(),
+                );
+            }
+        }
+    }
+    // Plan diagonal at the top so the sign's frame is a rigid table.
+    s.add_member(rings[levels][0], rings[levels][2], m.clone(), sec.clone());
+    for &n in &rings[0] {
+        s.add_support(Support::fixed(n));
+    }
+    s
+}
+
+fn deck_on_legs(r: f64, t: f64, braced: bool, y0: f64, y1: f64) -> Structure {
     let (m, sec) = (Material::steel(), Section::tube(r, t));
     let mut s = Structure::new();
     let xs = [-1.5, -1.0, -0.5, 0.5, 1.0, 1.5];
@@ -79,7 +128,7 @@ pub fn platform(r: f64, t: f64, braced: bool) -> Structure {
     let mut grid = vec![vec![0; zs.len()]; xs.len()];
     for (i, &x) in xs.iter().enumerate() {
         for (k, &z) in zs.iter().enumerate() {
-            grid[i][k] = s.add_node(Vec3::new(x, 3.0, z));
+            grid[i][k] = s.add_node(Vec3::new(x, y1, z));
         }
     }
     for i in 0..xs.len() {
@@ -96,7 +145,7 @@ pub fn platform(r: f64, t: f64, braced: bool) -> Structure {
     let corners = [(0, 0), (last_x, 0), (last_x, last_z), (0, last_z)];
     let mut feet = Vec::new();
     for &(i, k) in &corners {
-        let f = s.add_node(Vec3::new(xs[i], 0.0, zs[k]));
+        let f = s.add_node(Vec3::new(xs[i], y0, zs[k]));
         s.add_member(f, grid[i][k], m.clone(), sec.clone());
         s.add_support(Support::fixed(f));
         feet.push(f);
