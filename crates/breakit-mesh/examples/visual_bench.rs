@@ -60,11 +60,7 @@ fn main() {
                 }
             })
             .collect();
-        let structure = VisualStructure {
-            members,
-            node_count: n + 1,
-            consumed_breaks: 0,
-        };
+        let structure = VisualStructure::from_members(members, n + 1);
         let frame_at = |t: f32| VisualFrame {
             node_positions: (0..=n)
                 .map(|i| Vec3::new(i as f32 * 2.0, 3.0 + 0.05 * (t + i as f32).sin(), 0.0))

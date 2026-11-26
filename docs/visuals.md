@@ -31,12 +31,41 @@ A break costs about 0.2 ms once (halves, rebar, chunks, particles).
 
 Not measured yet: GPU frame time on real hardware. The container only has a software rasteriser, which runs the 473-member collapse at about 4 fps and says nothing about a GPU. Run `cargo run --release -p breakit-render --example stress -- 320` (about 5,100 members) on a real machine; it prints fps and the CPU split once a second. Add `--no-sim` to time rendering without the solver.
 
+## Joints and nodes
+
+Members are drawn with their real connections (`breakit-mesh/src/joint.rs`, `breakit-render/src/joints.rs`). `VisualStructure::with_joints(looks)` takes one `JointLook` per member end; `with_joints_from(&structure)` reads them off the solver model, and `StructureVisual::jointed` does that for the game. Without joints nothing changes: members run node to node.
+
+| `JointLook` | drawn | goes when the connection fails |
+|---|---|---|
+| `Pinned` | clevis on the node, pin through the member end | the pin |
+| `Bolted` | end plate on the member, matching plate on the node, bolts | the bolts |
+| `Welded` | member butted on a node plate, a rippled fillet round the section outline | the weld |
+| `Monolithic` | concrete haunch into a cast block | nothing, the member decides |
+| `Dowelled` | steel plate in a slot in the timber, a staggered dowel group | the dowels |
+| `Sleeve` | steel shoe round the member end, two through-bolts | the bolts |
+
+`JointLook::of(kind, material)` maps the solver's `JointKind`; a `Rigid` joint is drawn as whatever makes one in that material (weld, cast node, shoe). `JointLook::infer(&joint, material)` does the same from a `Joint`'s numbers when the kind is not known.
+
+How it works:
+
+- **Hubs.** Every node a joint meets gets a hub (cast steel ball, or a concrete block where only monolithic members meet), sized to the largest section there (`node_radius`).
+- **Trim.** Each jointed member end stops `trim` metres short of the node. That is only the member's `clip` window in its `GpuMember`, so it costs nothing and the template is untouched.
+- **Two rigid parts per joint.** One follows the node, one follows the member's own curve where it is cut (`joint_pose`). A pin visibly turns in its clevis and a yielding end plate opens away from its partner. Pinned ends are also posed properly now: the member leaves a pin with no curvature instead of following the node's rotation.
+- **Shared meshes.** Parts are built once per (look, profile, trim) in joint space and every joint of that kind is an entity with the same mesh and material, so Bevy instances them. Per frame the CPU writes one transform per part (about four per member).
+- **Connection failure.** A `BreakCause::Connection` break at a jointed end does not tear the member: its fuse parts disappear with a small burst, and the member comes away whole, hanging from its other node (`JointState::failed`). Elsewhere, and for members without joints, breaks work as before, with the hardware staying on each half.
+
+`cargo run --release -p breakit-render --example joints [-- --view a|c|d]` shows every joint; two of them fail one second in.
+
+![All joints](images/joints/all.jpg)
+![Pin and bolted end plate, loaded and failed](images/joints/steel.jpg)
+![Concrete, dowelled timber, timber pin and a composite collar](images/joints/others.jpg)
+
 ## Using it from the game
 
 ```rust
 app.add_plugins(BreakitRenderPlugin);
 // When the design changes:
-commands.insert_resource(StructureVisual::new(&structure, &styles));
+commands.insert_resource(StructureVisual::jointed(&structure, &styles));
 // Each frame after BreakitSet::Physics:
 frame.0 = visual.frame_from_sim(&sim);                    // simulate
 frame.0 = visual.frame_from_positions(&positions, &util); // build
@@ -47,6 +76,7 @@ frame.0 = visual.frame_from_positions(&positions, &util); // build
 ## Examples
 
 - `gallery`: every material intact, damaged and breaking, from a synthetic frame.
+- `joints`: every connection close up, loaded, and two failing.
 - `stress`: a long mixed-material truss on the real solver, loaded until it collapses.
 
 Both take `--capture <dir> [--at t1,t2,...] [--view close]` for headless screenshots under `xvfb-run -a`. Headless needs `mesa-vulkan-drivers` and `libxkbcommon-x11-0`.
@@ -56,6 +86,10 @@ Both take `--capture <dir> [--at t1,t2,...] [--view close]` for headless screens
 `MemberPose::deform` and `cut::cut_offset` are the reference for `bend` and `cut_offset` in `member.wesl`. `GpuMember` mirrors the shader's `Member` struct field for field. Change them together.
 
 ## Open points
+
+- A member freed by a failed connection hangs rigidly from its other node, even when that end is a pin; it should swing or fall as a loose body.
+- Hubs are one size per node and do not know about supports; base plates and bearings at supports are not drawn yet.
+- Joint hardware keeps its paint in the stress view.
 
 - Nodes land on the ground and table (`docs/contact.md`), but broken halves hang rigidly from their node and can poke into the ground.
 - Each debris chunk has its own mesh (not instanced). Fine at the default cap of 2,000 pieces; pre-generate a chunk library if that ever shows up in a profile.

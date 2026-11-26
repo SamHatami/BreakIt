@@ -27,6 +27,7 @@
 pub mod cut;
 pub mod debris;
 pub mod fracture;
+pub mod joint;
 pub mod mesh;
 pub mod particles;
 pub mod pose;
@@ -36,11 +37,14 @@ pub mod state;
 
 pub use debris::{DebrisConfig, DebrisImpact, DebrisWorld};
 pub use fracture::{fracture, BreakInput, DebrisPiece, Fracture, ParticleBurst};
+pub use joint::{
+    joint_parts, joint_pose, node_hub, JointLook, JointPart, JointPose, PartLook, Side,
+};
 pub use mesh::{member_template, MeshData, TemplateOptions};
 pub use particles::ParticlePool;
 pub use pose::{GpuMember, MemberPose};
 pub use profile::Profile;
-pub use scene::{Remnant, SceneConfig, Slot, VisualScene};
+pub use scene::{Hub, JointInstance, JointState, Remnant, SceneConfig, Slot, VisualScene};
 pub use state::{
     MaterialKind, MemberStyle, MemberVisualState, VisualBreak, VisualFrame, VisualStructure,
 };
