@@ -34,11 +34,19 @@ use std::time::Instant;
 /// material response and memory traffic: its ratio swings between 1.03 and
 /// 1.2 from run to run on the same machine and came out at 1.00 on a CI
 /// runner, so it is only held to "not clearly slower".
-const SIMD_GATES: [(&str, f64); 3] = [
+const SIMD_GATES: [(&str, f64); 4] = [
     ("block Cholesky factorisation, tower 5x5x12", 1.3),
     ("block Jacobi solve, tower 8x8x16", 1.05),
     ("element assembly, 20 frames of bridge 120 panels", 0.9),
+    (
+        "wind turbulence field, 20 frames at the nodes of bridge 60 panels",
+        WIND_FIELD_GATE,
+    ),
 ];
+
+/// Least speed-up of the wind turbulence kernel (measured: see
+/// `docs/loads.md`).
+const WIND_FIELD_GATE: f64 = 2.0;
 
 /// Threaded time over single-thread time may not exceed this where threads
 /// are on by default.
@@ -169,6 +177,52 @@ fn run_frames(case: &Case, config: SimConfig, frames: usize) -> (f64, f64, Vec3)
 
 /// The least of `reps` timings of each of the two closures, interleaved so
 /// that a slow spell on a shared machine hits both.
+/// Seconds to evaluate the wind turbulence field at every node of `case`
+/// for 20 frames on `level`.
+fn wind_field_seconds(case: &Case, level: SimdLevel) -> f64 {
+    use breakit_core::loads::wind::turbulence::TurbulenceField;
+    let f = TurbulenceField::new(50.0, 25.0, 0.15, 96, 1);
+    let t0 = Instant::now();
+    let mut sum = Vec3::zeros();
+    for frame in 0..20 {
+        let t = frame as f64 / 60.0;
+        for p in &case.s.nodes {
+            sum += f.sample_with(level, *p, t);
+        }
+    }
+    std::hint::black_box(sum);
+    t0.elapsed().as_secs_f64()
+}
+
+/// Gusty wind on `case` with shedding for 20 frames, the solver stepping in
+/// between: (seconds in the wind's `apply` only, nodal forces of the last
+/// frame).
+fn wind_frames(case: &Case, parallel_min_members: usize) -> (f64, Vec<Vec3>) {
+    use breakit_core::loads::wind::{Execution, Gusts, Wind};
+    let s = &case.s;
+    let mut wind = Wind::new(25.0, Vec3::new(1.0, 0.0, 0.2));
+    wind.gusts = Some(Gusts::default());
+    wind.set_execution(Execution {
+        simd: SimdLevel::Native,
+        parallel_min_members,
+    });
+    let mut loads = LoadSet::new(vec![LoadCase::new(
+        "wind",
+        Window::new(0.0, None, 0.0),
+        LoadKind::Wind(wind),
+    )]);
+    let mut sim = DynamicSim::new(s, SimConfig::default());
+    loads.prepare(s);
+    let mut seconds = 0.0;
+    for _ in 0..20 {
+        let t0 = Instant::now();
+        loads.apply(s, &mut sim, 1.0 / 60.0);
+        seconds += t0.elapsed().as_secs_f64();
+        sim.step(1.0 / 60.0);
+    }
+    (seconds, loads.forces().to_vec())
+}
+
 fn race(reps: usize, mut a: impl FnMut() -> f64, mut b: impl FnMut() -> f64) -> (f64, f64) {
     let (mut ta, mut tb) = (f64::MAX, f64::MAX);
     for _ in 0..reps {
@@ -198,7 +252,7 @@ fn main() {
     println!("\n| kernel | scalar ms | {native} ms | speed-up | required |");
     println!("|---|---|---|---|---|");
     let (tower_l, tower_xl) = (tower(5, 5, 12, 1), tower(8, 8, 16, 1));
-    let bridge_xl = bridge(120, 4);
+    let (bridge_l, bridge_xl) = (bridge(60, 3), bridge(120, 4));
     let serial = |simd| SimConfig {
         simd,
         parallel_min_members: usize::MAX,
@@ -219,6 +273,11 @@ fn main() {
             9,
             || run_frames(&bridge_xl, serial(SimdLevel::Scalar), 20).0,
             || run_frames(&bridge_xl, serial(SimdLevel::Native), 20).0,
+        ),
+        race(
+            9,
+            || wind_field_seconds(&bridge_l, SimdLevel::Scalar),
+            || wind_field_seconds(&bridge_l, SimdLevel::Native),
         ),
     ];
     for ((name, required), (scalar, simd)) in SIMD_GATES.into_iter().zip(timings) {
@@ -430,6 +489,49 @@ fn main() {
             failures.push(format!(
                 "{}: islands cost {:.2} ms a frame against {:.2} ms as one system",
                 case.name, best_threaded, ms[0]
+            ));
+        }
+    }
+
+    // Gusty wind on its own threads (`loads::wind::Execution`).
+    println!("\n| gusty wind, 20 frames, ms per frame in apply | members | threads on by default | 1 thread | 2 threads | 4 threads |");
+    println!("|---|---|---|---|---|---|");
+    for case in [tower(5, 5, 12, 1), bridge(60, 3)] {
+        let members = case.s.members.len();
+        let (_, reference) = wind_frames(&case, usize::MAX);
+        let mut ms = [0.0; 3];
+        for (t, threads) in ms.iter_mut().zip([1, 2, 4]) {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("a thread pool can be built");
+            let mut best = f64::MAX;
+            for _ in 0..3 {
+                let (seconds, forces) = pool.install(|| wind_frames(&case, 0));
+                best = best.min(seconds);
+                if forces != reference {
+                    failures.push(format!(
+                        "{}: wind on {threads} threads is not bit-identical to one thread",
+                        case.name
+                    ));
+                }
+            }
+            *t = best * 1e3 / 20.0;
+        }
+        let on = members >= breakit_core::loads::wind::PARALLEL_MIN_MEMBERS;
+        println!(
+            "| {} | {members} | {} | {:.3} | {:.3} | {:.3} |",
+            case.name,
+            if on { "yes" } else { "no" },
+            ms[0],
+            ms[1],
+            ms[2]
+        );
+        let best_threaded = if cores >= 4 { ms[1].min(ms[2]) } else { ms[1] };
+        if on && cores >= 2 && best_threaded > THREAD_SLACK * ms[0] {
+            failures.push(format!(
+                "{}: wind threads are on by default but cost {best_threaded:.3} ms against {:.3} ms on one thread",
+                case.name, ms[0]
             ));
         }
     }
