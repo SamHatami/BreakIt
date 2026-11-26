@@ -19,10 +19,12 @@
 
 use bevy::app::AppExit;
 use bevy::prelude::*;
+use breakit_audio::listen::wind_tones;
 use breakit_audio::{
     AmbientKind, AudioHandle, AudioOutput, Body, Command, MaterialKind, Place, RigKind,
     StructureListener, UiSound,
 };
+use breakit_core::loads::LoadKind;
 use breakit_core::{Material, Section};
 use breakit_lab::{Anchor, LabAnchors, LabSettings};
 use breakit_render::breakit_mesh::debris::DebrisImpact;
@@ -368,6 +370,18 @@ fn structure_sounds(
         [0.0; 3],
         |command| sound.send(command),
     );
+    // Members singing in the wind, while a wind load is blowing.
+    let run = sim.run();
+    let now = run.sim().time();
+    for case in &run.loads().cases {
+        if let LoadKind::Wind(wind) = &case.kind {
+            if case.window.factor(now) > 0.0 {
+                wind_tones(run.sim(), structure, wind, [0.0; 3], |command| {
+                    sound.send(command)
+                });
+            }
+        }
+    }
 }
 
 fn core_material(k: MeshMaterial) -> MaterialKind {

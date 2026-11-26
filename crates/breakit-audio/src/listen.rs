@@ -11,10 +11,15 @@
 //! * [`Command::Damage`] when a member reaches a worse damage state;
 //! * [`Command::Break`] for each new break event, with the energy the member
 //!   held just before it let go and how much of it was axial.
+//!
+//! [`wind_tones`] does the same for a wind load: [`Command::Wind`] for the
+//! members whose vortex shedding is loudest (at most [`MAX_WIND_VOICES`]).
 
-use breakit_core::{DamageState, DynamicSim, Material, MemberDamage, Section, Structure};
+use breakit_core::loads::wind::{shedding, Wind, AIR_DENSITY, AIR_VISCOSITY};
+use breakit_core::{DamageState, DynamicSim, Material, MemberDamage, Section, Shape, Structure};
 
-use crate::mixer::MAX_STRAIN_VOICES;
+use crate::mixer::{MAX_STRAIN_VOICES, MAX_WIND_VOICES};
+use crate::wind::{coherent_force, tone_level};
 use crate::{Body, BreakInfo, Command, Place, Pos};
 
 /// What the listener remembers about one member between frames.
@@ -63,6 +68,76 @@ pub fn strain_energy(
         return (0.0, 0.5);
     }
     (total as f32, (axial / total) as f32)
+}
+
+/// The members singing in `wind` this frame. Call it every frame while the
+/// wind's load window is open, after the loads have stepped. Each member's
+/// shedding rate, lift and motion come from the wind model; the span over
+/// which the wake is in step (EN 1991-1-4 Table E.4) sets how much of the
+/// lift radiates. Members the solver has broken are left out.
+pub fn wind_tones(
+    sim: &DynamicSim,
+    structure: &Structure,
+    wind: &Wind,
+    offset: Pos,
+    mut send: impl FnMut(Command),
+) {
+    let n = structure.members.len().min(sim.damage_all().len());
+    let mut loud: Vec<(f32, usize, f32, f32)> = Vec::new();
+    let mut lengths = vec![0.0f64; n];
+    for (i, aero) in wind.member_aero().enumerate().take(n) {
+        if sim.is_broken(i) {
+            continue;
+        }
+        let m = &structure.members[i];
+        let length = (structure.nodes[m.a] - structure.nodes[m.b])
+            .norm()
+            .max(0.05);
+        lengths[i] = length;
+        // Lift per length, N/m. The solver runs its wake model only up to
+        // the rates it can force (a few hertz); an audible tone takes the
+        // section's fluctuating lift coefficient itself.
+        let flow = (2.0 * aero.dynamic_pressure / AIR_DENSITY).sqrt();
+        let reynolds = flow * aero.depth / AIR_VISCOSITY;
+        let along = match m.section.shape {
+            Shape::Tube { .. } => aero.depth,
+            // The side that is not across the flow.
+            Shape::Rect { b, h } if (aero.depth - b).abs() < (aero.depth - h).abs() => h,
+            Shape::Rect { b, .. } => b,
+        };
+        let lift = if aero.shedding_frequency > shedding::MAX_FORCED_FREQUENCY {
+            shedding::lift_amplitude(&m.section.shape, along / aero.depth.max(1e-6), reynolds)
+        } else {
+            aero.lift_coefficient.abs()
+        };
+        let per_length = aero.dynamic_pressure * aero.depth * lift;
+        let correlation = shedding::correlation_length(aero.amplitude_ratio) * aero.depth;
+        let force = coherent_force(per_length as f32, length as f32, correlation as f32);
+        let frequency = aero.shedding_frequency as f32;
+        let level = tone_level(frequency, force);
+        if level > 0.01 {
+            loud.push((level, i, frequency, force));
+        }
+    }
+    loud.sort_by(|a, b| b.0.total_cmp(&a.0));
+    for &(_, i, frequency, force) in loud.iter().take(MAX_WIND_VOICES) {
+        let m = &structure.members[i];
+        let p = sim.position(m.a).lerp(&sim.position(m.b), 0.5);
+        let aero = wind.member_aero().nth(i).copied().unwrap_or_default();
+        send(Command::Wind {
+            id: i as u32,
+            body: Body::member(&m.material, &m.section, lengths[i])
+                .with_damage(1.0 - sim.damage(i).stiffness as f32),
+            frequency,
+            force,
+            locked: aero.locked_in,
+            place: Place::at([
+                p.x as f32 + offset[0],
+                p.y as f32 + offset[1],
+                p.z as f32 + offset[2],
+            ]),
+        });
+    }
 }
 
 impl StructureListener {

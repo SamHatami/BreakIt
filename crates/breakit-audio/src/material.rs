@@ -805,7 +805,7 @@ const MAX_EVENTS_PER_BLOCK: usize = 10;
 /// Silent while the load is steady: a structure at rest makes no sound.
 /// It is driven by two things the solver reports:
 ///
-/// * **utilisation changing**: joints stick and slip (see [`Friction`]);
+/// * **utilisation changing**: joints stick and slip (see `Friction`);
 /// * **damage growing**: micro-fractures. Damage never decreases, so this
 ///   reproduces the Kaiser effect for free: reloading a member to a load it
 ///   has already seen is quiet, new ground is not. Events get more frequent

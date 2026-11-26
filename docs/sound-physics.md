@@ -55,6 +55,17 @@ A long member has hundreds of audible modes. Each voice gets a budget (28 per pi
 
 **Loudness** is `(E / 1 kJ)^0.3` of the energy released. Physics says square root; a game cannot play the 60 dB between a creak and a girder snapping, so it is compressed.
 
+## Wind: members that sing (`wind.rs`)
+
+Wind sheds vortices from alternate sides of a member at the Strouhal rate `f = St·U/d`, and the lift force that swings with them makes sound in two ways.
+
+- The air: a fluctuating force on a body much smaller than the wavelength radiates as a dipole, `p = ωF / 4πrc` (Curle). This is a wire humming; the member need not move. Twice the wind is twice the pitch and eight times the pressure.
+- The member: the same force drives the member's bending modes, and a moving member pushes the air it displaces plus the added mass around it. Per unit of lift a mode radiates `4 (ρ_air/ρ) (S/A) β² / √((1−β²)² + η²)` times what the air does, with `β = f/f_n`, `S` the outline of the section and `A` its material area. Off a mode that is nothing. On a mode it is `1/η` larger: about 2 for a typical steel tube (thin walls, little damping) and under 1 for a solid timber post. So a steel tube rings out above the wind's tone when a gust sweeps the shedding rate through one of its modes, and timber mostly hums.
+
+The rate, flow and motion of every member come from the wind model in `breakit-core` (`Wind::member_aero`). The lift coefficient is the section's (0.3 for a tube, 0.15 past the drag crisis, up to 1.0 for a square). Along a still member the wake is in step over only about six depths (EN 1991-1-4 Table E.4), so the cells add as random phases, `F = f'√(L·l_c)`; when the member moves with the shedding the cells fall into step and the tone gets louder and steadier.
+
+Level is `(p / 1 Pa)^0.6` at 10 m, the same compressive law as the break energy (`(p²)^0.3`).
+
 ## What was checked
 
 Nobody can listen in the cloud container, so it is checked by measurement:
@@ -70,6 +81,7 @@ Nobody can listen in the cloud container, so it is checked by measurement:
 - Radiation is a per-mode efficiency, not a sound field: no directivity, no near field.
 - Only the broken member rings (plus the table). Its neighbours get the load in the solver, and creak for it, but the stress wave is not carried through the joints.
 - Debris pieces are assumed to be lengths of a typical section of their material; the debris system does not say which member a piece came from.
+- Wind tones: how far the shedding rate and strength wander (3% and 35% on a still member, a tenth of that locked in) and the pressure that plays at full level (1 Pa at 10 m) are estimates. The lift drives every bending mode alike; its shape along the span is not projected onto the mode shapes.
 - The table and floor are ten damped modes, the same everywhere.
 - The hall is a feedback delay network sized for the lab, not a simulation of it.
 

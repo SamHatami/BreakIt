@@ -1,7 +1,10 @@
 //! Renders the sound of real solver runs to WAV: nothing is scripted but the
 //! load. A truss is loaded at mid-span until it fails, once in steel and
 //! once in timber, and what you hear is what `StructureListener` made of the
-//! solver's utilisation, damage and break events.
+//! solver's utilisation, damage and break events. A third run puts a truss
+//! of thin steel tubes in a rising, gusty wind: the members sing at their
+//! vortex shedding rates, and ring when a gust carries that rate through
+//! one of their own modes.
 //!
 //! ```text
 //! cargo run --release -p breakit-audio --example render_sim -- <out_dir>
@@ -9,8 +12,11 @@
 
 use std::path::PathBuf;
 
+use breakit_audio::listen::wind_tones;
 use breakit_audio::wav::write_wav;
 use breakit_audio::{AmbientKind, Command, Mixer, StructureListener};
+use breakit_core::loads::wind::{Gusts, Wind};
+use breakit_core::loads::{LoadCase, LoadKind, LoadSet, Window};
 use breakit_core::{DynamicSim, Material, Section, SimConfig, Structure, Support, Vec3};
 
 const SR: f32 = 48_000.0;
@@ -74,6 +80,51 @@ fn render(structure: &Structure, node: usize, rate: f64, seconds: f64) -> (Vec<f
     (audio, sim.break_events().len(), first_break)
 }
 
+/// The truss, held along its bottom chord, in a wind across it that rises
+/// to `speed` m/s over `rise` seconds.
+fn render_wind(structure: &Structure, speed: f64, rise: f64, seconds: f64) -> (Vec<f32>, f32, f32) {
+    let mut sim = DynamicSim::new(structure, SimConfig::default());
+    let mut wind = Wind::new(speed, Vec3::z());
+    wind.gusts = Some(Gusts::default());
+    let mut loads = LoadSet::new(vec![LoadCase::new(
+        "Wind",
+        Window::new(0.0, None, rise),
+        LoadKind::Wind(wind),
+    )]);
+    loads.prepare(structure);
+    let mut listener = StructureListener::new();
+    let mut mixer = Mixer::new(SR);
+    mixer.handle(Command::Listener {
+        position: [0.0, 1.5, 6.0],
+        right: [1.0, 0.0, 0.0],
+        up: [0.0, 1.0, 0.0],
+    });
+    mixer.handle(Command::Ambient {
+        id: 0,
+        kind: AmbientKind::Room,
+        level: 1.0,
+        place: None,
+    });
+    let mut audio = Vec::new();
+    let dt = 1.0 / 60.0;
+    let (mut low, mut high) = (f32::INFINITY, 0.0f32);
+    for _ in 0..(seconds / dt) as usize {
+        loads.step(structure, &mut sim, dt);
+        listener.update(&sim, structure, dt as f32, [0.0; 3], |c| mixer.handle(c));
+        if let LoadKind::Wind(wind) = &loads.cases[0].kind {
+            wind_tones(&sim, structure, wind, [0.0; 3], |c| {
+                if let Command::Wind { frequency, .. } = &c {
+                    low = low.min(*frequency);
+                    high = high.max(*frequency);
+                }
+                mixer.handle(c)
+            });
+        }
+        audio.extend(mixer.render_seconds(dt as f32));
+    }
+    (audio, low, high)
+}
+
 fn main() {
     let dir = PathBuf::from(
         std::env::args()
@@ -109,4 +160,18 @@ fn main() {
             path.display()
         );
     }
+
+    // Wind: thin tubes, so the shedding is in the audible range.
+    let (mut structure, _) = truss(6.0, 6, &Material::steel(), &Section::tube(0.016, 0.002));
+    for i in 1..6 {
+        structure.add_support(Support::fixed(i));
+    }
+    let (audio, low, high) = render_wind(&structure, 32.0, 10.0, 16.0);
+    let path = dir.join("sim-wind-steel-truss.wav");
+    write_wav(&path, &audio, 2, SR as u32).expect("write wav");
+    let peak = audio.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+    println!(
+        "sim-wind-steel-truss: shedding heard from {low:.0} to {high:.0} Hz, peak {peak:.2} -> {}",
+        path.display()
+    );
 }

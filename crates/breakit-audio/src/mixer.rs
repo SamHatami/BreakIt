@@ -12,6 +12,7 @@ use crate::material::StrainVoice;
 use crate::reverb::Hall;
 use crate::rigs::RigVoice;
 use crate::ui::ui_voice;
+use crate::wind::WindVoice;
 use crate::{AmbientKind, BoxVoice, Bus, Command, Place, Pos, RigKind, Voice};
 
 /// Samples processed per internal block. Positions and gains are updated
@@ -35,6 +36,9 @@ pub const MAX_STRAIN_VOICES: usize = 8;
 /// (and so goes quiet); after `STRAIN_DROP` it is dropped.
 const STRAIN_STALE: f32 = 0.25;
 const STRAIN_DROP: f32 = 1.5;
+
+/// Most members heard singing in the wind at once.
+pub const MAX_WIND_VOICES: usize = 6;
 
 #[derive(Clone, Copy, Debug)]
 struct Listener {
@@ -154,6 +158,15 @@ struct Strain {
     idle: f32,
 }
 
+struct Singer {
+    id: u32,
+    voice: WindVoice,
+    place: Place,
+    channel: Channel,
+    /// Seconds since the game last updated it.
+    idle: f32,
+}
+
 struct Rig {
     id: u32,
     kind: RigKind,
@@ -179,6 +192,7 @@ pub struct Mixer {
     sr: f32,
     listener: Listener,
     strains: Vec<Strain>,
+    singers: Vec<Singer>,
     rigs: Vec<Rig>,
     ambient: Vec<Ambient>,
     shots: Vec<OneShot>,
@@ -207,6 +221,7 @@ impl Mixer {
             sr,
             listener: Listener::default(),
             strains: Vec::with_capacity(MAX_STRAIN_VOICES),
+            singers: Vec::with_capacity(MAX_WIND_VOICES),
             rigs: Vec::new(),
             ambient: Vec::new(),
             shots: Vec::with_capacity(MAX_ONE_SHOTS),
@@ -296,6 +311,40 @@ impl Mixer {
                 if let Some(mut voice) = StrainVoice::new(&body, sr, seed) {
                     voice.set(&body, utilization, damage, true);
                     self.strains.push(Strain {
+                        id,
+                        voice,
+                        place,
+                        channel: Channel::new(sr),
+                        idle: 0.0,
+                    });
+                }
+            }
+            Command::Wind {
+                id,
+                body,
+                frequency,
+                force,
+                locked,
+                place,
+            } => {
+                if let Some(s) = self.singers.iter_mut().find(|s| s.id == id) {
+                    s.voice.set(frequency, force, locked);
+                    s.place = place;
+                    s.idle = 0.0;
+                    return;
+                }
+                if self.singers.len() >= MAX_WIND_VOICES {
+                    match self.singers.iter().position(|s| s.voice.quiet()) {
+                        Some(i) => {
+                            self.singers.swap_remove(i);
+                        }
+                        None => return,
+                    }
+                }
+                let seed = self.next_seed();
+                if let Some(mut voice) = WindVoice::new(&body, sr, seed) {
+                    voice.set(frequency, force, locked);
+                    self.singers.push(Singer {
                         id,
                         voice,
                         place,
@@ -410,6 +459,7 @@ impl Mixer {
             Command::Master(g) => self.master = g.clamp(0.0, 2.0),
             Command::ResetStructure => {
                 self.strains.clear();
+                self.singers.clear();
                 self.shots.retain(|s| s.bus != Bus::Structure);
             }
         }
@@ -497,6 +547,29 @@ impl Mixer {
             s.idle += dt;
             if s.idle > STRAIN_DROP && s.voice.quiet() {
                 return false;
+            }
+            self.mono.iter_mut().for_each(|x| *x = 0.0);
+            s.voice.render(&mut self.mono);
+            s.channel.gains = spatial(&listener, Some(&s.place), 4.0);
+            s.channel.mix(
+                &self.mono,
+                bus[Bus::Structure.index()],
+                sr,
+                &mut self.dry,
+                &mut self.wet,
+            );
+            true
+        });
+
+        // Members singing in the wind; one the game stopped reporting is
+        // out of the wind.
+        self.singers.retain_mut(|s| {
+            s.idle += dt;
+            if s.idle > STRAIN_STALE {
+                s.voice.release();
+                if s.voice.quiet() {
+                    return false;
+                }
             }
             self.mono.iter_mut().for_each(|x| *x = 0.0);
             s.voice.render(&mut self.mono);

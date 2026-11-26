@@ -36,6 +36,7 @@ pub mod reverb;
 pub mod rigs;
 pub mod ui;
 pub mod wav;
+pub mod wind;
 
 pub use body::{Body, Ends};
 pub use breakit_core::{BreakCause, DamageState, MaterialKind};
@@ -191,6 +192,19 @@ pub enum Command {
         body: Body,
         speed: f32,
         mass: f32,
+        place: Place,
+    },
+    /// A member singing in the wind. `frequency` is the vortex shedding rate
+    /// (Hz) and `force` the amplitude of the lift that radiates (N, see
+    /// [`wind::coherent_force`]); `locked` says the member is moving with the
+    /// shedding. Send it every frame while the wind blows; a member not
+    /// updated falls silent. `id` is the member's index.
+    Wind {
+        id: u32,
+        body: Body,
+        frequency: f32,
+        force: f32,
+        locked: bool,
         place: Place,
     },
     /// A test rig's state. `drive` 0..1 is how hard it works; `speed` is its
