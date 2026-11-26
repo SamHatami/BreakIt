@@ -66,7 +66,7 @@ minimal and say so in the PR description, or ask that area's owner to do it.
 
 | Area | Paths | Doc |
 | --- | --- | --- |
-| Solver | `breakit-core/src/{statics,dynamics,linsolve,frame,model}.rs` | `docs/solver-spike.md` |
+| Solver | `breakit-core/src/{statics,linsolve,blockchol,frame,model}.rs`, `breakit-core/src/dynamics/` | `docs/solver-spike.md` |
 | Materials and damage | `breakit-core/src/{material,section,concrete,damage}.rs` | `docs/materials.md` |
 | Joints | `breakit-core/src/joint.rs` | `docs/joints.md` |
 | Loads | `breakit-core/src/loads/` | `docs/loads.md` |
@@ -84,10 +84,14 @@ minimal and say so in the PR description, or ask that area's owner to do it.
 Several areas touch these. Change them as little as possible, and prefer
 adding a new file to growing one of these.
 
-- `breakit-core/src/dynamics.rs`: add a feature in its own module and call it
-  from `DynamicSim` with a few lines; do not paste a subsystem into this file.
-  Accessors other crates need (`node_mass`, forces, ...) are added once, by the
-  solver owner, and reused.
+- `breakit-core/src/dynamics/`: `mod.rs` holds the types, the public API and
+  the substep loop; `beam.rs` the per-member constraints and energy,
+  `plastic.rs` the return mapping and `update_material`, `xpbd.rs` the
+  Gauss-Seidel path, `direct.rs` the sparse direct path, `ground.rs` the
+  contact glue. Add a new feature as its own file in this folder (an
+  `impl DynamicSim` block plus `pub(super)` helpers) and call it from the
+  existing code with a few lines. Accessors other crates need (`node_mass`,
+  forces, ...) are added once, by the solver owner, and reused.
 - `lib.rs` module lists and `pub use` lists, `breakit-game/src/main.rs`
   plugin list: add one line in alphabetical order, never reorder or reformat
   neighbouring lines.

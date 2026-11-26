@@ -24,7 +24,7 @@ pub mod scenario;
 
 pub use cost::{Bill, CostModel, JointClass, JointPrices};
 pub use limits::{check_limits, PlayMode, Violation};
-pub use loads::{Binding, DeckNodes, VehiclePose};
+pub use loads::Binding;
 pub use report::{Criterion, Report};
 pub use run::{evaluate, Happening, PayloadMeasured, Phase, TestRun, TimelineEntry};
 pub use scenario::*;
@@ -42,6 +42,11 @@ pub const BUILTIN: &[(&str, &str)] = &[
     (
         "plant_platform.ron",
         include_str!("../scenarios/plant_platform.ron"),
+    ),
+    ("sign_wind.ron", include_str!("../scenarios/sign_wind.ron")),
+    (
+        "flood_jetty.ron",
+        include_str!("../scenarios/flood_jetty.ron"),
     ),
 ];
 
