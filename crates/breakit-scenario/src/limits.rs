@@ -175,18 +175,15 @@ pub fn check_limits(
         }
     }
     let binding = Binding::new(scenario, s);
-    if let (Some(deck), Some(spec)) = (&binding.deck, &scenario.deck) {
-        if deck.stations.is_empty() {
-            out.push(Violation::NoDeck);
-        } else {
-            let (gap, at) = deck.largest_gap();
-            if gap > spec.max_gap {
-                out.push(Violation::DeckGap {
-                    at,
-                    gap,
-                    max: spec.max_gap,
-                });
-            }
+    if let Some(spec) = &scenario.deck {
+        match binding.largest_gap() {
+            None => out.push(Violation::NoDeck),
+            Some((gap, at)) if gap > spec.max_gap => out.push(Violation::DeckGap {
+                at,
+                gap,
+                max: spec.max_gap,
+            }),
+            Some(_) => {}
         }
     }
     for (p, n) in scenario.payloads.iter().zip(&binding.payload_feet) {

@@ -48,6 +48,10 @@ jobs:
       - run: >-
           cargo test --locked --release --no-default-features
           -p breakit-core -p breakit-mesh -p breakit-parts -p breakit-scenario -p breakit-audio
+      # Hot-path gate (CONTRIBUTING.md, "Hot paths"): SIMD is dispatched and
+      # faster than the scalar reference, threads keep the answer and do not
+      # lose where they are on, solver work stays within budget.
+      - run: cargo run --locked --release --no-default-features -p breakit-core --example gate
 
   # The Bevy crates are checked and tested in two jobs, on two runners: clippy
   # and rustdoc only need metadata builds, tests need full builds, and doing

@@ -1,0 +1,157 @@
+name: Release
+
+# Playtest builds of breakit-game, published to GitHub Releases.
+#
+# - Push a tag `v*` (e.g. `git tag v0.1.0 && git push origin v0.1.0`):
+#   a proper release with Windows and Linux zips and generated notes.
+# - Every push to main: the rolling `nightly` pre-release is rebuilt, so
+#   https://github.com/SamHatami/BreakIt/releases/tag/nightly is always
+#   the newest main. Only the newest push builds; older runs are cancelled.
+# - Run it by hand from the Actions tab (workflow_dispatch) on main. With
+#   `release_tag` empty it rebuilds nightly; with e.g. `v0.1.0` it creates
+#   that tag on main and publishes the numbered release (same as pushing
+#   the tag, for when pushing tags is not possible).
+# - Pull requests that change this file build the zips (kept as workflow
+#   artifacts for 7 days) but publish nothing.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    paths: [".github/workflows/release.yml"]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Numbered release to tag and publish from main (e.g. v0.1.0). Empty rebuilds nightly."
+        required: false
+        default: ""
+
+concurrency:
+  group: release-${{ github.ref }}-${{ inputs.release_tag }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') && !inputs.release_tag }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # Set for a numbered release (pushed v* tag, or the dispatch input); empty
+  # for nightly and pull requests.
+  RELEASE_TAG: ${{ inputs.release_tag || (startsWith(github.ref, 'refs/tags/v') && github.ref_name) || '' }}
+
+jobs:
+  build:
+    name: build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+            exe: breakit-game.exe
+            out: BreakIt.exe
+          - name: linux-x64
+            os: ubuntu-latest
+            exe: breakit-game
+            out: BreakIt
+    steps:
+      - name: Free runner disk space
+        if: runner.os == 'Linux'
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+
+      - uses: actions/checkout@v4
+
+      - name: Name this build
+        id: name
+        shell: bash
+        run: |
+          if [[ -n "$RELEASE_TAG" ]]; then
+            if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::release tag '$RELEASE_TAG' is not like v1.2.3"; exit 1
+            fi
+            if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF" != refs/heads/main ]]; then
+              echo "::error::numbered releases are only made from main"; exit 1
+            fi
+            version="$RELEASE_TAG"
+            tag="$RELEASE_TAG"
+          else
+            version="nightly-$(date -u +%Y-%m-%d)"
+            tag="nightly"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "BREAKIT_VERSION=$version" >> "$GITHUB_ENV"
+          echo "BREAKIT_COMMIT=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
+      - name: Install Linux deps for Bevy
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libudev-dev libwayland-dev libxkbcommon-dev libasound2-dev pkg-config
+
+      # rust-toolchain.toml picks the compiler; rustup installs it here.
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: dist
+          # Tags reuse the cache main builds; only main writes it.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build
+        run: cargo build --locked --profile dist -p breakit-game
+
+      - name: Package
+        shell: bash
+        run: |
+          dir="BreakIt-${{ steps.name.outputs.tag }}-${{ matrix.name }}"
+          mkdir -p "dist/$dir"
+          cp "target/dist/${{ matrix.exe }}" "dist/$dir/${{ matrix.out }}"
+          cp PLAYTEST.md "dist/$dir/PLAYTEST.md"
+          printf '%s (%s)\n' "$BREAKIT_VERSION" "$GITHUB_SHA" > "dist/$dir/VERSION.txt"
+          cd dist
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            7z a -tzip "$dir.zip" "$dir" > /dev/null
+          else
+            zip -qr "$dir.zip" "$dir"
+          fi
+          ls -l "$dir.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/*.zip
+          retention-days: 7
+
+  publish:
+    name: publish release
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l dist
+          short="${GITHUB_SHA::7}"
+          if [[ -n "$RELEASE_TAG" ]]; then
+            notes="Playtest build $RELEASE_TAG ($short). Download the zip for your system, unpack it and run BreakIt. How to play, what to test and how to report: PLAYTEST.md in the zip, or https://github.com/$GITHUB_REPOSITORY/blob/$RELEASE_TAG/PLAYTEST.md"
+            # --target creates the tag at this commit when it does not exist
+            # yet (dispatch); a pushed tag already points here.
+            gh release create "$RELEASE_TAG" dist/*.zip --target "$GITHUB_SHA" \
+              --title "BreakIt $RELEASE_TAG" --notes "$notes" --generate-notes
+          else
+            notes="Rolling build of main at $short, built $(date -u '+%Y-%m-%d %H:%M UTC'). Newer than the latest tagged release, and less tested. See PLAYTEST.md in the zip."
+            # Recreate it so the tag moves to this commit and old zips go.
+            gh release delete nightly --yes --cleanup-tag || true
+            gh release create nightly dist/*.zip --prerelease --target "$GITHUB_SHA" \
+              --title "BreakIt nightly ($short)" --notes "$notes"
+          fi

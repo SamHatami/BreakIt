@@ -7,12 +7,14 @@
 
 use serde::{Deserialize, Serialize};
 
+use breakit_core::loads::traffic::VehicleRig;
+use breakit_core::loads::{LoadKind, LoadSet, RigState};
 use breakit_core::{DamageState, DynamicSim, NodeLoad, SimConfig, Structure, Vec3};
 
 use crate::cost::{Bill, CostModel};
 use crate::equipment::{Equipment, EquipmentEvent};
 use crate::limits::{check_limits, PlayMode, Violation};
-use crate::loads::{event_window, Binding, VehiclePose};
+use crate::loads::{event_window, Binding};
 use crate::report::Report;
 use crate::scenario::Scenario;
 
@@ -134,7 +136,11 @@ pub struct TestRun {
     pub mode: PlayMode,
     pub bill: Bill,
     sim: DynamicSim,
+    structure: Structure,
     binding: Binding,
+    /// The scenario's traffic and ground motion as core load cases, in
+    /// solver time.
+    loads: LoadSet,
     watched: Vec<usize>,
     gravity: Vec3,
     clock: f64,
@@ -146,7 +152,6 @@ pub struct TestRun {
     event_live: Vec<(bool, bool)>,
     /// Per payload, in scenario order.
     equipment: Vec<Equipment>,
-    built: Vec<Vec3>,
 }
 
 impl TestRun {
@@ -183,9 +188,8 @@ impl TestRun {
             binding.extra = extra.iter().map(|l| (l.node, l.force)).collect();
         }
         let mut watched: Vec<usize> = binding
-            .deck
-            .iter()
-            .flat_map(|d| d.nodes())
+            .deck_nodes()
+            .into_iter()
             .chain(binding.payload_feet.iter().flatten().flatten().copied())
             .filter(|&n| binding.node_mass[n] > 0.0)
             .collect();
@@ -203,12 +207,17 @@ impl TestRun {
             ..Default::default()
         };
         let settle = scenario.settle.max(0.0);
-        let mut run = Self {
+        let mut loads = Binding::load_set(scenario, settle);
+        loads.prepare(structure);
+        sim.config.gravity = if settle > 0.0 { Vec3::zeros() } else { gravity };
+        Ok(Self {
             scenario: scenario.clone(),
             mode,
             bill,
             sim,
+            structure: structure.clone(),
             binding,
+            loads,
             watched,
             gravity,
             clock: -settle,
@@ -223,10 +232,7 @@ impl TestRun {
             seen_breaks: 0,
             event_live: vec![(false, false); scenario.events.len()],
             equipment,
-            built: structure.nodes.clone(),
-        };
-        run.apply_loads();
-        Ok(run)
+        })
     }
 
     pub fn sim(&self) -> &DynamicSim {
@@ -234,6 +240,12 @@ impl TestRun {
     }
     pub fn binding(&self) -> &Binding {
         &self.binding
+    }
+    /// The core load cases driving the run. Their times are solver time
+    /// ([`DynamicSim::time`]), which runs `settle` seconds ahead of
+    /// [`Self::time`].
+    pub fn loads(&self) -> &LoadSet {
+        &self.loads
     }
     /// Test time, s. Negative while settling.
     pub fn time(&self) -> f64 {
@@ -252,8 +264,19 @@ impl TestRun {
     pub fn load_factor(&self) -> f64 {
         Binding::factor_at(&self.scenario, self.clock)
     }
-    pub fn vehicles(&self) -> Vec<VehiclePose> {
-        self.binding.vehicles_at(&self.scenario, self.clock)
+    /// Every vehicle of the scenario's convoys as it is now, for drawing.
+    pub fn vehicles(&self) -> Vec<VehicleRig> {
+        self.loads.rig_state(self.sim.time()).vehicles
+    }
+    /// Every rig (vehicles, shake table, fan wall, flume, impactors) as it
+    /// is now, for drawing.
+    pub fn rig_state(&self) -> RigState {
+        self.loads.rig_state(self.sim.time())
+    }
+    /// Shake table displacement now, m: add it to every simulated position
+    /// (and to the table) when drawing.
+    pub fn table_offset(&self) -> Vec3 {
+        self.loads.table_offset(self.sim.time())
     }
     /// The outcome is known (the run may still be playing out).
     pub fn is_decided(&self) -> bool {
@@ -268,7 +291,7 @@ impl TestRun {
         Report::new(self)
     }
 
-    fn apply_loads(&mut self) {
+    fn apply_loads(&mut self, dt: f64) {
         let settle = self.scenario.settle;
         let g = if self.clock < 0.0 && settle > 0.0 {
             (1.0 + self.clock / settle).clamp(0.0, 1.0)
@@ -280,7 +303,29 @@ impl TestRun {
             // Loads stay as they were at the moment of the outcome.
             return;
         }
-        let mut f = self.binding.forces_at(&self.scenario, self.clock);
+        // The proof test swaps the traffic for a uniform stand-in (in
+        // `deck_forces`) and raises everything by the load factor.
+        let proof = self.scenario.overload.is_some() && self.clock > self.scenario.duration;
+        self.loads.factor = self.load_factor();
+        for c in &mut self.loads.cases {
+            if matches!(c.kind, LoadKind::Traffic(_)) {
+                c.factor = if proof { 0.0 } else { 1.0 };
+            }
+        }
+        let centres: Vec<Vec3> = self
+            .equipment
+            .iter()
+            .map(|e| e.centre(&self.sim) + Vec3::y() * e.height)
+            .collect();
+        let wind = Binding::payload_wind(&self.scenario, &self.loads, &centres, self.sim.time());
+        for (e, w) in self.equipment.iter_mut().zip(wind) {
+            e.wind = if e.lost { Vec3::zeros() } else { w };
+        }
+        self.loads.apply(&self.structure, &mut self.sim, dt);
+        let mut f = self.binding.deck_forces(&self.scenario, self.clock);
+        for (a, b) in f.iter_mut().zip(self.loads.forces()) {
+            *a += b;
+        }
         for e in &self.equipment {
             e.add_forces(&mut f);
         }
@@ -291,7 +336,7 @@ impl TestRun {
 
     /// Advances one physics frame.
     pub fn step(&mut self, dt: f64) {
-        self.apply_loads();
+        self.apply_loads(dt);
         self.sim.step(dt);
         self.clock += dt;
         self.update_equipment(dt);
@@ -306,14 +351,14 @@ impl TestRun {
     }
 
     fn update_equipment(&mut self, dt: f64) {
-        let ground = Binding::ground_accel(&self.scenario, self.clock);
+        let ground = Binding::ground_accel(&self.loads, self.sim.time());
         let g = self.sim.config.gravity;
         let measuring = matches!(self.phase, Phase::Settling | Phase::Test);
         for k in 0..self.equipment.len() {
             let built: Vec<Vec3> = self.equipment[k]
                 .feet
                 .iter()
-                .map(|&n| self.built[n])
+                .map(|&n| self.structure.nodes[n])
                 .collect();
             let peaks = (
                 self.equipment[k].peak_tilt,
@@ -427,7 +472,7 @@ impl TestRun {
     }
 
     fn track_events(&mut self) {
-        let deck_len = self.binding.deck.as_ref().map_or(0.0, |d| d.length);
+        let deck_len = self.binding.deck_length;
         let in_test = self.phase == Phase::Test;
         for i in 0..self.scenario.events.len() {
             let (a, b) = event_window(&self.scenario.events[i], deck_len);
@@ -505,9 +550,8 @@ impl TestRun {
             }
         }
         if !proof {
-            if let (Some(sag), Some(deck)) = (&mut self.measured.peak_deck_sag, &self.binding.deck)
-            {
-                for n in deck.nodes() {
+            if let Some(sag) = &mut self.measured.peak_deck_sag {
+                for n in self.binding.deck_nodes() {
                     *sag = sag.max(-self.sim.displacement(n).y);
                 }
             }

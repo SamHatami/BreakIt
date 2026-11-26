@@ -5,6 +5,10 @@
 //! real-time solver, read the report, revise. See `flow.rs` for the loop
 //! and `ui/` for the screens.
 
+// Release builds on Windows open no console window; logs go to the file
+// set up in `release.rs`.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod analysis;
 mod build;
 mod camera;
@@ -14,6 +18,7 @@ mod flow;
 mod guides;
 mod history;
 mod perf;
+mod release;
 mod render;
 mod scenario;
 mod sound;
@@ -36,13 +41,17 @@ pub enum Mode {
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "BreakIt".into(),
-                ..default()
-            }),
-            ..default()
-        }))
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: release::version_line(),
+                        ..default()
+                    }),
+                    ..default()
+                })
+                .set(release::log_plugin()),
+        )
         .insert_resource(ClearColor(Color::srgb(0.1, 0.11, 0.13)))
         .add_plugins(LabPlugin)
         .insert_resource(design::Design::default())

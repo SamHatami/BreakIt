@@ -19,15 +19,12 @@
 //! order. [`BlockChol::load`] and [`BlockChol::store`] convert from and to
 //! the caller's compact DOF numbering.
 
-#![expect(
-    unsafe_code,
-    reason = "runtime AVX2/FMA dispatch: #[target_feature] kernels are called after a CPU check"
-)]
-
 use crate::linsolve::{tri, NodeLayout, BLOCK_NNZ};
+use crate::simd::{madd, SimdLevel};
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::sparse::linalg::amd;
 use faer::sparse::SymbolicSparseColMatRef;
+use pulp::{Simd, WithSimd};
 
 const ABSENT: u32 = u32::MAX;
 
@@ -36,29 +33,19 @@ type B6 = [f64; 36];
 type V6 = [f64; 6];
 const ZERO: B6 = [0.0; 36];
 
-/// acc + a b, fused when `FMA`. Every kernel below is compiled twice: for
-/// the baseline instruction set with separate multiplies and adds, and for
-/// AVX2 with fused multiply-add, which factorises the densest matrices a
-/// third faster than AVX2 alone. The two differ in the last bits, as faer's
-/// kernels do from one CPU to another.
-#[inline(always)]
-fn madd<const FMA: bool>(acc: f64, a: f64, b: f64) -> f64 {
-    if FMA {
-        a.mul_add(b, acc)
-    } else {
-        acc + a * b
-    }
-}
+// Every kernel below is generic over the instruction set and compiled once
+// per set `pulp` dispatches to (see `crate::simd`); the scalar copy is the
+// reference. The fixed 6x6 loops unroll and vectorise under each set.
 
 /// c -= a bᵀ
 #[inline(always)]
-fn mul_sub_t<const FMA: bool>(c: &mut B6, a: &B6, b: &B6) {
+fn mul_sub_t<S: Simd>(c: &mut B6, a: &B6, b: &B6) {
     for j in 0..6 {
         let mut col: V6 = [0.0; 6];
         for k in 0..6 {
             let s = b[k * 6 + j];
             for i in 0..6 {
-                col[i] = madd::<FMA>(col[i], a[k * 6 + i], s);
+                col[i] = madd::<S>(col[i], a[k * 6 + i], s);
             }
         }
         for i in 0..6 {
@@ -69,14 +56,14 @@ fn mul_sub_t<const FMA: bool>(c: &mut B6, a: &B6, b: &B6) {
 
 /// b <- b wᵀ for lower triangular w.
 #[inline(always)]
-fn mul_lower_t<const FMA: bool>(b: &mut B6, w: &B6) {
+fn mul_lower_t<S: Simd>(b: &mut B6, w: &B6) {
     // Column c of the result needs columns k <= c of b: go downwards.
     for c in (0..6).rev() {
         let mut col: V6 = [0.0; 6];
         for k in 0..=c {
             let s = w[k * 6 + c];
             for i in 0..6 {
-                col[i] = madd::<FMA>(col[i], b[k * 6 + i], s);
+                col[i] = madd::<S>(col[i], b[k * 6 + i], s);
             }
         }
         b[c * 6..c * 6 + 6].copy_from_slice(&col);
@@ -85,12 +72,12 @@ fn mul_lower_t<const FMA: bool>(b: &mut B6, w: &B6) {
 
 /// m x
 #[inline(always)]
-fn mul_vec<const FMA: bool>(m: &B6, x: &V6) -> V6 {
+fn mul_vec<S: Simd>(m: &B6, x: &V6) -> V6 {
     let mut y: V6 = [0.0; 6];
     for k in 0..6 {
         let s = x[k];
         for i in 0..6 {
-            y[i] = madd::<FMA>(y[i], m[k * 6 + i], s);
+            y[i] = madd::<S>(y[i], m[k * 6 + i], s);
         }
     }
     y
@@ -98,12 +85,12 @@ fn mul_vec<const FMA: bool>(m: &B6, x: &V6) -> V6 {
 
 /// mᵀ x
 #[inline(always)]
-fn mul_vec_t<const FMA: bool>(m: &B6, x: &V6) -> V6 {
+fn mul_vec_t<S: Simd>(m: &B6, x: &V6) -> V6 {
     let mut y: V6 = [0.0; 6];
     for k in 0..6 {
         let mut acc = 0.0;
         for i in 0..6 {
-            acc = madd::<FMA>(acc, m[k * 6 + i], x[i]);
+            acc = madd::<S>(acc, m[k * 6 + i], x[i]);
         }
         y[k] = acc;
     }
@@ -113,7 +100,7 @@ fn mul_vec_t<const FMA: bool>(m: &B6, x: &V6) -> V6 {
 /// Inverse of the Cholesky factor of the symmetric block `d` (its lower
 /// triangle is read), or None if `d` is not positive definite.
 #[inline(always)]
-fn chol_inverse(d: &B6) -> Option<B6> {
+pub(crate) fn chol_inverse(d: &B6) -> Option<B6> {
     let mut l = *d;
     let mut inv = [0.0; 6];
     for c in 0..6 {
@@ -265,8 +252,8 @@ pub(crate) struct BlockChol {
     head: Vec<u32>,
     next: Vec<u32>,
     cur: Vec<u32>,
-    /// Use the AVX2 and FMA copy of the kernels (see [`madd`]).
-    fma: bool,
+    /// Instruction set the kernels run on (see [`crate::simd`]).
+    arch: pulp::Arch,
     /// 6x6 block products in a factorisation, and block-times-vector
     /// products in one CG iteration (triangular solves plus the product
     /// with the matrix).
@@ -407,11 +394,7 @@ impl BlockChol {
             head: vec![ABSENT; nn],
             next: vec![ABSENT; nn],
             cur: vec![0; nn],
-            #[cfg(target_arch = "x86_64")]
-            fma: std::arch::is_x86_feature_detected!("avx2")
-                && std::arch::is_x86_feature_detected!("fma"),
-            #[cfg(not(target_arch = "x86_64"))]
-            fma: false,
+            arch: SimdLevel::from_env().arch(),
             factor_products,
             iteration_products,
             scalar_factor_flops,
@@ -489,26 +472,29 @@ impl BlockChol {
         }
     }
 
+    /// Run the kernels on `level` from now on. The default is
+    /// [`SimdLevel::from_env`].
+    pub fn set_simd(&mut self, level: SimdLevel) {
+        self.arch = level.arch();
+    }
+
     /// Factorise the matrix completed by [`finish`](Self::finish). Returns
     /// false if it is not positive definite.
     pub fn factor(&mut self) -> bool {
-        #[cfg(target_arch = "x86_64")]
-        if self.fma {
-            // SAFETY: `fma` is only set when the CPU reports AVX2 and FMA.
-            return unsafe { self.factor_fma() };
+        struct Op<'a>(&'a mut BlockChol);
+        impl WithSimd for Op<'_> {
+            type Output = bool;
+            #[inline(always)]
+            fn with_simd<S: Simd>(self, _: S) -> bool {
+                self.0.factor_generic::<S>()
+            }
         }
-        self.factor_generic::<false>()
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    #[target_feature(enable = "avx2,fma")]
-    unsafe fn factor_fma(&mut self) -> bool {
-        self.factor_generic::<true>()
+        self.arch.dispatch(Op(self))
     }
 
     #[inline(always)]
     #[allow(clippy::needless_range_loop)]
-    fn factor_generic<const FMA: bool>(&mut self) -> bool {
+    fn factor_generic<S: Simd>(&mut self) -> bool {
         let nn = self.nn;
         let (diag, pairs) = self.a.split_at(nn);
         self.head.fill(ABSENT);
@@ -533,10 +519,10 @@ impl BlockChol {
                 let c = self.cur[ju] as usize;
                 let end = self.col_ptr[ju + 1] as usize;
                 let b = &done[c];
-                mul_sub_t::<FMA>(&mut d, b, b);
+                mul_sub_t::<S>(&mut d, b, b);
                 for q in c + 1..end {
                     let t = self.pos[self.row_idx[q] as usize] as usize;
-                    mul_sub_t::<FMA>(&mut col[t], &done[q], b);
+                    mul_sub_t::<S>(&mut col[t], &done[q], b);
                 }
                 if c + 1 < end {
                     let r = self.row_idx[c + 1] as usize;
@@ -550,7 +536,7 @@ impl BlockChol {
                 return false;
             };
             for b in col.iter_mut() {
-                mul_lower_t::<FMA>(b, &w);
+                mul_lower_t::<S>(b, &w);
             }
             self.w[k] = w;
             if s < e {
@@ -565,25 +551,22 @@ impl BlockChol {
 
     /// v <- (L Lᵀ)⁻¹ v with the stored factorisation.
     pub fn apply(&self, v: &mut [f64]) {
-        #[cfg(target_arch = "x86_64")]
-        if self.fma {
-            // SAFETY: `fma` is only set when the CPU reports AVX2 and FMA.
-            return unsafe { self.apply_fma(v) };
+        struct Op<'a>(&'a BlockChol, &'a mut [f64]);
+        impl WithSimd for Op<'_> {
+            type Output = ();
+            #[inline(always)]
+            fn with_simd<S: Simd>(self, _: S) {
+                self.0.apply_generic::<S>(self.1);
+            }
         }
-        self.apply_generic::<false>(v)
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    #[target_feature(enable = "avx2,fma")]
-    unsafe fn apply_fma(&self, v: &mut [f64]) {
-        self.apply_generic::<true>(v)
+        self.arch.dispatch(Op(self, v));
     }
 
     #[inline(always)]
-    fn apply_generic<const FMA: bool>(&self, v: &mut [f64]) {
+    fn apply_generic<S: Simd>(&self, v: &mut [f64]) {
         let (v, _) = v.as_chunks_mut::<6>();
         for j in 0..self.nn {
-            let y = mul_vec::<FMA>(&self.w[j], &v[j]);
+            let y = mul_vec::<S>(&self.w[j], &v[j]);
             v[j] = y;
             let (s, e) = (self.col_ptr[j] as usize, self.col_ptr[j + 1] as usize);
             for (m, &r) in self.l[s..e].iter().zip(&self.row_idx[s..e]) {
@@ -591,7 +574,7 @@ impl BlockChol {
                 for k in 0..6 {
                     let x = -y[k];
                     for i in 0..6 {
-                        t[i] = madd::<FMA>(t[i], m[k * 6 + i], x);
+                        t[i] = madd::<S>(t[i], m[k * 6 + i], x);
                     }
                 }
             }
@@ -600,45 +583,42 @@ impl BlockChol {
             let mut t = v[j];
             let (s, e) = (self.col_ptr[j] as usize, self.col_ptr[j + 1] as usize);
             for (m, &r) in self.l[s..e].iter().zip(&self.row_idx[s..e]) {
-                let u = mul_vec_t::<FMA>(m, &v[r as usize]);
+                let u = mul_vec_t::<S>(m, &v[r as usize]);
                 for i in 0..6 {
                     t[i] -= u[i];
                 }
             }
-            v[j] = mul_vec_t::<FMA>(&self.w[j], &t);
+            v[j] = mul_vec_t::<S>(&self.w[j], &t);
         }
     }
 
     /// y <- A v
     pub fn matvec(&self, v: &[f64], y: &mut [f64]) {
-        #[cfg(target_arch = "x86_64")]
-        if self.fma {
-            // SAFETY: `fma` is only set when the CPU reports AVX2 and FMA.
-            return unsafe { self.matvec_fma(v, y) };
+        struct Op<'a>(&'a BlockChol, &'a [f64], &'a mut [f64]);
+        impl WithSimd for Op<'_> {
+            type Output = ();
+            #[inline(always)]
+            fn with_simd<S: Simd>(self, _: S) {
+                self.0.matvec_generic::<S>(self.1, self.2);
+            }
         }
-        self.matvec_generic::<false>(v, y)
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    #[target_feature(enable = "avx2,fma")]
-    unsafe fn matvec_fma(&self, v: &[f64], y: &mut [f64]) {
-        self.matvec_generic::<true>(v, y)
+        self.arch.dispatch(Op(self, v, y));
     }
 
     #[inline(always)]
-    fn matvec_generic<const FMA: bool>(&self, v: &[f64], y: &mut [f64]) {
+    fn matvec_generic<S: Simd>(&self, v: &[f64], y: &mut [f64]) {
         let (v, _) = v.as_chunks::<6>();
         let (y, _) = y.as_chunks_mut::<6>();
         let (diag, pairs) = self.a.split_at(self.nn);
         y.fill([0.0; 6]);
         for j in 0..self.nn {
             let vj = &v[j];
-            let mut acc = mul_vec::<FMA>(&diag[j], vj);
+            let mut acc = mul_vec::<S>(&diag[j], vj);
             let (s, e) = (self.pair_ptr[j] as usize, self.pair_ptr[j + 1] as usize);
             for (m, &r) in pairs[s..e].iter().zip(&self.pair_row[s..e]) {
                 let r = r as usize;
-                let u = mul_vec::<FMA>(m, vj);
-                let t = mul_vec_t::<FMA>(m, &v[r]);
+                let u = mul_vec::<S>(m, vj);
+                let t = mul_vec_t::<S>(m, &v[r]);
                 for i in 0..6 {
                     y[r][i] += u[i];
                     acc[i] += t[i];
@@ -655,6 +635,7 @@ impl BlockChol {
 mod tests {
     use super::BlockChol;
     use crate::linsolve::{tri, Backend, LinSolver, NodeLayout, Policy, BLOCK_NNZ};
+    use crate::simd::SimdLevel;
     use nalgebra::{DMatrix, DVector};
 
     struct Rng(u64);
@@ -817,10 +798,10 @@ mod tests {
         }
     }
 
-    /// The kernels compiled for the baseline instruction set, which the
-    /// test above does not reach on a CPU with AVX2 and FMA.
+    /// The scalar reference kernels solve the system, and the native
+    /// kernels agree with them to rounding.
     #[test]
-    fn baseline_kernels_factorise_and_solve() {
+    fn scalar_and_native_kernels_agree() {
         let mut rng = Rng(0xD1B54A32D192ED03);
         for (nodes, pairs) in graphs(&mut rng) {
             let n = 6 * nodes;
@@ -840,15 +821,17 @@ mod tests {
             let b: Vec<f64> = (0..n).map(|_| rng.unit() - 0.5).collect();
             let (mut bw, mut x, mut ax) = (vec![0.0; n], vec![0.0; n], vec![0.0; n]);
             chol.load(&b, &mut bw);
-            assert!(chol.factor_generic::<false>());
+            chol.set_simd(SimdLevel::Scalar);
+            assert!(chol.factor());
             x.copy_from_slice(&bw);
-            chol.apply_generic::<false>(&mut x);
-            chol.matvec_generic::<false>(&x, &mut ax);
+            chol.apply(&mut x);
+            chol.matvec(&x, &mut ax);
             let norm = |v: &[f64]| v.iter().map(|x| x * x).sum::<f64>().sqrt();
             let res: Vec<f64> = ax.iter().zip(&bw).map(|(a, b)| a - b).collect();
             assert!(norm(&res) < 1e-10 * norm(&bw), "residual {:e}", norm(&res));
             // Both copies of the kernels agree to rounding.
             let mut x2 = bw.clone();
+            chol.set_simd(SimdLevel::Native);
             assert!(chol.factor());
             chol.apply(&mut x2);
             let diff: Vec<f64> = x.iter().zip(&x2).map(|(a, b)| a - b).collect();

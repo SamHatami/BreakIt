@@ -10,6 +10,8 @@ rust-version.workspace = true
 [dependencies]
 faer = "0.22"
 nalgebra.workspace = true
+# SIMD with runtime CPU dispatch; the same version faer already builds.
+pulp = "0.21"
 rayon = "1"
 serde = { version = "1", features = ["derive"], optional = true }
 

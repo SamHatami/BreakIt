@@ -19,6 +19,8 @@
 //! a refactorisation is worth.
 
 use crate::blockchol::BlockChol;
+use crate::jacobi::BlockJacobi;
+use crate::simd::{self, SimdLevel};
 use faer::dyn_stack::{MemBuffer, MemStack, StackReq};
 use faer::linalg::cholesky::llt::factor::LltRegularization;
 use faer::sparse::linalg::cholesky::{
@@ -27,7 +29,6 @@ use faer::sparse::linalg::cholesky::{
 };
 use faer::sparse::{SparseColMat, Triplet};
 use faer::{ColMut, Conj, Par, Side};
-use nalgebra::{Cholesky, Matrix6, Vector6};
 use std::collections::HashMap;
 
 /// Entries in the lower triangle of a symmetric 12x12 block.
@@ -49,9 +50,6 @@ const MAX_HOLD: usize = 64;
 /// two are level, at 112 (8x8x16) block Jacobi is twice as fast in a
 /// collapse.
 const JACOBI_FILL_RATIO: f64 = 30.0;
-const JACOBI_MAX_ITERS: usize = 500;
-/// Scalar type of the block-Jacobi iteration.
-type S = f32;
 
 /// Which linear solver handles the substep systems.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -144,6 +142,8 @@ pub struct LinSolver {
     z: Vec<f64>,
     p: Vec<f64>,
     ap: Vec<f64>,
+    /// Instruction set of the CG vector kernels (see [`crate::simd`]).
+    arch: pulp::Arch,
     pub stats: Stats,
 }
 
@@ -202,10 +202,43 @@ impl LinSolver {
             z: vec![0.0; m],
             p: vec![0.0; m],
             ap: vec![0.0; m],
+            arch: SimdLevel::from_env().arch(),
             stats,
         })
     }
 
+    /// Run the kernels on `level` from now on (default:
+    /// [`SimdLevel::from_env`]). [`SimdLevel::Scalar`] is the reference
+    /// path tests compare against. The faer factorisation
+    /// ([`Backend::CholeskyScalar`]) does its own dispatch and ignores this.
+    pub fn set_simd(&mut self, level: SimdLevel) {
+        match &mut self.engine {
+            Engine::Block(c) => c.set_simd(level),
+            Engine::Scalar(_) => {}
+            Engine::Jacobi(j) => j.set_simd(level),
+        }
+        self.arch = level.arch();
+    }
+
+    /// Hand the block-Jacobi passes to the rayon thread pool from this many
+    /// nodes up; `usize::MAX` keeps them on the calling thread. The result
+    /// is the same either way.
+    pub fn set_parallel_min_nodes(&mut self, nodes: usize) {
+        if let Engine::Jacobi(j) = &mut self.engine {
+            j.set_par_min_nodes(nodes);
+        }
+    }
+
+    /// Whether solves on this system use the thread pool (see
+    /// [`set_parallel_min_nodes`](Self::set_parallel_min_nodes)).
+    pub fn runs_parallel(&self) -> bool {
+        match &self.engine {
+            Engine::Jacobi(j) => j.runs_parallel(),
+            _ => false,
+        }
+    }
+
+    /// Number of unknowns.
     pub fn ndof(&self) -> usize {
         self.n
     }
@@ -397,14 +430,14 @@ impl LinSolver {
     /// it did not converge within `max_iters`; `self.r` then holds the
     /// residual of the returned x.
     fn pcg(&mut self, b: &[f64], x: &mut [f64], tolerance: f64, max_iters: usize) -> Option<usize> {
-        let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f64>();
+        let arch = self.arch;
+        let dot = |a: &[f64], b: &[f64]| simd::dot(arch, a, b);
         let (mut r, mut z, mut p, mut ap) = (
             std::mem::take(&mut self.r),
             std::mem::take(&mut self.z),
             std::mem::take(&mut self.p),
             std::mem::take(&mut self.ap),
         );
-        let m = b.len();
         x.fill(0.0);
         r.copy_from_slice(b);
         let target = dot(b, b) * tolerance * tolerance;
@@ -419,9 +452,7 @@ impl LinSolver {
                     p.copy_from_slice(&z);
                 } else {
                     let beta = rz_new / rz;
-                    for i in 0..m {
-                        p[i] = z[i] + beta * p[i];
-                    }
+                    simd::xpby(arch, &mut p, beta, &z);
                 }
                 rz = rz_new;
                 self.matvec(&p, &mut ap);
@@ -430,10 +461,8 @@ impl LinSolver {
                     break;
                 }
                 let alpha = rz / pap;
-                for i in 0..m {
-                    x[i] += alpha * p[i];
-                    r[i] -= alpha * ap[i];
-                }
+                simd::axpy(arch, x, alpha, &p);
+                simd::axpy(arch, &mut r, -alpha, &ap);
                 if dot(&r, &r) <= target {
                     result = Some(k);
                     break;
@@ -672,193 +701,5 @@ impl NodeLayout {
             d += 3;
         }
         Self { loc, free, ends }
-    }
-}
-
-/// Conjugate gradients on node blocks: the matrix is one 6x6 block per node
-/// plus one 6x6 coupling block per beam, preconditioned by the inverse of the
-/// node blocks. Fixed DOFs stay in the numbering with a unit diagonal.
-struct BlockJacobi {
-    /// Node blocks in double precision, as assembled; `diag` is the copy
-    /// the iteration uses.
-    diag64: Vec<Matrix6<f64>>,
-    /// Compact DOF -> (node, component).
-    loc: Vec<(u32, u8)>,
-    free: Vec<[bool; 6]>,
-    diag: Vec<Matrix6<S>>,
-    inv: Vec<Matrix6<S>>,
-    /// Per beam: its end nodes (None = fully fixed end).
-    ends: Vec<[Option<u32>; 2]>,
-    /// Per beam: coupling block, rows at end b, columns at end a.
-    off: Vec<Matrix6<S>>,
-    live: Vec<bool>,
-    /// Previous solution, used as the starting guess.
-    x: Vec<Vector6<S>>,
-    b: Vec<Vector6<S>>,
-    r: Vec<Vector6<S>>,
-    z: Vec<Vector6<S>>,
-    p: Vec<Vector6<S>>,
-    ap: Vec<Vector6<S>>,
-}
-
-impl BlockJacobi {
-    fn new(n: usize, blocks: &[[Option<usize>; 4]]) -> Self {
-        Self::from_layout(NodeLayout::new(n, blocks))
-    }
-
-    fn from_layout(layout: NodeLayout) -> Self {
-        let NodeLayout { loc, free, ends } = layout;
-        let nn = free.len();
-        let zero = vec![Vector6::zeros(); nn];
-        Self {
-            loc,
-            free,
-            diag64: vec![Matrix6::zeros(); nn],
-            diag: vec![Matrix6::zeros(); nn],
-            inv: vec![Matrix6::zeros(); nn],
-            off: vec![Matrix6::zeros(); ends.len()],
-            live: vec![false; ends.len()],
-            ends,
-            x: zero.clone(),
-            b: zero.clone(),
-            r: zero.clone(),
-            z: zero.clone(),
-            p: zero.clone(),
-            ap: zero,
-        }
-    }
-
-    fn clear(&mut self) {
-        self.diag64.fill(Matrix6::zeros());
-        self.live.fill(false);
-    }
-
-    #[inline]
-    fn add_diagonal(&mut self, dof: usize, v: f64) {
-        let (nd, k) = self.loc[dof];
-        self.diag64[nd as usize][(k as usize, k as usize)] += v;
-    }
-
-    fn add_block(&mut self, beam: usize, lower: &[f64; BLOCK_NNZ]) {
-        let [ea, eb] = self.ends[beam];
-        for (end, o) in [(ea, 0), (eb, 6)] {
-            let Some(nd) = end else { continue };
-            let nd = nd as usize;
-            let f = self.free[nd];
-            let d = &mut self.diag64[nd];
-            for r in 0..6 {
-                for c in 0..=r {
-                    if f[r] && f[c] {
-                        let v = lower[tri(o + r, o + c)];
-                        d[(r, c)] += v;
-                        if r != c {
-                            d[(c, r)] += v;
-                        }
-                    }
-                }
-            }
-        }
-        if let (Some(a), Some(b)) = (ea, eb) {
-            let (fa, fb) = (self.free[a as usize], self.free[b as usize]);
-            let m = &mut self.off[beam];
-            for r in 0..6 {
-                for c in 0..6 {
-                    m[(r, c)] = if fb[r] && fa[c] {
-                        lower[tri(6 + r, c)] as S
-                    } else {
-                        0.0
-                    };
-                }
-            }
-            self.live[beam] = true;
-        }
-    }
-
-    fn matvec(&self, v: &[Vector6<S>], y: &mut [Vector6<S>]) {
-        for ((y, d), v) in y.iter_mut().zip(&self.diag).zip(v) {
-            *y = d * v;
-        }
-        for (i, e) in self.ends.iter().enumerate() {
-            if !self.live[i] {
-                continue;
-            }
-            let (a, b) = (e[0].unwrap() as usize, e[1].unwrap() as usize);
-            let m = &self.off[i];
-            y[b] += m * v[a];
-            y[a] += m.tr_mul(&v[b]);
-        }
-    }
-
-    /// Returns the CG iteration count, or None if a node block is not
-    /// positive definite.
-    fn solve(&mut self, rhs: &[f64], out: &mut [f64], tolerance: f64) -> Option<usize> {
-        for i in 0..self.diag64.len() {
-            let d = &mut self.diag64[i];
-            for k in 0..6 {
-                if !self.free[i][k] {
-                    d[(k, k)] = 1.0;
-                }
-            }
-            self.inv[i] = Cholesky::new(*d)?.inverse().cast::<S>();
-            self.diag[i] = d.cast::<S>();
-        }
-        let dot = |a: &[Vector6<S>], b: &[Vector6<S>]| {
-            a.iter().zip(b).map(|(x, y)| x.dot(y) as f64).sum::<f64>()
-        };
-        let (mut x, mut b, mut r, mut z, mut p, mut ap) = (
-            std::mem::take(&mut self.x),
-            std::mem::take(&mut self.b),
-            std::mem::take(&mut self.r),
-            std::mem::take(&mut self.z),
-            std::mem::take(&mut self.p),
-            std::mem::take(&mut self.ap),
-        );
-        b.fill(Vector6::zeros());
-        for (d, &(nd, k)) in self.loc.iter().enumerate() {
-            b[nd as usize][k as usize] = rhs[d] as S;
-        }
-        let target = dot(&b, &b) * tolerance * tolerance;
-        let mut iters = 0;
-        if target > 0.0 {
-            // r = b − A x, with x the previous solution.
-            self.matvec(&x, &mut ap);
-            for i in 0..r.len() {
-                r[i] = b[i] - ap[i];
-            }
-            let mut rz = 0.0;
-            while dot(&r, &r) > target && iters < JACOBI_MAX_ITERS {
-                for i in 0..r.len() {
-                    z[i] = self.inv[i] * r[i];
-                }
-                let rz_new = dot(&r, &z);
-                if iters == 0 {
-                    p.copy_from_slice(&z);
-                } else {
-                    let beta = (rz_new / rz) as S;
-                    for i in 0..p.len() {
-                        p[i] = z[i] + p[i] * beta;
-                    }
-                }
-                rz = rz_new;
-                self.matvec(&p, &mut ap);
-                let pap = dot(&p, &ap);
-                if pap <= 0.0 || !pap.is_finite() {
-                    break;
-                }
-                let alpha = (rz / pap) as S;
-                for i in 0..x.len() {
-                    x[i] += p[i] * alpha;
-                    r[i] -= ap[i] * alpha;
-                }
-                iters += 1;
-            }
-        } else {
-            x.fill(Vector6::zeros());
-        }
-        for (d, &(nd, k)) in self.loc.iter().enumerate() {
-            out[d] = x[nd as usize][k as usize] as f64;
-        }
-        (self.x, self.b, self.r, self.z, self.p, self.ap) = (x, b, r, z, p, ap);
-        Some(iters)
     }
 }

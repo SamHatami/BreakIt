@@ -188,7 +188,27 @@ Frames, `linear_tolerance` 1e-4, mean ms per frame elastic / collapse (collapse 
 
 On the bridges assembly is now the largest part of a frame (bridge 60: 3.0 of 5.5 ms elastic). What is left in the solver: the triangular solves on bridge 120 are bound by memory (a 3.9 MB factor), where a single-precision copy of the factor for preconditioning would help; supernodes would be needed to beat faer on dense factors.
 
+## SIMD and threads as a rule (`src/simd.rs`, `src/jacobi.rs`)
+
+Hot paths now follow one rule (`CONTRIBUTING.md`, "Hot paths"): written once over `pulp::Simd`, dispatched at start-up to AVX2+FMA or NEON, with the scalar build of the same source as the reference (`SimdLevel::Scalar`, `BREAKIT_SIMD=scalar`). The crate has no `unsafe` left; the block Cholesky kernels moved from hand-rolled `#[target_feature]` calls to the same dispatch, unchanged in speed.
+
+Block-Jacobi CG was rewritten for it (it used nalgebra 6x6 types on the baseline instruction set):
+
+- Node vectors are padded from 6 to 8 single-precision entries, one AVX register. Blocks stay 36 entries; a column is read as one 8-entry register overlapping the next column, and the two extra lanes meet the zero padding or are dropped.
+- Products run row by row: each node lists its coupling blocks, stored once and read transposed from one end. A row writes only its own node, so rows can run on any number of threads. Storing a transposed copy made products cheaper (six fused multiply-adds instead of six dot products) and won 10 to 30% at 1,300 members, but the matrix of the 3,900-member tower then left the 2 MB L2 cache and that solve got 20% slower, so there is one copy.
+- The three passes of an iteration are fused (product with p·Ap; update of x and r with the preconditioner and both dot products; new direction) and work on chunks of 32 nodes. Each chunk reduces its own partial sums, added in chunk order, so the result is bit-identical on any number of threads.
+- Node-block inverses use the fixed-size 6x6 Cholesky kernel of `blockchol.rs` instead of nalgebra's.
+
+Solve time per frame, one thread, same session (ms): tower 5x5x12 2.5 to 2.9 before, 1.3 to 1.6 after; tower 8x8x16 7.3 to 8.5 before, 4.3 to 5.4 after. Against the scalar reference the native build is 2.2 times faster on the block Cholesky factorisation and 1.2 times on a block-Jacobi solve (its scalar build already gets SSE2 from the compiler, and the transposed products need horizontal sums; that kernel has room left).
+
+Threads: a parallel call from outside rayon's pool hands the job over and blocks, every call. With three passes per CG iteration that made the threaded solve twice as slow as the serial one at any thread count, and is the likely reason threaded assembly never gained more than 15% before. The solve now enters the pool once. Measured on a quiet 4-core cloud machine, one solve on 1 / 2 / 4 threads: 1,377 nodes 0.45 / 0.35 / 0.38 ms, 5,625 nodes 2.2 / 1.6 / 1.3 ms, 13,671 nodes 7.1 / 3.9 / 2.8 ms. Threads are on from 4,096 nodes; below that the gain did not hold up under load.
+
+`examples/gate.rs` runs in CI: the native level must dispatch to SIMD, each kernel must beat the scalar reference by a set factor, threaded solves must be bit-identical and not slower where threads are on by default, and short fixed runs must stay within budgets of solves, CG iterations and factorisations. Timings on shared runners are too noisy for absolute limits, which is why the gate uses same-run ratios and work counters.
+
+Not done yet: AVX-512 (`pulp` 0.21 needs nightly for it), SIMD and default-on threads for element assembly (in progress), per-island solves for debris, and contact and load models (not yet measured as hot).
+
 ## Next
 
-1. Speed: on bridges assembly is now the largest part of a frame (about half), so that is the next thing to cut; the remaining collapse spikes are step-check retries, each paying an assembly and a factorisation. Bridge 120's solves are memory-bound (a single-precision copy of the factor for preconditioning is untried); threads need re-measuring on a desktop CPU. Large 3D grids (tower 8x8x16) are limited by fill in the factorisation; a nested-dissection ordering or a looser `linear_tolerance` (1e-4 gave the same displacements and break counts in the bench) are the next levers there.
+1. Speed: on bridges assembly is now the largest part of a frame (about half), so that is the next thing to cut; the remaining collapse spikes are step-check retries, each paying an assembly and a factorisation. Bridge 120's solves are memory-bound (a single-precision copy of the factor for preconditioning is untried); Large 3D grids (tower 8x8x16) are limited by fill in the factorisation; a nested-dissection ordering or a looser `linear_tolerance` (1e-4 gave the same displacements and break counts in the bench) are the next levers there.
 2. Done: sparse static solve; axial-bending interaction Mp,N = Mp (1 - n²). Open: biaxial interaction, plastic torsion.
+3. Numerical damping: the loads thread measured ζ ≈ ωh/2 from implicit Euler (2.2% at 2 Hz with 4 substeps, 0.84% with 16), several times real steel's 0.2 to 0.5% above about 1 Hz. It mutes wind lock-in, galloping and quake resonance at default settings. Candidates: BDF2, or generalised-α with a little high-frequency dissipation.
