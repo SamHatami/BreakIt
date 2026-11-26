@@ -47,10 +47,10 @@ const SLACK: usize = W - 6;
 const MAX_ITERS: usize = 500;
 /// Nodes per unit of work (and per partial sum of a dot product).
 const CHUNK: usize = 32;
-/// Fewest nodes for which the passes are handed to the thread pool. A pass
-/// over 1,400 nodes (a 3,900-member tower) takes about 30 microseconds,
-/// which is less than waking the workers costs: threads made that solve
-/// 1.7 times slower on a 4-core cloud machine.
+/// Fewest nodes for which the passes are handed to the thread pool. On a
+/// quiet 4-core machine a 5,600-node solve runs 1.7 times faster on four
+/// threads and a 13,700-node one 2.5 times; a pass over the 1,400 nodes of a
+/// 3,900-member tower is about 15 microseconds, too short to gain reliably.
 pub(crate) const PAR_MIN_NODES: usize = 4096;
 
 pub(crate) struct BlockJacobi {
@@ -349,6 +349,11 @@ impl BlockJacobi {
         self.par_min_nodes = nodes;
     }
 
+    /// Whether a solve hands its passes to the thread pool.
+    pub fn runs_parallel(&self) -> bool {
+        self.free.len() >= self.par_min_nodes
+    }
+
     pub fn clear(&mut self) {
         self.diag64.fill(Matrix6::zeros());
         self.live.fill(false);
@@ -399,8 +404,21 @@ impl BlockJacobi {
     /// Returns the CG iteration count, or None if a node block is not
     /// positive definite.
     pub fn solve(&mut self, rhs: &[f64], out: &mut [f64], tolerance: f64) -> Option<usize> {
+        if self.runs_parallel() && rayon::current_thread_index().is_none() {
+            // A parallel call from outside the pool hands the job over and
+            // blocks until it is done, every time; three passes per
+            // iteration that way cost more than the passes. Enter the pool
+            // once for the whole solve instead. A caller that is already in
+            // the pool (a threaded substep) skips this.
+            rayon::join(|| self.solve_in_pool(rhs, out, tolerance), || ()).0
+        } else {
+            self.solve_in_pool(rhs, out, tolerance)
+        }
+    }
+
+    fn solve_in_pool(&mut self, rhs: &[f64], out: &mut [f64], tolerance: f64) -> Option<usize> {
         let nn = self.free.len();
-        let par = nn >= self.par_min_nodes;
+        let par = self.runs_parallel();
         let arch = self.arch;
 
         // Node blocks: unit diagonal on fixed components, then the inverse.

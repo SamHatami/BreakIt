@@ -229,6 +229,16 @@ impl LinSolver {
         }
     }
 
+    /// Whether solves on this system use the thread pool (see
+    /// [`set_parallel_min_nodes`](Self::set_parallel_min_nodes)).
+    pub fn runs_parallel(&self) -> bool {
+        match &self.engine {
+            Engine::Jacobi(j) => j.runs_parallel(),
+            _ => false,
+        }
+    }
+
+    /// Number of unknowns.
     pub fn ndof(&self) -> usize {
         self.n
     }

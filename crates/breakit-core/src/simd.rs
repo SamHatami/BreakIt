@@ -1,7 +1,7 @@
 //! SIMD policy for the solver's hot loops.
 //!
 //! Every hot kernel in this crate is written once, generic over
-//! [`pulp::Simd`], and run through [`SimdLevel::arch`]: the widest
+//! [`pulp::Simd`], and run through `SimdLevel::arch`: the widest
 //! instruction set the CPU reports at start-up (AVX2 with FMA on x86-64,
 //! NEON on AArch64), or plain scalar code. No kernel needs `unsafe`: `pulp`
 //! does the CPU check and the `#[target_feature]` call.
