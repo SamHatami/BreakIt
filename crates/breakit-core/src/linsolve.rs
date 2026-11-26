@@ -111,6 +111,19 @@ pub struct Stats {
     pub auto_refactor_cost: usize,
 }
 
+impl Stats {
+    /// Add the counters of `other` (not the constants of its system).
+    pub fn add_counters(&mut self, other: &Stats) {
+        self.solves += other.solves;
+        self.factorizations += other.factorizations;
+        self.cg_iterations += other.cg_iterations;
+        self.fallbacks += other.fallbacks;
+        self.factor_seconds += other.factor_seconds;
+        self.solve_seconds += other.solve_seconds;
+        self.assembly_seconds += other.assembly_seconds;
+    }
+}
+
 /// The matrix and the method behind a [`LinSolver`].
 enum Engine {
     Block(BlockChol),

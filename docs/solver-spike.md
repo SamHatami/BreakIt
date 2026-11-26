@@ -254,7 +254,22 @@ On a bridge a separator is 4 nodes. Two parts cost nothing extra; four parts cos
 
 One CG iteration on the stale factor (two triangular solves and a product) only goes from 0.57 to 0.44 ms on bridge 120. Each of its three threaded sections is about 0.1 ms of work, and by the time a sleeping pool worker has woken the calling thread has done most of it. Keeping helpers awake through a whole solve is the next step.
 
-Not done yet: AVX-512 (`pulp` 0.21 needs nightly for it), helpers that stay awake through a solve, threads for the material commit, per-island solves for debris, and SIMD or threads in the load models' member loops. NEON is compiled from the same source but has only been run on x86-64 so far.
+Tried and dropped: the material commit on threads. Once it reuses the step check's responses it is 0.25 ms per substep on bridge 120 (about 45 ns a member), and chunks of it on the pool came out no faster, and slower on bridge 60 (0.70 against 0.47 ms a frame), for the same reason as above.
+
+### Islands (`src/dynamics/direct.rs`)
+
+Pieces that no live member ties together share no unknowns, so each large one now has a linear system of its own (a `Group`): two structures on the table from the start, or a part that has broken off.
+
+- Groups are found with a union-find over the live members, at the start and after a substep that broke something. A piece needs `SimConfig::island_min_nodes` nodes (default 256) to get its own system; smaller debris stays in the system it came from, because a new system costs its symbolic analysis (about a millisecond per thousand nodes; the systems of a break-up are built side by side).
+- A substep assembles every group, solves the groups' systems side by side, and runs the step check per group. A group whose step fails is shortened and linearised again alone; the others are finished.
+- Each group picks its own linear backend, and a long piece is still split into parts as above.
+- One structure in one piece is one group over all members in order, and takes exactly the path it took before, bit for bit. Tests check that islands move as one system does (two towers; two towers whose tie snaps) and that threads do not change a bit.
+
+What it buys, measured in the same run (ms per frame, 4-core machine): two towers 5x5x12 on one table 6.5 as one system, 5.4 as islands; two towers 8x8x16 23 against 18; two bridges 60 between 5 and 25% less. A single bridge that snaps in the middle shows no clear change: its factorisation was already running in parts on all cores, and the retries of the two halves mostly coincide. After a break-up the collapse takes a different, equally valid course than it did as one system, because each piece now accepts or shortens its own step.
+
+Linear-solver counters are summed over the groups, so two islands count two solves per substep, and the times of solves that ran side by side add up to more than the wall time.
+
+Not done yet: AVX-512 (`pulp` 0.21 needs nightly for it), putting islands that have come to rest to sleep, and SIMD or threads in the load models' member loops. Helpers that spin through a whole solve would make the short sections scale, at the price of three cores kept busy for a third of every frame; not done for that reason. NEON is compiled from the same source but has only been run on x86-64 so far.
 
 ## Next
 
