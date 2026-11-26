@@ -7,7 +7,7 @@
     brief: "Hold a 4 t water tank 6 m up while the table shakes at 0.4 g. Four fixed footings sit at the corners of a 2 m square. The tank should not sway more than 10 cm.",
     limits: (
         volume: (min: (-1.5, 0.0, -1.5), max: (1.5, 6.5, 1.5)),
-        budget: Some(2200.0),
+        budget: Some(44000.0),
         max_mass: Some(600.0),
         materials: None,
     ),
@@ -40,7 +40,7 @@
         NoBreaks,
     ],
     scoring: (
-        target_cost: 1500.0,
+        target_cost: 30000.0,
         target_mass: 120.0,
         margin_band: (1.25, 2.0),
         weights: (cost: 0.35, mass: 0.15, margin: 0.25, objectives: 0.25),

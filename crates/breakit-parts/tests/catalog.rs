@@ -52,7 +52,7 @@ fn cost_is_mass_times_price_plus_joints() {
     let c = Catalog::standard();
     let p = c.part("steel-ibeam-m").unwrap();
     let mass = p.choice.mass(4.0);
-    let want = mass * 2.5 + 2.0 * 40.0;
+    let want = mass * 50.0 + 2.0 * 800.0;
     assert!(rel_err(c.prices.member(&p.choice, 4.0), want) < 1e-12);
     // A stiffer joint costs more than a pin on the same member.
     let mut pinned = p.choice;

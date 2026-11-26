@@ -207,16 +207,16 @@ impl Report {
         if let Some(b) = s.limits.budget {
             criteria.push(Criterion {
                 label: "Budget".into(),
-                measured: format!("{:.0}", bill.total()),
-                required: format!("≤ {b:.0}"),
+                measured: format!("{:.0} kr", bill.total()),
+                required: format!("≤ {b:.0} kr"),
                 ok: bill.total() <= b,
                 bonus: false,
             });
         }
         criteria.push(Criterion {
             label: "Cost".into(),
-            measured: format!("{:.0}", bill.total()),
-            required: format!("≤ {:.0} for full marks", sc.target_cost),
+            measured: format!("{:.0} kr", bill.total()),
+            required: format!("≤ {:.0} kr for full marks", sc.target_cost),
             ok: bill.total() <= sc.target_cost,
             bonus: true,
         });

@@ -10,7 +10,7 @@
     brief: "Carry a road 6 m across a culvert. Two delivery trucks cross first, then a loaded tipper. The bearings on each bank are pins: they hold the bridge in place but cannot stop it rotating. The deck needs a node at least every 1.5 m for the wheels.",
     limits: (
         volume: (min: (-3.5, -2.0, -1.5), max: (3.5, 3.0, 1.5)),
-        budget: Some(2700.0),
+        budget: Some(54000.0),
         max_mass: Some(1200.0),
         materials: Some([Steel, Timber]),
     ),
@@ -64,7 +64,7 @@
         GracefulFailure(warning: 1.0),
     ],
     scoring: (
-        target_cost: 2100.0,
+        target_cost: 42000.0,
         target_mass: 150.0,
         margin_band: (1.25, 2.0),
         weights: (cost: 0.35, mass: 0.15, margin: 0.25, objectives: 0.25),

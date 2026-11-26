@@ -1,4 +1,4 @@
-//! What a structure costs and weighs.
+//! What a structure costs and weighs, in kronor at real installed rates.
 //!
 //! Cost is mass times a price per kilogram for each material, plus a price
 //! per member end for its joint, by joint type (pinned 1x, dowelled 1.5x,
@@ -50,12 +50,12 @@ pub struct JointPrices {
 impl Default for JointPrices {
     fn default() -> Self {
         Self {
-            pinned: 20.0,
-            dowelled: 30.0,
-            bolted: 40.0,
-            monolithic: 60.0,
-            welded: 80.0,
-            rigid: 80.0,
+            pinned: 400.0,
+            dowelled: 600.0,
+            bolted: 800.0,
+            monolithic: 1200.0,
+            welded: 1600.0,
+            rigid: 1600.0,
         }
     }
 }
@@ -76,10 +76,10 @@ impl JointPrices {
 impl Default for CostModel {
     fn default() -> Self {
         Self {
-            steel: 2.5,
-            timber: 1.2,
-            concrete: 0.25,
-            composite: 30.0,
+            steel: 50.0,
+            timber: 24.0,
+            concrete: 5.0,
+            composite: 600.0,
             joints: JointPrices::default(),
         }
     }
