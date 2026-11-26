@@ -202,7 +202,7 @@ fn bridge_trusses_either_side_of_the_lane_share_the_traffic() {
     let b = Binding::new(&s, &st);
     let deck = b.deck.as_ref().unwrap();
     assert_eq!(deck.stations.len(), 7);
-    assert!(deck.stations.iter().all(|st| st.nodes.len() == 2));
+    assert!(deck.stations.iter().all(|st| st.others.len() == 1));
     let cost = CostModel::default().estimate(&st);
     let s_free = Scenario {
         limits: Limits {

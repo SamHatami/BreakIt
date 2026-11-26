@@ -36,32 +36,16 @@ Stars: 1 for a pass, 2 and 3 at score fractions `stars` (0.6, 0.85).
 
 ## Loads
 
-`Binding::forces_at(scenario, t)` is a pure function from test time to one force per node; the game, the headless `evaluate` and any chart recorder see the same loads.
+The load physics is `breakit_core::loads` (see `docs/loads.md`); `breakit-scenario` only maps scenario events onto it. `Binding::load_set(scenario, settle)` builds a core `LoadSet` whose windows are in solver time (`settle` seconds ahead of test time), and `TestRun` applies it every frame, then adds what the core has no model for.
 
-- `Convoy`: vehicles with axle loads driving along the deck lane. Each axle is split between the deck stations either side (lever rule). Deck nodes are found by geometry (within `width` sideways and `height` vertically of the lane line), so scenario files never name node ids; nodes at the same station (two trusses) share the load.
-- `DeckLoad`: uniform N/m along the lane, ramped.
-- `GroundShake`: a(t) = peak sin(2 pi f t) with fades; every free node feels -m a, using `DynamicSim::node_mass`.
+- `Convoy`: a core `Traffic` case. Each vehicle has sprung (quarter-car) axles driving along the deck lane, so trucks bounce on a flexible deck. The lane is `deck_lane(deck)`: a core `LaneLine::strip` that captures nodes within `width` sideways and `height` vertically of the lane line and shares each station's load between its nodes (two trusses), so scenario files never name node ids.
+- `GroundShake`: a core `Quake` with harmonic ground motion, a(t) = peak sin(2 pi f t) with fades; every free node feels -m a. `TestRun::table_offset` gives the table displacement for drawing, `Binding::ground_accel` the acceleration the equipment model uses.
+- `DeckLoad` (uniform N/m along the lane), the proof test's deck stand-in and sandbox player loads stay in `Binding::deck_forces`: the core has no uniform deck load.
+- Proof test: the traffic cases are switched off (`factor` 0) and the deck stand-in takes over; the `LoadSet` factor follows the proof ramp.
+- `Binding::forces_at(scenario, t)` is a static preview (axle loads by the lever rule, no bounce or shaking) for build mode's static check and the brief. The test itself runs the core models.
+- `TestRun::rig_state()` and `vehicles()` give the rigs (trucks, table) for drawing; before the test, `Binding::load_set` tells the lab which rigs to roll in.
 - Payloads are point masses on the nearest node (`DynamicSim::add_point_mass`), so their weight comes from gravity and they have inertia when shaken.
 - Self weight is ramped in over `settle` seconds before the clock starts (sudden gravity overshoots to twice its static effect).
-
-The "Simulate wind, quake and wave loads" work is adding richer load models in `breakit-core`; the plan is to replace the `Event` enum with those load cases (they carry name, start, duration and a factor for the proof test).
-
-## Equipment (payloads)
-
-Sam, 2026-11-26: a scenario can require static weights or equipment that must ride out the external loads. A `Payload` is a rigid item standing on the player's nodes:
-
-- `at` (footprint centre), `feet` (offsets; empty = one foot), `tolerance` (each foot needs its own node within it, else the test is blocked), `mass`, `height` (centre of mass above the feet), `size` (for drawing).
-- `mount`: `Fixed` (never comes off; the default, as for the Q-01 tank), `Bolted { capacity }` (N per foot in pull-out or shear; past it the bolts fail and it rests on friction 0.3), `Resting { friction }`.
-- `limits`: `tilt_deg`, `sag` (downward movement under a foot), `drift` (movement of the footprint centre). Each becomes a report row; with `strict: true` a breach fails the test, otherwise it is scored with the objectives.
-- `critical: true`: losing it fails the test at once.
-
-Model (`src/equipment.rs`): the mass is lumped on the foot nodes as point masses, so weight and sideways inertia reach the structure through the solver. The centre-of-mass height turns sideways inertia H = -m (a_table + a_deck) into a moment h ŷ × H, applied to the feet as the least-squares set of vertical forces with that moment and no net force. Foot reactions (weight share minus that couple) decide tipping (a foot lifts) and sliding (|H| > μ ΣR). Instability accumulates over time (`LOSS_TIME` 0.4 s, paid back at half rate when stable), so a single rocking peak does not throw the item off. When it goes, its mass leaves the solver (`add_point_mass` with negative kg) and the timeline gets `Happening::PayloadLost { name, mass, radius, position, velocity }`. The loads module turns that into a falling `Impactor` (`LoadSet::add_case`, PR #25) so it lands on the deck or the table.
-
-Limits of the model: the item is rigid and its rotational inertia and vertical acceleration are ignored; feet in a straight line only resist overturning along that line. `Binding::forces_at` does not include the overturning couples (they depend on the deck's motion), so a chart of scenario forces leaves them out.
-
-## Cost
-
-`CostModel`, in kronor at real installed rates (Sam's choice, 2026-11-26): price per kg per material (steel 50, timber 24, concrete 5, composite 600) plus a price per member end by joint kind (pinned 400, dowelled 600, bolted 800, monolithic 1 200, welded 1 600, rigid 1 600; ratios from the components design, kept in step with `breakit-parts` prices). `estimate_with_joints` takes the joint kind per member end; `estimate` prices every end as bolted. Joints dominate small structures at these prices.
 
 ## Shipped scenarios (tuned with `cargo run --release -p breakit-scenario --example probe`)
 
@@ -69,11 +53,11 @@ Limits of the model: the item is rigid and its rotational inertia and vertical a
 | --- | --- | --- | --- |
 | B-01 | Culvert road bridge, 6 m, two 7.5 t trucks then an 18 t tipper | Warren truss, steel tube 50x5 (the game's starter bridge) | pass, 1 star, 588 (overbuilt) |
 | | | 30x3 tube | pass, 3 stars, 917 |
-| | | 25x2.5 tube | pass, yields (margin 0.95), sag 118 mm |
-| | | 20x2 tube | collapses at 8.7 s (tipper) |
+| | | 25x2.5 tube | collapses at 9.6 s (the bouncing tipper) |
+| | | 20x2 tube | collapses at 8.8 s (tipper) |
 | P-01 | Pump platform on the shake table: 2.5 t pump skid resting on friction 0.35 (critical), 400 kg cabinet bolted, 0.3 g at 2.5 Hz | Braced platform, 40x4 tube | pass, 3 stars, 871: pump sag 13.6 mm, tilt 0.1° |
 | | | Unbraced (sway) platform, 60x5 tube | the deck amplifies the shaking, the pump slides off at 2.1 s: fail |
-| Q-01 | Water tower on the shake table: 4 t tank at 6 m, 0.4 g at 1.5 Hz | 2-level braced mast, 25x2.5 tube | pass, 2 stars, 783, tank sway 12 mm |
+| Q-01 | Water tower on the shake table: 4 t tank at 6 m, 0.4 g at 1.5 Hz | 2-level braced mast, 25x2.5 tube | pass, 2 stars, 782 |
 
 Q-01 is easy for a braced tower; the budget is what bites. Make it harder with a heavier tank, a lower frequency nearer the tower's own, or fewer footings once the part catalog has thinner sections.
 

@@ -24,7 +24,7 @@ pub mod scenario;
 
 pub use cost::{Bill, CostModel, JointClass, JointPrices};
 pub use limits::{check_limits, PlayMode, Violation};
-pub use loads::{Binding, DeckNodes, VehiclePose};
+pub use loads::Binding;
 pub use report::{Criterion, Report};
 pub use run::{evaluate, Happening, PayloadMeasured, Phase, TestRun, TimelineEntry};
 pub use scenario::*;
