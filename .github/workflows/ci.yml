@@ -15,7 +15,11 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Keep target/ small: Bevy debug info and incremental caches fill the
+  # runner's disk.
   CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
 
 jobs:
   fmt:
@@ -39,12 +43,23 @@ jobs:
       - run: cargo clippy --locked -p breakit-core -p breakit-mesh --all-targets -- -D warnings
       - run: cargo test --locked --release -p breakit-core -p breakit-mesh
 
-  # Everything, including the Bevy crates. Needs system libs for windowing and
-  # input (audio is off, so no ALSA).
-  workspace:
-    name: workspace (clippy, tests, docs)
+  # The Bevy crates are checked and tested in two jobs, on two runners: clippy
+  # and rustdoc only need metadata builds, tests need full builds, and doing
+  # both on one runner builds Bevy twice and runs out of disk.
+  # Both need system libs for windowing and input (audio is off, so no ALSA).
+  lint:
+    name: workspace clippy and docs
     runs-on: ubuntu-latest
     steps:
+      # The hosted runner has ~14 GB free; a Bevy build needs more. Drop
+      # preinstalled toolchains this project never uses.
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+            /usr/share/swift /usr/local/share/powershell /usr/local/share/chromium
+          sudo docker image prune --all --force || true
+          df -h /
       - uses: actions/checkout@v4
       - name: Install Linux deps for Bevy
         run: |
@@ -53,11 +68,36 @@ jobs:
             libudev-dev libwayland-dev libxkbcommon-dev pkg-config
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: workspace
+          shared-key: lint
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      # Core and mesh already ran in release above; debug here keeps the Bevy
-      # build within reach.
-      - run: cargo test --locked --workspace --exclude breakit-core --exclude breakit-mesh
       - run: cargo doc --locked --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+
+  game:
+    name: game-side crates (build, tests)
+    runs-on: ubuntu-latest
+    steps:
+      # The hosted runner has ~14 GB free; a Bevy build needs more. Drop
+      # preinstalled toolchains this project never uses.
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+            /usr/share/swift /usr/local/share/powershell /usr/local/share/chromium
+          sudo docker image prune --all --force || true
+          df -h /
+      - uses: actions/checkout@v4
+      - name: Install Linux deps for Bevy
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libudev-dev libwayland-dev libxkbcommon-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: game
+      # One full build of every target, reused by the tests. Core and mesh
+      # already ran in release above; debug here keeps the Bevy build small.
+      - run: cargo build --locked --workspace --exclude breakit-core --exclude breakit-mesh --all-targets
+      - run: cargo test --locked --workspace --exclude breakit-core --exclude breakit-mesh
+      - run: df -h /
