@@ -58,23 +58,43 @@ fn main() {
         ),
     ];
     for (name, kind) in cases {
-        let mut loads = LoadSet::new(vec![LoadCase::new(name, w.clone(), kind)]);
-        let mut sim = DynamicSim::new(&s, SimConfig::default());
-        loads.prepare(&s);
-        let frames = 120;
-        let mut t_loads = 0.0;
-        let t0 = Instant::now();
-        for _ in 0..frames {
-            let a = Instant::now();
-            loads.apply(&s, &mut sim, 1.0 / 60.0);
-            t_loads += a.elapsed().as_secs_f64();
-            sim.step(1.0 / 60.0);
+        run(&s, name, LoadCase::new(name, w.clone(), kind.clone()));
+        if name == "wind" {
+            // Same frames on one thread, to show the parallel speed-up.
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
+                .build()
+                .expect("a one-thread pool always builds");
+            pool.install(|| run(&s, "wind 1t", LoadCase::new(name, w.clone(), kind)));
         }
-        let total = t0.elapsed().as_secs_f64();
-        println!(
-            "{name:6} loads {:.3} ms/frame, solver {:.2} ms/frame",
-            1e3 * t_loads / frames as f64,
-            1e3 * (total - t_loads) / frames as f64
-        );
     }
+    let mut steady = Wind::new(30.0, Vec3::x());
+    steady.vortex_shedding = false;
+    steady.galloping = false;
+    run(
+        &s,
+        "drag",
+        LoadCase::new("drag", w.clone(), LoadKind::Wind(steady)),
+    );
+}
+
+fn run(s: &Structure, name: &str, case: LoadCase) {
+    let mut loads = LoadSet::new(vec![case]);
+    let mut sim = DynamicSim::new(s, SimConfig::default());
+    loads.prepare(s);
+    let frames = 120;
+    let mut t_loads = 0.0;
+    let t0 = Instant::now();
+    for _ in 0..frames {
+        let a = Instant::now();
+        loads.apply(s, &mut sim, 1.0 / 60.0);
+        t_loads += a.elapsed().as_secs_f64();
+        sim.step(1.0 / 60.0);
+    }
+    let total = t0.elapsed().as_secs_f64();
+    println!(
+        "{name:8} loads {:.3} ms/frame, solver {:.2} ms/frame",
+        1e3 * t_loads / frames as f64,
+        1e3 * (total - t_loads) / frames as f64
+    );
 }

@@ -11,6 +11,7 @@ cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --release --no-default-features -p breakit-core -p breakit-mesh -p breakit-parts -p breakit-scenario -p breakit-audio -p breakit-playground
 cargo test -p breakit-game -p breakit-render -p breakit-lab
+cargo run --release --no-default-features -p breakit-core --example gate   # after solver changes
 ```
 
 CI runs exactly these (plus `cargo doc` with warnings denied). The compiler
@@ -67,7 +68,7 @@ minimal and say so in the PR description, or ask that area's owner to do it.
 
 | Area | Paths | Doc |
 | --- | --- | --- |
-| Solver | `breakit-core/src/{statics,linsolve,blockchol,frame,model}.rs`, `breakit-core/src/dynamics/` | `docs/solver-spike.md` |
+| Solver | `breakit-core/src/{statics,linsolve,blockchol,jacobi,simd,frame,model}.rs`, `breakit-core/src/dynamics/` | `docs/solver-spike.md` |
 | Materials and damage | `breakit-core/src/{material,section,concrete,damage}.rs` | `docs/materials.md` |
 | Joints | `breakit-core/src/joint.rs` | `docs/joints.md` |
 | Loads | `breakit-core/src/loads/` | `docs/loads.md` |
@@ -103,6 +104,44 @@ adding a new file to growing one of these.
   only edit them when your change needs it. A new doc goes in `docs/` and in
   the table above.
 
+## Hot paths: SIMD and threads
+
+Code that runs for every member, node or matrix entry in every substep is a
+hot path: element assembly, the linear-solver kernels (`blockchol.rs`,
+`jacobi.rs`, the CG loop), contact and the load models. The rule for hot
+paths, enforced by `tests/simd.rs` and by `examples/gate.rs` in CI:
+
+- **SIMD with a scalar reference.** Write the kernel once, generic over
+  `pulp::Simd`, and run it through `SimdLevel::arch().dispatch(..)`
+  (`breakit-core/src/simd.rs`). That gives AVX2+FMA on x86-64 and NEON on
+  AArch64, picked at start-up, and the scalar reference from the same
+  source (`SimdLevel::Scalar`, or `BREAKIT_SIMD=scalar` for a whole
+  process). No `std::arch` intrinsics, no `unsafe`, no `#[target_feature]`.
+- **Lay data out for it.** Flat arrays of plain numbers (structure of
+  arrays), fixed sizes the compiler can unroll, no per-entry indirection
+  or allocation inside the loop. Pad a small vector to the register width
+  when that makes whole-register operations possible (`jacobi.rs`).
+- **Threads through rayon, with the same answer on any thread count.**
+  Work on fixed-size chunks, let each chunk write only its own output,
+  and add per-chunk partial sums in chunk order. Enter the pool once per
+  solve or substep, not once per loop: a parallel call from outside the
+  pool blocks on a hand-over each time. Turn threads on by default only
+  from the size where they measure faster, and keep a switch that forces
+  the single-thread path.
+- **Floats may differ in the last bits between instruction sets**, never
+  between thread counts. Tests compare the native path with the scalar one
+  within a tolerance and require bit-identical results across threads.
+- **Measure, and gate it.** A new or changed kernel comes with numbers in
+  the PR (`cargo run --release --example bench`, minimum of three runs)
+  and an entry in `examples/gate.rs`: its speed-up over the scalar
+  reference, and its thread scaling if it is threaded. The gate also holds
+  budgets for solver work (solves, CG iterations, factorisations) on short
+  fixed runs; raise a budget only with the reason in the PR.
+
+The game runs the solver next to Bevy's own task pools. `breakit-core` uses
+rayon's global pool; size it at start-up (`rayon::ThreadPoolBuilder`) so the
+two do not oversubscribe the machine.
+
 ## Code conventions
 
 - Units are SI, the world is Y-up. Name units in docs (`/// Span, m.`).
@@ -113,11 +152,10 @@ adding a new file to growing one of these.
   `std::error::Error`. `panic!`, `unwrap` and `expect` are for broken
   invariants only, with a message that says which invariant. Game code may
   `expect` on start-up data it ships with.
-- No `unsafe`: the workspace denies it. The one exception is the AVX2/FMA
-  dispatch in `breakit-core/src/blockchol.rs`, which opts out with a
-  module-level `#![expect(unsafe_code, reason = ...)]` and a `// SAFETY:`
-  comment on every block. A new exception needs the same, and the solver
-  owner's agreement first.
+- No `unsafe`: the workspace denies it, and no module opts out. SIMD goes
+  through `pulp` (see "Hot paths" below), which needs none. An exception
+  would need a module-level `#![expect(unsafe_code, reason = ...)]`, a
+  `// SAFETY:` comment on every block, and the owner's agreement first.
 - Lint exceptions: `#[expect(clippy::lint_name, reason = "...")]` on the
   smallest item that needs it. No crate-wide `allow` for new code.
 - Docs: every public item in `breakit-core`, `breakit-mesh` and
