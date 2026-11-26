@@ -43,6 +43,33 @@ commands.insert_resource(PlayTable::new(Ravine { gap: 5.0, depth: 3.2 }));
 
 `TableTop::surface` adds a block of table top with the grid on it (minor 0.5 m, the build snap, major every 2 m, aligned to the world origin so lines are where nodes snap); `grid` and `contour_bank` (stacked foam layers, like an architect's terrain model) are there for terrain. Built in: `Ravine` (default: banks and a stream, sized so the starter bridge's supports sit on the banks), `Flat`, `Flume` (a water channel along x) and `ShakeTable` (a platform flush with the surface). Changing `PlayTable` rebuilds the table next frame. `contact_boxes` gives the solver's ground contact the same shape as axis-aligned boxes (the default is a flat slab), so the lab crate does not depend on `breakit-core`. In the game, T cycles the built-ins in build mode until scenarios choose their own.
 
+## The look: light, reflections, lens
+
+`look.rs` owns everything that is not geometry. The reference is a photograph of an architect's model in a working hall on an overcast afternoon: cool light from the roof lights, warm pools under the high-bay lamps, a real lens.
+
+- **Reflections and ambient light** come from an environment map of the hall that is painted, not rendered (`envmap.rs`). The hall is a box with a pitched roof, so what the table sees in any direction follows from `HallSpec`: floor with lamp pools, precast band, window band, roof lights, lamps, crane bridge. It is filtered on the CPU once at startup (about 10 ms at 128 texels) into a mip chain for glossy reflections and a small cube for diffuse light. This is why stainless tanks and wet surfaces show the lamps, and why undersides are warmer and darker than tops. If the hall's layout changes, `HallRadiance::at` has to follow.
+- **Daylight** is one cool directional light with cascaded shadows sized for the table.
+- **Lamps** are warm spot lights pointing down, nearest the table first. They are driven harder than real fittings would be next to daylight (`LAMP_GAIN`) so the pools read.
+- **Who shadows what**: the hall is on render layer 1 (`HALL_LAYER`), the table and structure on layer 0, and lab cameras see both. The daylight only takes shadows from layer 0, because the roof would otherwise shade everything; the lamps take them from both. Anything you add to the hall should go on layer 1, anything on the table on layer 0.
+- **Ambient occlusion** reaches further the further away the camera is focused (`ao_radius`): 0.8 m in the joints of the structure up close, 0.6 m of hall when pulled back, where it grounds the machinery.
+- **Camera**: exposure fixed at EV 9.2, TonyMcMapface tonemapping, a light grade (a touch of contrast, cooler shadows, warmer highlights), bloom only above a threshold so nothing glows that would not in a real hall, a soft vignette, distance haze, and the depth of field from the scaled sensor.
+
+### Quality presets
+
+`LabSettings::set_quality(LabQuality::..)` picks a `Look`; F4 steps through them at run time (`LabSettings::quality_key`, `None` to take the key back). Every knob is also a field of `LabSettings::look`.
+
+| | Low | Medium | High (default) | Ultra |
+|---|---|---|---|---|
+| anti-aliasing | FXAA | SMAA | SMAA | TAA + sharpening |
+| ambient occlusion | off | medium | high | ultra |
+| contact shadows | off | off | on | on |
+| depth of field | gaussian | gaussian | bokeh | bokeh |
+| shadow maps | 1024, 2 cascades | 2048, 3 | 2048, 3 | 4096, 4 |
+| lamps lighting / shadowed | 6 / 0 | 12 / 0 | 20 / 4 | 20 / 8 |
+| reflection map | 32 | 64 | 128 | 256 |
+
+TAA is only on Ultra on purpose: the member shader does not write motion vectors for its own bending, so a member that moves fast can leave a faint trail. SMAA has nothing temporal in it.
+
 ## Cost
 
 Measured headless (`cargo test` builds and counts; frame times on the container's software rasteriser are not meaningful for a GPU):
@@ -52,19 +79,19 @@ Measured headless (`cargo test` builds and counts; frame times on the container'
 | hall and dressing | 66 k triangles in 29 meshes (one per material), generated once at startup |
 | table (ravine) | 9 k triangles in 8 meshes, rebuilt only when the table changes |
 | per-frame CPU | none for the hall; the lens system only copies the focus distance |
-| lights | 1 shadowed directional light (cascades sized for the table, hall geometry does not cast), 20 point lights without shadows |
-| post | HDR, bloom, TonyMcMapface, distance haze, bokeh depth of field |
+| lights (High) | 1 directional light with 3 cascades, 20 spot lights of which 4 are shadowed |
+| passes (High) | depth and normal prepass, ambient occlusion, SMAA, bloom, bokeh depth of field, one post pass for the vignette |
 
-In the game with the starter bridge, the read-out showed physics at about 1 ms and the member visuals at 0.05 to 0.08 ms of CPU per frame. Whole frames took 400 to 540 ms on the container's software rasteriser at 1280 x 720, which says nothing about a GPU.
+None of this has been timed on a GPU. The presets exist so that it can be: open the read-out (F3), press F4 and compare. `cargo run --release -p breakit-lab --example lab -- --bench` prints frame times for all four. What each step up adds, most expensive first as far as can be judged without hardware: the bokeh depth of field, ambient occlusion (it also brings the depth and normal prepass, which draws the scene once more), the shadowed lamps (each draws the hall's 66 k triangles into its own shadow map), then the unshadowed lamps and contact shadows.
 
-On a GPU the likely costs, in order: the bokeh depth of field (switch `LabSettings::dof` to `Some(DepthOfFieldMode::Gaussian)` or `None`), the 20 point lights (`lamp_lights: false` keeps the lamps glowing without lighting), then shadows. Static geometry at this size is not a concern.
+In the game with the starter bridge, the read-out showed physics at about 1 ms and the member visuals at 0.05 to 0.08 ms of CPU per frame.
 
-The game's frame-time read-out (top right, F3 toggles) shows the average and worst frame over two seconds of real time, the CPU time of physics and of the member visuals, and the lab's triangle and mesh counts. `BREAKIT_PERF_LOG=1` prints it once a second.
+The game's frame-time read-out (top right, F3 toggles) shows the average and worst frame over two seconds of real time, the CPU time of physics and of the member visuals, the lab's triangle and mesh counts and the quality preset. `BREAKIT_PERF_LOG=1` prints it once a second.
 
 ## Running it
 
-- `cargo run --release -p breakit-game`: the game in the lab. T table, F3 read-out.
-- `cargo run --release -p breakit-lab --example lab`: the lab alone with a stand-in truss. 1-4 table, V next view, B depth of field mode, [ and ] f-number. `-- --capture <dir>` saves every view and table and exits; `-- --bench` prints frame times with bokeh, gaussian and no depth of field.
+- `cargo run --release -p breakit-game`: the game in the lab. T table, F3 read-out, F4 quality.
+- `cargo run --release -p breakit-lab --example lab`: the lab alone with a stand-in truss. 1-4 table, V next view, F4 quality, B depth of field mode, [ and ] f-number. `-- --quality low|medium|high|ultra` starts on a preset. `-- --capture <dir>` saves every view and table and exits (`--views play,hall` for some of them); `-- --bench` prints frame times for each preset.
 - `BREAKIT_CAPTURE=<dir>` on the game also saves `lab.png`, a pulled-back view.
 
 ## Open points
@@ -72,5 +99,7 @@ The game's frame-time read-out (top right, F3 toggles) shows the average and wor
 - The load rigs (fan wall, shake platform actuators, flume paddle on the table, traffic carts) from the concept canvas are not built yet. They belong next to the scenarios that drive them; build them in lab metres and scale by `model_scale`.
 - To move the table with a shake rig, expose a table root entity (today the table parts are separate entities at the origin).
 - Looks were tuned on a software rasteriser; exposure, lamp intensity and the f-number want a pass on a real GPU.
+- The reflection map is taken from the middle of the table and has no parallax: reflections are right in direction, not in position. Good enough for curved steel and rippled water; a large flat mirror would give it away.
+- Ambient occlusion can speckle faintly on far walls when the camera is focused close and the background is sharp (depth of field off). With depth of field on, the blur hides it.
 - No LOD or culling groups for the hall: it is merged per material, so it is all drawn or none. Fine at 60 k triangles.
 - Water is static.
