@@ -2099,7 +2099,15 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "breakit-core",
+ "breakit-lab",
  "breakit-render",
+]
+
+[[package]]
+name = "breakit-lab"
+version = "0.1.0"
+dependencies = [
+ "bevy",
 ]
 
 [[package]]

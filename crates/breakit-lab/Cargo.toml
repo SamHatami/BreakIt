@@ -1,0 +1,12 @@
+[package]
+name = "breakit-lab"
+version = "0.1.0"
+description = "BreakIt lab scene: procedural test hall (portal frames, crane, lights, machinery, piping) and the scenario play tables."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+# Same pin as breakit-game and breakit-render; upgrade all three together.
+bevy = { version = "=0.20.1", default-features = false, features = ["3d", "ui"] }

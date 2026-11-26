@@ -10,10 +10,12 @@ mod camera;
 mod capture;
 mod design;
 mod hud;
+mod perf;
 mod render;
 mod visuals;
 
 use bevy::prelude::*;
+use breakit_lab::{LabPlugin, PlayTable};
 
 #[derive(States, Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Mode {
@@ -32,6 +34,7 @@ fn main() {
             ..default()
         }))
         .insert_resource(ClearColor(Color::srgb(0.1, 0.11, 0.13)))
+        .add_plugins(LabPlugin)
         .insert_resource(design::Design::starter_bridge())
         .init_state::<Mode>()
         .add_plugins((
@@ -42,8 +45,9 @@ fn main() {
             visuals::VisualsPlugin,
             hud::HudPlugin,
             capture::CapturePlugin,
+            perf::PerfPlugin,
         ))
-        .add_systems(Update, toggle_mode)
+        .add_systems(Update, (toggle_mode, cycle_table))
         .run();
 }
 
@@ -58,5 +62,19 @@ fn toggle_mode(
             next.set(Mode::Build)
         }
         _ => {}
+    }
+}
+
+/// T: next built-in play table (ravine, flat, flume, shake table) until
+/// scenarios choose their own.
+fn cycle_table(
+    keys: Res<ButtonInput<KeyCode>>,
+    mode: Res<State<Mode>>,
+    mut table: ResMut<PlayTable>,
+    mut index: Local<usize>,
+) {
+    if *mode.get() == Mode::Build && keys.just_pressed(KeyCode::KeyT) {
+        *index += 1;
+        *table = PlayTable::builtin(*index);
     }
 }
