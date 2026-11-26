@@ -193,6 +193,13 @@ fn configs() -> Vec<(&'static str, SimConfig)> {
     use linsolve::Backend::*;
     vec![
         ("default", d()),
+        (
+            "serial",
+            SimConfig {
+                parallel_min_members: usize::MAX,
+                ..d()
+            },
+        ),
         ("cholesky", with(Cholesky, 1e-6)),
         ("cholesky-1e-4", with(Cholesky, 1e-4)),
         ("jacobi", with(BlockJacobi, 1e-6)),
