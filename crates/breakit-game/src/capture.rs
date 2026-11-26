@@ -4,6 +4,7 @@
 //! pulls the camera back for a shot of the lab and exits. Used by agents and CI to see the game without a person at
 //! the screen, e.g. `xvfb-run cargo run -p breakit-game`.
 //!
+//! `BREAKIT_NO_UI=1` hides the UI for clean scene shots.
 //! `BREAKIT_THEME=<n>` starts with theme preset n, for comparing
 //! looks. `BREAKIT_TRUSS=steel` builds the web in steel instead of timber;
 //! `BREAKIT_TRUSS=weak` lays a bare timber plank instead, which breaks.
@@ -37,12 +38,33 @@ impl Plugin for CapturePlugin {
             let _ = std::fs::create_dir_all(&dir);
             app.insert_resource(CaptureDir(PathBuf::from(dir)))
                 .add_systems(Last, capture_script);
+            if std::env::var("BREAKIT_NO_UI").is_ok() {
+                app.add_systems(Last, hide_ui);
+            }
         }
     }
 }
 
 #[derive(Resource)]
 struct CaptureDir(PathBuf);
+
+/// `BREAKIT_NO_UI=1`: hides every UI root, for clean shots of the scene
+/// (backgrounds for UI mock-ups).
+fn hide_ui(
+    mut roots: Query<&mut Visibility, (With<Node>, Without<ChildOf>)>,
+    mut perf: ResMut<crate::perf::Perf>,
+    mut window: Single<&mut Window>,
+) {
+    perf.visible = false;
+    if window.resolution.width() != 1600.0 {
+        window.resolution.set(1600.0, 900.0);
+    }
+    for mut v in &mut roots {
+        if *v != Visibility::Hidden {
+            *v = Visibility::Hidden;
+        }
+    }
+}
 
 #[derive(Default)]
 struct Script {
