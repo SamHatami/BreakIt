@@ -88,6 +88,64 @@ pub(crate) struct BlockJacobi {
     par_min_nodes: usize,
 }
 
+/// Add one end's 6x6 block of a beam (`o` = 0 for end a, 6 for end b) to
+/// that node's block, both triangles, on its free components.
+#[inline(always)]
+fn add_node(d: &mut Matrix6<f64>, f: &[bool; 6], lower: &[f64; BLOCK_NNZ], o: usize) {
+    if *f == [true; 6] {
+        // The usual case, without the per-entry tests.
+        let d: &mut [f64; B] = d
+            .as_mut_slice()
+            .try_into()
+            .expect("a 6x6 matrix has 36 entries");
+        for r in 0..6 {
+            let row = &lower[tri(o + r, o)..][..r + 1];
+            for c in 0..r {
+                d[c * 6 + r] += row[c];
+                d[r * 6 + c] += row[c];
+            }
+            d[r * 7] += row[r];
+        }
+        return;
+    }
+    for r in 0..6 {
+        for c in 0..=r {
+            if f[r] && f[c] {
+                let v = lower[tri(o + r, o + c)];
+                d[(r, c)] += v;
+                if r != c {
+                    d[(c, r)] += v;
+                }
+            }
+        }
+    }
+}
+
+/// Store a beam's coupling block (rows at end b, columns at end a) in
+/// single precision, zero on fixed components.
+#[inline(always)]
+fn set_off(m: &mut [F], fa: &[bool; 6], fb: &[bool; 6], lower: &[f64; BLOCK_NNZ]) {
+    if *fa == [true; 6] && *fb == [true; 6] {
+        let m: &mut [F; B] = m.try_into().expect("a coupling block has 36 entries");
+        for r in 0..6 {
+            let row = &lower[tri(6 + r, 0)..][..6];
+            for c in 0..6 {
+                m[c * 6 + r] = row[c] as F;
+            }
+        }
+        return;
+    }
+    for c in 0..6 {
+        for r in 0..6 {
+            m[c * 6 + r] = if fb[r] && fa[c] {
+                lower[tri(6 + r, c)] as F
+            } else {
+                0.0
+            };
+        }
+    }
+}
+
 /// acc += col s over one padded column.
 #[inline(always)]
 fn fma_col<S: Simd>(simd: S, acc: &mut [F], col: &[F], s: F) {
@@ -363,34 +421,14 @@ impl BlockJacobi {
     pub fn add_block(&mut self, beam: usize, lower: &[f64; BLOCK_NNZ]) {
         let [ea, eb] = self.ends[beam];
         for (end, o) in [(ea, 0), (eb, 6)] {
-            let Some(nd) = end else { continue };
-            let nd = nd as usize;
-            let f = self.free[nd];
-            let d = &mut self.diag64[nd];
-            for r in 0..6 {
-                for c in 0..=r {
-                    if f[r] && f[c] {
-                        let v = lower[tri(o + r, o + c)];
-                        d[(r, c)] += v;
-                        if r != c {
-                            d[(c, r)] += v;
-                        }
-                    }
-                }
+            if let Some(nd) = end {
+                let nd = nd as usize;
+                add_node(&mut self.diag64[nd], &self.free[nd], lower, o);
             }
         }
         if let (Some(a), Some(b)) = (ea, eb) {
-            let (fa, fb) = (self.free[a as usize], self.free[b as usize]);
             let m = &mut self.off[beam * B..(beam + 1) * B];
-            for c in 0..6 {
-                for r in 0..6 {
-                    m[c * 6 + r] = if fb[r] && fa[c] {
-                        lower[tri(6 + r, c)] as F
-                    } else {
-                        0.0
-                    };
-                }
-            }
+            set_off(m, &self.free[a as usize], &self.free[b as usize], lower);
             self.live[beam] = true;
         }
     }

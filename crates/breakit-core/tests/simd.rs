@@ -4,7 +4,7 @@
 //! the tests really dispatches to a vector instruction set.
 
 use breakit_core::linsolve::{tri, Backend, LinSolver, Policy, BLOCK_NNZ};
-use breakit_core::SimdLevel;
+use breakit_core::{DynamicSim, Material, Section, SimConfig, SimdLevel, Structure, Support, Vec3};
 
 struct Rng(u64);
 
@@ -167,4 +167,140 @@ fn native_level_dispatches_to_simd() {
     }
     #[cfg(target_arch = "aarch64")]
     assert_eq!(SimdLevel::Native.name(), "neon");
+}
+
+/// A tower of `nx` x `nz` columns and `floors` storeys of 2 m bays, clamped
+/// at the base: (structure, top nodes).
+fn tower(nx: usize, nz: usize, floors: usize) -> (Structure, Vec<usize>) {
+    let (mat, sec) = (Material::steel(), Section::rect(0.1, 0.1));
+    let mut s = Structure::new();
+    let id = |x: usize, y: usize, z: usize| (y * nz + z) * nx + x;
+    for y in 0..=floors {
+        for z in 0..nz {
+            for x in 0..nx {
+                s.add_node(Vec3::new(x as f64, y as f64, z as f64) * 2.0);
+            }
+        }
+    }
+    for y in 0..=floors {
+        for z in 0..nz {
+            for x in 0..nx {
+                let a = id(x, y, z);
+                if x + 1 < nx && y > 0 {
+                    s.add_member(a, id(x + 1, y, z), mat.clone(), sec.clone());
+                }
+                if z + 1 < nz && y > 0 {
+                    s.add_member(a, id(x, y, z + 1), mat.clone(), sec.clone());
+                }
+                if y < floors {
+                    s.add_member(a, id(x, y + 1, z), mat.clone(), sec.clone());
+                }
+                if y == 0 {
+                    s.add_support(Support::fixed(a));
+                }
+            }
+        }
+    }
+    let top = (0..nx * nz).map(|k| floors * nx * nz + k).collect();
+    (s, top)
+}
+
+/// Displacement of every node after the tower settles under its weight and
+/// a sideways push, elastic.
+fn settled_tower(backend: Backend, simd: SimdLevel) -> Vec<Vec3> {
+    let (s, top) = tower(3, 3, 5);
+    let mut sim = DynamicSim::new(
+        &s,
+        SimConfig {
+            damping: 8.0,
+            plasticity: false,
+            linear_backend: backend,
+            linear_tolerance: 1e-8,
+            parallel_min_members: usize::MAX,
+            simd,
+            ..Default::default()
+        },
+    );
+    for &n in &top {
+        sim.set_force(n, Vec3::new(4000.0, 0.0, 1500.0));
+    }
+    assert!(
+        sim.settle(20.0, 1e-7),
+        "{backend:?} on {simd:?} did not settle"
+    );
+    (0..s.nodes.len()).map(|n| sim.displacement(n)).collect()
+}
+
+/// `SimConfig::simd` switches the whole simulation, assembly included: the
+/// native run ends where the scalar reference does.
+#[test]
+fn simulation_on_native_matches_the_scalar_reference() {
+    for backend in [Backend::Cholesky, Backend::BlockJacobi] {
+        let scalar = settled_tower(backend, SimdLevel::Scalar);
+        let native = settled_tower(backend, SimdLevel::Native);
+        let largest = scalar.iter().map(|d| d.norm()).fold(0.0, f64::max);
+        assert!(largest > 1e-3, "the push should move the tower");
+        let diff = (scalar.iter().zip(&native))
+            .map(|(a, b)| (a - b).norm())
+            .fold(0.0, f64::max);
+        assert!(
+            diff < 1e-6 * largest,
+            "{backend:?}: native differs from scalar by {diff:e} of {largest:e} m"
+        );
+    }
+}
+
+/// Everything observable about a run that is pushed until it yields and
+/// breaks: node states as bits, and the breaks.
+fn collapse_run(parallel_min_members: usize, simd: SimdLevel) -> (Vec<[u64; 7]>, Vec<usize>) {
+    // 2,300 members: enough for both assembly and the step check to ask
+    // for other threads.
+    let (s, top) = tower(8, 8, 13);
+    let mut sim = DynamicSim::new(
+        &s,
+        SimConfig {
+            parallel_min_members,
+            simd,
+            ..Default::default()
+        },
+    );
+    for frame in 0..40 {
+        let push = 4.0e4 * 1.15f64.powi(frame);
+        for &n in &top {
+            sim.set_force(n, Vec3::new(push, 0.0, 0.3 * push));
+        }
+        sim.step(1.0 / 60.0);
+    }
+    let state = (0..s.nodes.len())
+        .map(|n| {
+            let (x, q) = (sim.position(n), sim.orientation(n));
+            [x.x, x.y, x.z, q.i, q.j, q.k, q.w].map(f64::to_bits)
+        })
+        .collect();
+    let breaks = sim.break_events().iter().map(|e| e.member).collect();
+    (state, breaks)
+}
+
+/// Threaded assembly and step check give the single-thread state bit for
+/// bit, on any number of threads, through yielding and breaks.
+#[test]
+fn threaded_simulation_is_bit_identical() {
+    for simd in [SimdLevel::Scalar, SimdLevel::Native] {
+        let single = collapse_run(usize::MAX, simd);
+        assert!(
+            !single.1.is_empty(),
+            "the push should break members, or the test covers less than it says"
+        );
+        for threads in [1, 2, 4] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("a thread pool");
+            let threaded = pool.install(|| collapse_run(0, simd));
+            assert!(
+                single == threaded,
+                "{simd:?} on {threads} threads is not bit-identical to one thread"
+            );
+        }
+    }
 }
