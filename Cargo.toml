@@ -1,11 +1,14 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/breakit-audio",
     "crates/breakit-core",
     "crates/breakit-game",
     "crates/breakit-lab",
     "crates/breakit-mesh",
+    "crates/breakit-parts",
     "crates/breakit-render",
+    "crates/breakit-scenario",
 ]
 
 [workspace.package]
@@ -31,6 +34,8 @@ type_complexity = "allow"
 dbg_macro = "warn"
 todo = "warn"
 unimplemented = "warn"
+# Where a module is allowed `unsafe` (see CONTRIBUTING.md), every block says why.
+undocumented_unsafe_blocks = "warn"
 
 [workspace.dependencies]
 nalgebra = "0.33"

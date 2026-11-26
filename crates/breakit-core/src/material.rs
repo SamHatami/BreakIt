@@ -272,6 +272,124 @@ impl Material {
     }
 }
 
+/// Structural steel grades (EN 10025). Only the yield strength differs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SteelGrade {
+    S235,
+    S355,
+    S460,
+}
+
+/// Timber strength classes: sawn softwood (EN 338) and glulam (EN 14080).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TimberClass {
+    C16,
+    C24,
+    GL28h,
+}
+
+/// Concrete strength classes (EN 1992-1-1 table 3.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ConcreteClass {
+    C25,
+    C30,
+    C40,
+}
+
+impl Material {
+    /// Structural steel of the given grade.
+    pub fn steel_grade(grade: SteelGrade) -> Self {
+        let mut m = Self::steel();
+        let (name, fy) = match grade {
+            SteelGrade::S235 => ("steel S235", 235e6),
+            SteelGrade::S355 => ("steel S355", 355e6),
+            SteelGrade::S460 => ("steel S460", 460e6),
+        };
+        m.name = name;
+        if let Model::Ductile(p) = &mut m.model {
+            p.yield_strength = fy;
+        }
+        m
+    }
+
+    /// Timber of the given class with its grain at `angle` (rad) to the
+    /// member axis (Hankinson's formula, as [`Material::timber_at_grain_angle`]).
+    pub fn timber_class(class: TimberClass, angle: f64) -> Self {
+        // [f_m, f_t0, f_t90, f_c0, f_c90, f_v] MPa, [E0, E90, G] GPa, ρ_mean.
+        let (name, f, e, rho) = match class {
+            TimberClass::C16 => (
+                "timber C16",
+                [16.0, 10.0, 0.4, 17.0, 2.2, 3.2],
+                [8.0, 0.27, 0.5],
+                370.0,
+            ),
+            TimberClass::C24 => (
+                "timber C24",
+                [24.0, 14.5, 0.4, 21.0, 2.5, 4.0],
+                [11.0, 0.37, 0.69],
+                420.0,
+            ),
+            TimberClass::GL28h => (
+                "glulam GL28h",
+                [28.0, 22.3, 0.5, 28.0, 2.5, 3.5],
+                [12.6, 0.3, 0.65],
+                460.0,
+            ),
+        };
+        let h = |f0: f64, f90: f64| hankinson(f0, f90, angle);
+        Self {
+            name,
+            kind: MaterialKind::Timber,
+            youngs_modulus: h(e[0] * 1e9, e[1] * 1e9),
+            shear_modulus: e[2] * 1e9,
+            density: rho,
+            model: Model::Timber(TimberProps {
+                tension: h(f[1] * 1e6, f[2] * 1e6),
+                compression: h(f[3] * 1e6, f[4] * 1e6),
+                bending: h(f[0] * 1e6, f[2] * 1e6),
+                shear: f[5] * 1e6,
+                crush_strain_capacity: 0.02,
+                grain_angle: angle,
+            }),
+        }
+    }
+
+    /// Plain concrete of the given class.
+    pub fn concrete_class(class: ConcreteClass) -> Self {
+        let (name, fck, fctm, ecm) = match class {
+            ConcreteClass::C25 => ("concrete C25/30", 25e6, 2.6e6, 31e9),
+            ConcreteClass::C30 => ("concrete C30/37", 30e6, 2.9e6, 33e9),
+            ConcreteClass::C40 => ("concrete C40/50", 40e6, 3.5e6, 35e9),
+        };
+        let mut m = Self::concrete();
+        m.name = name;
+        m.youngs_modulus = ecm;
+        m.shear_modulus = ecm / 2.4;
+        if let Model::Concrete(c) = &mut m.model {
+            c.compression = fck;
+            c.tension = fctm;
+        }
+        m
+    }
+
+    /// Reinforced concrete of the given class with B500B bars at steel
+    /// ratio `ratio` and cover `cover` (m, face to bar centre).
+    pub fn reinforced_concrete_class(class: ConcreteClass, ratio: f64, cover: f64) -> Self {
+        let rc = Self::reinforced_concrete_with(ratio, cover);
+        let mut m = Self::concrete_class(class);
+        m.name = match class {
+            ConcreteClass::C25 => "reinforced concrete C25/30",
+            ConcreteClass::C30 => "reinforced concrete C30/37",
+            ConcreteClass::C40 => "reinforced concrete C40/50",
+        };
+        m.density = rc.density;
+        if let (Model::Concrete(c), Model::Concrete(r)) = (&mut m.model, rc.model) {
+            c.rebar = r.rebar;
+        }
+        m
+    }
+}
+
 /// Hankinson's formula for a property at `angle` to the grain.
 pub fn hankinson(along: f64, across: f64, angle: f64) -> f64 {
     let (s, c) = angle.sin_cos();

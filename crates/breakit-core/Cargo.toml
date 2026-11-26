@@ -11,6 +11,12 @@ rust-version.workspace = true
 faer = "0.22"
 nalgebra.workspace = true
 rayon = "1"
+serde = { version = "1", features = ["derive"], optional = true }
+
+[features]
+# Serialize/Deserialize on scenario-facing data (load cases, materials are not
+# covered yet), for scenario files.
+serde = ["dep:serde", "nalgebra/serde-serialize"]
 
 [lints]
 workspace = true

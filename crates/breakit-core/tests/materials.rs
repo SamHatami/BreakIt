@@ -458,3 +458,45 @@ fn cfrp_laminate_loses_stiffness_to_matrix_cracking() {
     assert_eq!(d.state, DamageState::Cracked);
     assert!(d.stiffness < 0.99 && d.stiffness > 0.8, "{}", d.stiffness);
 }
+
+#[test]
+fn grades_match_the_default_materials_and_order_by_strength() {
+    use breakit_core::material::Model;
+    use breakit_core::{ConcreteClass, SteelGrade, TimberClass};
+    // The default constructors are one of the grades.
+    let s355 = Material::steel_grade(SteelGrade::S355);
+    assert_eq!(s355.model, Material::steel().model);
+    let c24 = Material::timber_class(TimberClass::C24, 0.3);
+    assert_eq!(c24.model, Material::timber_at_grain_angle(0.3).model);
+    assert_eq!(
+        c24.youngs_modulus,
+        Material::timber_at_grain_angle(0.3).youngs_modulus
+    );
+    let c30 = Material::reinforced_concrete_class(ConcreteClass::C30, 0.01, 0.04);
+    assert_eq!(c30.model, Material::reinforced_concrete().model);
+    assert_eq!(c30.density, Material::reinforced_concrete().density);
+
+    let fy = |g| match Material::steel_grade(g).model {
+        Model::Ductile(p) => p.yield_strength,
+        _ => unreachable!(),
+    };
+    assert!(
+        fy(SteelGrade::S235) < fy(SteelGrade::S355) && fy(SteelGrade::S355) < fy(SteelGrade::S460)
+    );
+    let fm = |c| match Material::timber_class(c, 0.0).model {
+        Model::Timber(t) => t.bending,
+        _ => unreachable!(),
+    };
+    assert!(
+        fm(TimberClass::C16) < fm(TimberClass::C24)
+            && fm(TimberClass::C24) < fm(TimberClass::GL28h)
+    );
+    let fck = |c| match Material::concrete_class(c).model {
+        Model::Concrete(p) => p.compression,
+        _ => unreachable!(),
+    };
+    assert!(
+        fck(ConcreteClass::C25) < fck(ConcreteClass::C30)
+            && fck(ConcreteClass::C30) < fck(ConcreteClass::C40)
+    );
+}

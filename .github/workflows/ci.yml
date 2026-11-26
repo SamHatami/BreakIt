@@ -31,7 +31,8 @@ jobs:
       - run: cargo fmt --all --check
 
   # The engine-free crates, with the release-mode tests the solver relies on
-  # (the static FEM is the oracle for the dynamic solver).
+  # (the static FEM is the oracle for the dynamic solver). breakit-audio runs
+  # without its `device` feature here, so this job needs no ALSA.
   core:
     name: engine-free crates (clippy, release tests)
     runs-on: ubuntu-latest
@@ -40,13 +41,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: core
-      - run: cargo clippy --locked -p breakit-core -p breakit-mesh --all-targets -- -D warnings
-      - run: cargo test --locked --release -p breakit-core -p breakit-mesh
+      - run: >-
+          cargo clippy --locked --all-targets --no-default-features
+          -p breakit-core -p breakit-mesh -p breakit-parts -p breakit-scenario -p breakit-audio
+          -- -D warnings
+      - run: >-
+          cargo test --locked --release --no-default-features
+          -p breakit-core -p breakit-mesh -p breakit-parts -p breakit-scenario -p breakit-audio
 
   # The Bevy crates are checked and tested in two jobs, on two runners: clippy
   # and rustdoc only need metadata builds, tests need full builds, and doing
   # both on one runner builds Bevy twice and runs out of disk.
-  # Both need system libs for windowing and input (audio is off, so no ALSA).
+  # Both need system libs for windowing and input, and ALSA headers for
+  # breakit-audio's sound output.
   lint:
     name: workspace clippy and docs
     runs-on: ubuntu-latest
@@ -65,7 +72,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libudev-dev libwayland-dev libxkbcommon-dev pkg-config
+            libudev-dev libwayland-dev libxkbcommon-dev libasound2-dev pkg-config
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: lint
@@ -92,12 +99,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libudev-dev libwayland-dev libxkbcommon-dev pkg-config
+            libudev-dev libwayland-dev libxkbcommon-dev libasound2-dev pkg-config
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: game
-      # One full build of every target, reused by the tests. Core and mesh
-      # already ran in release above; debug here keeps the Bevy build small.
-      - run: cargo build --locked --workspace --exclude breakit-core --exclude breakit-mesh --all-targets
-      - run: cargo test --locked --workspace --exclude breakit-core --exclude breakit-mesh
+      # One full build of every target, reused by the tests. The engine-free
+      # crates already ran in release above; debug here keeps the Bevy build small.
+      - run: cargo build --locked --all-targets -p breakit-game -p breakit-render -p breakit-lab
+      - run: cargo test --locked -p breakit-game -p breakit-render -p breakit-lab
       - run: df -h /

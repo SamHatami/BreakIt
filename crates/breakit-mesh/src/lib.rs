@@ -34,7 +34,7 @@ pub mod profile;
 pub mod scene;
 pub mod state;
 
-pub use debris::{DebrisConfig, DebrisWorld};
+pub use debris::{DebrisConfig, DebrisImpact, DebrisWorld};
 pub use fracture::{fracture, BreakInput, DebrisPiece, Fracture, ParticleBurst};
 pub use mesh::{member_template, MeshData, TemplateOptions};
 pub use particles::ParticlePool;
