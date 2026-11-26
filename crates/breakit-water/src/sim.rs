@@ -7,6 +7,7 @@ use breakit_core::loads::rng::Rng;
 use breakit_core::loads::water::{piston_height_to_stroke, wave_number, Water, Waves};
 use breakit_core::loads::View;
 use breakit_core::section::Shape;
+use breakit_core::Vec3;
 
 use crate::field::Field;
 use crate::grid::Grid;
@@ -137,6 +138,8 @@ pub struct WaterSim {
     field: Arc<Field>,
     drive: Drive,
     hold_level: bool,
+    /// Per structure node: was it under water at the last [`Self::couple`]?
+    wet_nodes: Vec<bool>,
 }
 
 impl WaterSim {
@@ -156,6 +159,7 @@ impl WaterSim {
             field,
             drive: Drive::default(),
             hold_level,
+            wet_nodes: Vec::new(),
         }
     }
 
@@ -261,6 +265,7 @@ impl WaterSim {
     /// uses). Call once per frame before [`Self::advance`].
     pub fn couple(&mut self, view: &View, drag_tube: f64, drag_rect: f64) {
         self.solver.clear_blockage();
+        self.splash_entries(view);
         let field = self.field.clone();
         const SAMPLES: usize = 8;
         for m in 0..view.structure.members.len() {
@@ -284,6 +289,77 @@ impl WaterSim {
                 self.solver
                     .add_blockage(p.x, p.z, 0.5 * cd * width * ds * across, vel.x, vel.z);
             }
+        }
+    }
+
+    /// Something hits the water at `p` at `speed` (m/s); `size` scales the
+    /// splash (1 for a node of a typical member). Throws spray, leaves a
+    /// patch of foam and starts a ring of waves.
+    pub fn splash(&mut self, p: Vec3, speed: f64, size: f64) {
+        let g = self.solver.grid;
+        let Some((i, j)) = g.cell_at(p.x, p.z) else {
+            return;
+        };
+        let c = g.c(i, j);
+        let depth = self.solver.depth()[c];
+        if depth <= 0.02 {
+            return;
+        }
+        let surface = self.solver.surface()[c];
+        self.foam[c] = (self.foam[c] + 0.6 * size).min(1.5);
+        self.solver
+            .displace(p.x, p.z, (0.03 * speed * size).min(0.3 * depth));
+        let count = (10.0 * speed * speed * size).min(80.0) as usize;
+        for _ in 0..count {
+            if self.droplets.len() >= self.whitewater.max_droplets {
+                break;
+            }
+            let angle = std::f64::consts::TAU * self.rng.uniform();
+            let out = 0.35 * speed * self.rng.uniform();
+            let up = 0.6 * speed * (0.3 + self.rng.uniform());
+            self.droplets.push(Droplet {
+                position: [
+                    (p.x + 0.1 * angle.cos() * self.rng.uniform()) as f32,
+                    (surface + 0.02) as f32,
+                    (p.z + 0.1 * angle.sin() * self.rng.uniform()) as f32,
+                ],
+                velocity: [
+                    (out * angle.cos()) as f32,
+                    up as f32,
+                    (out * angle.sin()) as f32,
+                ],
+                age: 0.0,
+                life: (0.5 + 0.9 * self.rng.uniform()) as f32,
+                size: (0.008 + 0.014 * self.rng.uniform().powi(2)) as f32,
+            });
+        }
+    }
+
+    /// Splashes where nodes of the structure have just dropped into the
+    /// water.
+    fn splash_entries(&mut self, view: &View) {
+        let n = view.structure.nodes.len();
+        let field = self.field.clone();
+        let under = |node: usize| {
+            let p = view.sim.position(node);
+            field
+                .column(p.x, p.z)
+                .is_some_and(|(surface, bed)| p.y < surface && p.y > bed)
+        };
+        if self.wet_nodes.len() != n {
+            self.wet_nodes = (0..n).map(under).collect();
+            return;
+        }
+        for node in 0..n {
+            let wet = under(node);
+            if wet && !self.wet_nodes[node] {
+                let v = view.sim.velocity(node);
+                if v.y < -1.0 {
+                    let size = (view.sim.node_mass(node) / 20.0).clamp(0.3, 3.0);
+                    self.splash(view.sim.position(node), v.norm(), size);
+                }
+            }
+            self.wet_nodes[node] = wet;
         }
     }
 

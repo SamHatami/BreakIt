@@ -163,3 +163,185 @@ fn a_pile_in_a_current_leaves_a_wake() {
         "no set-up: {front} in front, {back} behind"
     );
 }
+
+#[test]
+fn a_dropped_log_splashes_and_floats() {
+    let (bed, b) = (-2.0, 0.2);
+    let timber = Material::timber();
+    let mut structure = Structure::new();
+    structure.add_line(
+        Vec3::new(4.0, 1.5, 1.0),
+        Vec3::new(6.0, 1.5, 1.0),
+        2,
+        &timber,
+        &Section::rect(b, b),
+    );
+    let mut water = WaterSim::flume(
+        FlumeSetup {
+            x: (0.0, 10.0),
+            z: (0.0, 2.0),
+            dx: 0.1,
+            bed,
+            still_level: 0.0,
+            beach: None,
+            outlet: false,
+        },
+        Config::default(),
+    );
+    let mut case = Water::current(0.0, Vec3::zeros());
+    case.bed = bed;
+    let mut loads = water_case(case);
+    loads.prepare(&structure);
+    let geometry = Geometry::new(&structure);
+    let mut sim = DynamicSim::new(&structure, SimConfig::default());
+    let (mut most_spray, mut ring) = (0usize, 0.0_f64);
+    let mut t = 0.0;
+    while t < 10.0 {
+        water.couple(
+            &View {
+                structure: &structure,
+                sim: &sim,
+                geometry: &geometry,
+                time: t,
+            },
+            1.0,
+            2.0,
+        );
+        water.advance(DT, Drive::default());
+        if let LoadKind::Water(w) = &mut loads.cases[0].kind {
+            w.field = Some(water.field());
+        }
+        loads.step(&structure, &mut sim, DT);
+        t += DT;
+        most_spray = most_spray.max(water.droplets().len());
+        // The water around the log is pushed about by the splash.
+        let level = water.field().column(5.0, 1.2).expect("wet").0;
+        ring = ring.max(level.abs());
+    }
+    assert!(most_spray >= 20, "no splash: {most_spray} droplets");
+    assert!(ring > 0.005, "the splash left the water flat: {ring} m");
+    // Archimedes: the wet share of the section is the density ratio.
+    let expected = -(timber.density / 1000.0 - 0.5) * b;
+    for n in 0..3 {
+        let y = sim.position(n).y;
+        assert!(
+            (y - expected).abs() < 0.02,
+            "node {n} at {y}, expected {expected}"
+        );
+    }
+}
+
+#[test]
+fn a_pontoon_raft_carries_its_load_through_waves() {
+    use breakit_core::loads::water::wet_fraction;
+    let bed = -2.5;
+    // Two large pontoons (CHS 813x16) 3 m long, 1 m apart, tied by three
+    // cross tubes, with 600 kg of cargo on the middle one.
+    let (ro, wall) = (0.4065, 0.016);
+    let (pontoon, tie) = (Section::tube(ro, wall), Section::tube(0.057, 0.005));
+    let steel = Material::steel();
+    let mut s = Structure::new();
+    let left = s.add_line(
+        Vec3::new(20.0, 0.0, 0.5),
+        Vec3::new(23.0, 0.0, 0.5),
+        2,
+        &steel,
+        &pontoon,
+    );
+    let right = s.add_line(
+        Vec3::new(20.0, 0.0, 1.5),
+        Vec3::new(23.0, 0.0, 1.5),
+        2,
+        &steel,
+        &pontoon,
+    );
+    for (a, b) in left.iter().zip(&right) {
+        s.add_member(*a, *b, steel.clone(), tie.clone());
+    }
+    let cargo = 600.0;
+    let mass = steel.density * (6.0 * pontoon.area + 3.0 * tie.area) + cargo;
+    // Archimedes for the pontoons (the ties are under water with them).
+    let lift_needed = mass - 1000.0 * 3.0 * std::f64::consts::PI * 0.057 * 0.057;
+    let full = 1000.0 * 6.0 * std::f64::consts::PI * ro * ro;
+    let share = lift_needed / full;
+    assert!(share < 0.95, "the raft should float: {share}");
+    let (mut lo, mut hi) = (-ro, ro);
+    for _ in 0..50 {
+        let mid = 0.5 * (lo + hi);
+        if wet_fraction(mid, ro, true) < share {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let draft_axis = -lo;
+
+    let (period, height) = (4.0, 0.3);
+    let mut water = WaterSim::flume(
+        FlumeSetup {
+            x: (0.0, 120.0),
+            z: (0.0, 2.0),
+            dx: 0.2,
+            bed,
+            still_level: 0.0,
+            beach: None,
+            outlet: false,
+        },
+        Config::default(),
+    );
+    let mut case = Water::airy(0.0, height, period, Vec3::x());
+    case.bed = bed;
+    case.paddle = 0.0;
+    let mut loads = water_case(case.clone());
+    loads.prepare(&s);
+    let geometry = Geometry::new(&s);
+    let mut sim = DynamicSim::new(&s, SimConfig::default());
+    sim.add_point_mass(left[1], 0.5 * cargo);
+    sim.add_point_mass(right[1], 0.5 * cargo);
+    let centre = |sim: &DynamicSim| 0.5 * (sim.position(left[1]).y + sim.position(right[1]).y);
+    let mut t = 0.0;
+    let (mut still, mut top, mut bottom, mut tilt) = (0.0, f64::MIN, f64::MAX, 0.0_f64);
+    // Still water first, then waves from 12 s on.
+    while t < 12.0 + 12.0 * period {
+        water.couple(
+            &View {
+                structure: &s,
+                sim: &sim,
+                geometry: &geometry,
+                time: t,
+            },
+            1.0,
+            2.0,
+        );
+        let waves = t - 12.0;
+        let drive = if waves > 0.0 {
+            Drive::from_case(&case, waves, (waves / (2.0 * period)).min(1.0))
+        } else {
+            Drive::default()
+        };
+        water.advance(DT, drive);
+        if let LoadKind::Water(w) = &mut loads.cases[0].kind {
+            w.field = Some(water.field());
+        }
+        loads.step(&s, &mut sim, DT);
+        t += DT;
+        if (t - 12.0).abs() < 0.5 * DT {
+            still = centre(&sim);
+        }
+        if waves > 8.0 * period {
+            top = top.max(centre(&sim));
+            bottom = bottom.min(centre(&sim));
+            tilt = tilt.max((sim.position(left[1]).y - sim.position(right[1]).y).abs());
+        }
+    }
+    println!("axis at {still} in still water, expected {draft_axis}");
+    assert!((still - draft_axis).abs() < 0.03);
+    // A long wave lifts the raft with it: it heaves about the wave height
+    // around its still-water draft, and stays level across.
+    let heave = top - bottom;
+    println!("heave {heave} in {height} m waves, tilt {tilt}");
+    assert!(heave > 0.6 * height && heave < 1.5 * height);
+    assert!((0.5 * (top + bottom) - draft_axis).abs() < 0.06);
+    assert!(tilt < 0.03);
+    assert!(sim.break_events().is_empty());
+}

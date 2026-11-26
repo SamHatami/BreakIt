@@ -18,6 +18,8 @@ Games and saves store the `MemberChoice` (serde), never solver numbers.
 | Engineer | A `Family` (IPE, HEA, CHS, SHS, round bar, sawn timber, glulam, RC, CFRP tube), a size, a grade, a joint per end | `Catalog::families`, `Family::choice` |
 | Sandbox | Any `ProfileSpec` and `MaterialSpec` | checked by `Catalog::limits` |
 
+Floats are catalog parts too: `steel-pontoon-s` and `steel-pontoon-l` are large closed tubes that displace more water than they weigh (see `docs/water.md`, "Floating, flooding and debris"). Their wall is as thin as the beam model's `d / t` limit allows.
+
 ## Materials and grades
 
 `MaterialSpec` maps onto new core constructors: `Material::steel_grade`

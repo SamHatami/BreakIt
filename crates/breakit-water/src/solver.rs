@@ -422,6 +422,50 @@ impl Solver {
         self.blockage[c] = total;
     }
 
+    /// Something dropping into the water at `(x, z)`: pushes up to `depth`
+    /// metres of water out of that cell into its wet neighbours, which
+    /// starts the ring of waves a splash leaves. Conserves volume.
+    pub fn displace(&mut self, x: f64, z: f64, depth: f64) {
+        let g = self.grid;
+        let Some((i, j)) = g.cell_at(x, z) else {
+            return;
+        };
+        let c = g.c(i, j);
+        let moved = depth.min(0.5 * self.h[c]);
+        if moved <= 0.0 {
+            return;
+        }
+        let mut around = [None; 4];
+        if i > 0 {
+            around[0] = Some(g.c(i - 1, j));
+        }
+        if i + 1 < g.nx {
+            around[1] = Some(g.c(i + 1, j));
+        }
+        if j > 0 {
+            around[2] = Some(g.c(i, j - 1));
+        }
+        if j + 1 < g.nz {
+            around[3] = Some(g.c(i, j + 1));
+        }
+        let dry = self.config.dry;
+        let wet: Vec<usize> = around
+            .into_iter()
+            .flatten()
+            .filter(|&n| self.h[n] > dry)
+            .collect();
+        if wet.is_empty() {
+            return;
+        }
+        self.zeta[c] -= moved;
+        self.h[c] -= moved;
+        let share = moved / wet.len() as f64;
+        for n in wet {
+            self.zeta[n] += share;
+            self.h[n] += share;
+        }
+    }
+
     /// Simulated time, s.
     pub fn time(&self) -> f64 {
         self.time

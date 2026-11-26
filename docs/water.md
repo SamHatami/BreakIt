@@ -27,6 +27,20 @@ The water on the play table is simulated, and the same simulated water is drawn 
 
 The scenario's grading therefore depends on the simulated water. It is deterministic on one machine; across machines (and on a future GPU backend) expect differences in the last digits, so anything scored from it needs a tolerance.
 
+## Floating, flooding and debris
+
+The same load case carries everything that floats:
+
+- **Draft.** Buoyancy and the Morison terms scale with the share of the section that is under the local surface (a circle segment for a tube, a strip for a rectangle), so a member lying in the surface sinks in until it displaces its own weight, and rides the waves.
+- **What displaces what.** A closed tube displaces its whole outline while it is sound; every other section displaces only its material. Timber (420 kg/m³) floats, a steel I-beam sinks.
+- **Flooding.** A tube whose damage passes `FLOOD_DAMAGE` (0.75) lets the water in and from then on displaces only its steel. A broken member floods at once. A pontoon bridge therefore sinks where it is damaged.
+- **Debris.** Each half of a broken member goes with its end node and keeps its (flooded) buoyancy and drag there, so timber pieces come up and float and steel sinks at a terminal speed.
+- **Settling.** Drag is quadratic and hardly damps a small bob, so a section in the surface also gets a wave-radiation damping (`RADIATION`, an estimate).
+- **Splashes.** `WaterSim::couple` notices nodes dropping into the water faster than 1 m/s and calls `WaterSim::splash`: spray, a patch of foam, and a dent in the surface. `splash` is public for things that are not members (dropped equipment).
+- **Pontoons.** `steel-pontoon-s` (CHS 406.4x8) and `steel-pontoon-l` (CHS 813x16) in the parts catalog: about 50 and 200 kg of spare lift per metre.
+
+Not covered: the water does not feel a floating body's displacement (only its drag), and the static check in build mode knows nothing about buoyancy, so a structure held up only by floats has no static solution there.
+
 ## Validation
 
 `cargo test --release -p breakit-water`:
@@ -43,6 +57,8 @@ The scenario's grading therefore depends on the simulated water. It is determini
 | waves on a beach | they break, in shallow water, and run up | |
 | force on a pile in paddle waves | the core's Morison model on Airy waves | 10 % |
 | pile in a current | wake behind, set-up in front | |
+| dropped timber log | splashes, then floats at its Archimedes draft | 2 cm |
+| pontoon raft with cargo | Archimedes draft in still water; heaves with 4 s waves, stays level, nothing breaks | 3 cm |
 
 ## Drawing it
 
@@ -73,6 +89,7 @@ Two thirds of it is the pressure solve. It is scalar code; a GPU compute backend
 ## Open
 
 - The flume's walls are infinitely high for the water: a crest higher than the table top does not spill over it.
-- No buoyancy or drag yet on broken-off members and dropped equipment, and no floats as parts.
+- Dropped equipment (scenario payloads) is not yet pushed by the water; `Field::column` and `WaterField::kinematics` are there for it.
+- Waves shorter than about three water depths do not travel in this model, so a splash stirs the water where it lands but sends out no rings; ripple rings would be a shader effect.
 - The ravine's stream is still the lab's flat water.
 - The paddle the lab draws does not move with the solver's paddle yet (`LiveWater::sim.drive()` has its position).

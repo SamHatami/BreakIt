@@ -17,6 +17,12 @@
          choice: (material: Steel(S355), profile: I(h: 400.0, b: 180.0, tw: 8.6, tf: 13.5), joints: (Bolted, Bolted))),
         (id: "steel-column", name: "Steel H-column", role: Column,
          choice: (material: Steel(S355), profile: I(h: 190.0, b: 200.0, tw: 6.5, tf: 10.0), joints: (Welded, Welded))),
+        // Floats: thin sealed tubes that displace far more water than they
+        // weigh (about 50 and 200 kg of spare lift per metre when fully under).
+        (id: "steel-pontoon-s", name: "Steel pontoon, small", role: Beam,
+         choice: (material: Steel(S235), profile: Chs(d: 406.4, t: 8.0), joints: (Welded, Welded))),
+        (id: "steel-pontoon-l", name: "Steel pontoon, large", role: Beam,
+         choice: (material: Steel(S235), profile: Chs(d: 813.0, t: 16.0), joints: (Welded, Welded))),
         (id: "steel-rod", name: "Steel tie rod", role: Tie,
          choice: (material: Steel(S355), profile: Round(d: 16.0), joints: (Pinned, Pinned))),
         // Timber
@@ -49,6 +55,8 @@
             (name: "CHS 168.3x6.3", profile: Chs(d: 168.3, t: 6.3)),
             (name: "CHS 219.1x8", profile: Chs(d: 219.1, t: 8.0)),
             (name: "CHS 273x10", profile: Chs(d: 273.0, t: 10.0)),
+            (name: "CHS 406.4x8", profile: Chs(d: 406.4, t: 8.0)),
+            (name: "CHS 813x16", profile: Chs(d: 813.0, t: 16.0)),
          ],
          joints: [Welded, Bolted, Pinned]),
         (id: "steel-shs", name: "Steel square hollow section",
