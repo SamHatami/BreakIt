@@ -530,11 +530,43 @@ impl DynamicSim {
         self.bodies[node].force = force;
     }
 
+    /// Adds a lumped mass (kg) to a free node, such as a tank or a machine
+    /// the structure carries. It has weight under gravity and inertia in
+    /// the solve. Does nothing at a node whose translation is fixed.
+    pub fn add_point_mass(&mut self, node: usize, kg: f64) {
+        let b = &mut self.bodies[node];
+        if b.inv_mass > 0.0 && kg > 0.0 {
+            b.inv_mass = 1.0 / (1.0 / b.inv_mass + kg);
+        }
+    }
+
     pub fn time(&self) -> f64 {
         self.time
     }
     pub fn position(&self, node: usize) -> Vec3 {
         self.bodies[node].x
+    }
+    /// Linear velocity of a node, m/s.
+    pub fn velocity(&self, node: usize) -> Vec3 {
+        self.bodies[node].v
+    }
+    /// Angular velocity of a node, rad/s.
+    pub fn angular_velocity(&self, node: usize) -> Vec3 {
+        self.bodies[node].w
+    }
+    /// Lumped translational mass of a node, kg: half the mass of every member
+    /// meeting there. 0 for nodes whose translation is fixed by a support.
+    pub fn node_mass(&self, node: usize) -> f64 {
+        let im = self.bodies[node].inv_mass;
+        if im > 0.0 {
+            1.0 / im
+        } else {
+            0.0
+        }
+    }
+    /// Number of nodes.
+    pub fn node_count(&self) -> usize {
+        self.bodies.len()
     }
     pub fn displacement(&self, node: usize) -> Vec3 {
         self.bodies[node].x - self.bodies[node].x0

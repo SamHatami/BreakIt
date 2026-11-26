@@ -18,6 +18,10 @@
 //! rules and the per-member [`MemberDamage`] state renderers draw from;
 //! [`concrete`] the sectional analysis behind reinforced concrete.
 //!
+//! Scenario loads (wind, earthquakes, waves and floods, traffic, impacts)
+//! live in [`loads`]: models that turn a scenario into nodal forces every
+//! frame and report the state of the lab rig that produces them.
+//!
 //! Units are SI throughout (m, kg, s, N, Pa). The world is Y-up, matching Bevy.
 //! The crate has no game-engine dependency on purpose.
 
@@ -28,6 +32,7 @@ pub mod dynamics;
 pub mod frame;
 pub mod joint;
 pub mod linsolve;
+pub mod loads;
 pub mod material;
 pub mod model;
 pub mod section;
@@ -37,6 +42,7 @@ pub use contact::{Block, ContactEvent, Ground};
 pub use damage::{DamageState, MemberDamage};
 pub use dynamics::{BreakCause, BreakEvent, DynamicSim, SimConfig, Solver, SolverStats};
 pub use joint::{Joint, JointKind};
+pub use loads::{LoadCase, LoadKind, LoadSet, RigState, Window};
 pub use material::{Material, MaterialKind};
 pub use model::{Member, NodeLoad, Structure, Support};
 pub use section::{Section, Shape};
