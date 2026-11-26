@@ -42,7 +42,7 @@ mod beam;
 mod direct;
 mod ground;
 mod plastic;
-mod pool;
+pub(crate) mod pool;
 mod xpbd;
 
 use direct::DirectSystem;

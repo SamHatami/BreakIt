@@ -235,7 +235,26 @@ The step check (`objective`) already evaluates every live member's response at t
 
 Measured shares of other owners' code on a standing structure: ground contact 1 to 5% of a frame; a steady wind `LoadSet` about 10% (0.35 ms of 3.5 on tower 5x5x12, 0.6 of 5.7 on bridge 60), so the load models now count as a hot path.
 
-Not done yet: AVX-512 (`pulp` 0.21 needs nightly for it), threads for the block Cholesky factorisation, per-island solves for debris, and SIMD or threads in the load models. NEON is compiled from the same source but has only been run on x86-64 so far.
+### Block Cholesky in parts (`src/blockchol.rs`)
+
+A profile of a bridge 120 frame after the above (ms, one frame, elastic / hard collapse): assembly 5.2 / 5.2, triangular solves about 4.5 / little, factorisation 0.5 / 7.9, material commit 2.8 / 2.6, step check 1.7 / 1.6, the product with the matrix 1.4 / 0.1, node loops 1.9 / 1.7. The factorisation and the solves were the largest serial pieces.
+
+A left-looking factorisation is a chain: every column waits for earlier ones. So the node graph is cut first. `dissect` takes levels of a breadth-first search from one end of the structure, picks the narrowest level near each equal share as a separator, and orders each part by minimum degree with its separators in the graph as a clique, so the ordering leaves the nodes next to a separator for last. Parts then couple only through the separators, which are ordered last:
+
+- Factorisation: each part factorises its own columns and computes what they take off the separators' matrix into a buffer of its own; the separators are factorised afterwards on the calling thread, taking the buffers in part order.
+- Triangular solves and the product with the matrix: the same shape, with a small buffer per part for the separator rows.
+- The split is chosen from the structure alone (the cheapest of 2, 4 or 8 parts of at least 1,024 nodes on an assumed four cores, if it costs at most 25% more block products than no split), never from the machine. Results are therefore the same bit for bit on any number of threads, and a test and the gate check that.
+
+On a bridge a separator is 4 nodes. Two parts cost nothing extra; four parts cost 15% more block products because a middle part carries two separators. A 3D grid has no small separator (78 nodes for two parts of tower 8x8x16) and stays whole below 2,048 nodes.
+
+| Factorisation, ms | whole | parts | 1 thread | 2 threads | 4 threads |
+| --- | --- | --- | --- | --- | --- |
+| bridge 60 (2,416 nodes) | 0.61 | 2 | 0.58 | 0.32 | 0.33 |
+| bridge 120 (4,816 nodes) | 1.30 | 4 | 1.32 | 0.68 | 0.48 |
+
+One CG iteration on the stale factor (two triangular solves and a product) only goes from 0.57 to 0.44 ms on bridge 120. Each of its three threaded sections is about 0.1 ms of work, and by the time a sleeping pool worker has woken the calling thread has done most of it. Keeping helpers awake through a whole solve is the next step.
+
+Not done yet: AVX-512 (`pulp` 0.21 needs nightly for it), helpers that stay awake through a solve, threads for the material commit, per-island solves for debris, and SIMD or threads in the load models' member loops. NEON is compiled from the same source but has only been run on x86-64 so far.
 
 ## Next
 
