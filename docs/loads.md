@@ -10,7 +10,7 @@ engineering models of the real thing. All of it is Bevy-free and lives in
 | Shake table | `seismic.rs` | Uniform base excitation in the table frame: `−m a_g(t)` on every free node (exact for a rigid table). Synthetic Kanai-Tajimi / Clough-Penzien quakes scaled to a PGA, PEER `.AT2` records, sine and sweep tests. Zero-phase 0.1 Hz high-pass and drift removal give a bounded table displacement that matches the applied acceleration. Response spectrum for the brief |
 | Wave flume | `water.rs` | Morison inertia + drag on submerged member parts, buoyancy (sealed or flooded sections), flood level rise with a current, Airy waves with Wheeler stretching, solitary wave for a surge, piston paddle motion (Biésel transfer function, Goring for the solitary wave) |
 | Model vehicles | `traffic.rs` | Lanes resolved from a line in the scenario to the player's deck nodes, axle loads split between nodes, quarter-car suspension per axle (bounce, lift-off), braking force and load transfer, vehicles fall through gaps |
-| Crash / dropped object | `impact.rs` | Rigid impactor with a padded contact against nodes, integrated inside the frame and applied as the frame-averaged force (impulse conserved), contact events for sound and visuals |
+| Crash / dropped object | `impact.rs` | Rigid impactor with a padded contact against member surfaces (capsules of half the section depth), split to the end nodes, integrated inside the frame and applied as the frame-averaged force (impulse conserved), contact events for sound and visuals |
 
 ## Using it
 
@@ -34,6 +34,7 @@ loop {
   loads overshoot about 2x; use a ramp unless the shock is the point. Quakes
   carry their own envelope, so use ramp 0 there.
 - `LoadCase::intensity()` gives the headline number for the brief (m/s, g, m, kN, kJ).
+- Equipment that comes loose mid-run: `LoadSet::add_case(&structure, LoadCase::new(name, Window::new(now, None, 0.0), LoadKind::Impact(Impactor::released(name, mass, radius, position, velocity))))`. It falls, hits the deck or the floor, and the other cases keep their state.
 - `totals()` gives the net force per case each frame (base shear, total drag)
   for the chart recorder.
 - Serde derives on all scenario data behind the `serde` feature.

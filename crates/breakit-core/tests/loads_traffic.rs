@@ -429,3 +429,70 @@ fn dropped_weight_energy_includes_fall() {
     println!("impact speed {hit:.3} m/s vs {v:.3} m/s");
     assert!(rel_err(hit, v) < 0.02);
 }
+
+#[test]
+fn loose_equipment_added_mid_run_falls_and_hits_the_deck() {
+    use breakit_core::loads::impact::Impactor;
+    use breakit_core::{LoadCase, LoadKind, LoadSet, Window};
+    // Fixed-fixed horizontal beam at y = 1; a 200 kg unit comes loose 0.5 m
+    // above midspan at t = 0.5 s while drifting sideways at 0.3 m/s.
+    let mut s = Structure::new();
+    let ids = s.add_line(
+        Vec3::new(0.0, 1.0, 0.0),
+        Vec3::new(4.0, 1.0, 0.0),
+        8,
+        &Material::steel(),
+        &Section::rect(0.1, 0.2),
+    );
+    s.add_support(Support::fixed(ids[0]));
+    s.add_support(Support::fixed(ids[8]));
+    let cfg = SimConfig {
+        gravity: Vec3::zeros(),
+        plasticity: false,
+        ..Default::default()
+    };
+    let mut sim = DynamicSim::new(&s, cfg);
+    let mut loads = LoadSet::new(Vec::new());
+    for _ in 0..30 {
+        loads.step(&s, &mut sim, 1.0 / 60.0);
+    }
+    let t0 = sim.time();
+    let fall = Impactor::released(
+        "pump skid",
+        200.0,
+        0.15,
+        Vec3::new(2.0, 1.65, 0.0),
+        Vec3::new(0.3, 0.0, 0.0),
+    );
+    let i = loads.add_case(
+        &s,
+        LoadCase::new(
+            "pump skid",
+            Window::new(t0, None, 0.0),
+            LoadKind::Impact(fall),
+        ),
+    );
+    let (mut peak, mut late): (f64, f64) = (0.0, 0.0);
+    for f in 0..150 {
+        loads.step(&s, &mut sim, 1.0 / 60.0);
+        peak = peak.max(-loads.totals()[i].y);
+        if f >= 90 {
+            late += -loads.totals()[i].y / 60.0;
+        }
+    }
+    // Free fall of 0.5 m: 3.13 m/s at contact, so a clear downward hit.
+    assert!(peak > 200.0 * 9.81, "peak downward force {peak}");
+    // It lands on the beam (top at 1.1 m, unit radius 0.15 m), not the floor,
+    // and rests there with its weight carried by the beam.
+    let rig = loads.rig_state(sim.time()).impactors[0].clone();
+    assert!(
+        (rig.position.y - 1.25).abs() < 0.02,
+        "rests at {:?}",
+        rig.position
+    );
+    assert!(
+        (late - 200.0 * 9.81).abs() < 0.03 * 200.0 * 9.81,
+        "carried {late}"
+    );
+    assert!(sim.displacement(ids[4]).y < 0.0);
+}
