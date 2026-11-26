@@ -383,6 +383,28 @@ impl LoadSet {
         self.prepared = true;
     }
 
+    /// Add a case during a run (e.g. equipment that came loose and now falls
+    /// as an [`impact::Impactor`]) without resetting the others. Its window
+    /// times are scenario times like every other case. Returns its index in
+    /// [`Self::cases`] and [`Self::totals`].
+    pub fn add_case(&mut self, s: &Structure, mut case: LoadCase) -> usize {
+        if !self.prepared || self.forces.len() != s.nodes.len() {
+            self.cases.push(case);
+            self.prepare(s);
+            return self.cases.len() - 1;
+        }
+        match &mut case.kind {
+            LoadKind::Wind(w) => w.prepare(s),
+            LoadKind::Quake(q) => q.prepare(),
+            LoadKind::Water(w) => w.prepare(),
+            LoadKind::Traffic(t) => t.prepare(s),
+            LoadKind::Impact(i) => i.prepare(s),
+        }
+        self.cases.push(case);
+        self.totals.push(Vec3::zeros());
+        self.cases.len() - 1
+    }
+
     /// Compute every node's force for the frame starting at `sim.time()` and
     /// lasting `dt`, and set it on the simulation.
     pub fn apply(&mut self, s: &Structure, sim: &mut DynamicSim, dt: f64) {

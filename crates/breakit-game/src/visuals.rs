@@ -55,7 +55,7 @@ fn feed_renderer(
     let mut fresh = None;
     if *built_for != Some(key) || visual.is_none() {
         let styles: Vec<MemberStyle> = design.beams.iter().map(|b| b.kind.style()).collect();
-        fresh = Some(StructureVisual::new(&design.to_structure(), &styles));
+        fresh = Some(StructureVisual::jointed(&design.to_structure(), &styles));
         *built_for = Some(key);
     }
     let mut existing = visual;

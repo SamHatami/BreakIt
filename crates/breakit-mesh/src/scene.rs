@@ -17,7 +17,10 @@ use glam::{Quat, Vec3, Vec4};
 
 use crate::cut::cut_reach;
 use crate::debris::{DebrisConfig, DebrisWorld};
-use crate::fracture::{fracture, BreakInput, DebrisPiece, PiecePart, Rng};
+use crate::fracture::{
+    fracture, BreakInput, BurstKind, DebrisPiece, ParticleBurst, PiecePart, Rng,
+};
+use crate::joint::{member_part_pose, node_part_pose, JointLook, JointPose};
 use crate::particles::ParticlePool;
 use crate::pose::{flags, GpuMember, MemberPose};
 use crate::profile::Profile;
@@ -57,6 +60,40 @@ pub struct Remnant {
     omega: f32,
     /// True when the free end is end b of the pose.
     free_end_b: bool,
+    /// Member ends (a, b) whose joint hardware rides on this piece.
+    rides: [bool; 2],
+}
+
+/// Connection hardware at one member end. The list is fixed for the life of
+/// the scene; [`VisualScene::joint_states`] has this frame's poses.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct JointInstance {
+    pub member: usize,
+    /// 0 = end a, 1 = end b.
+    pub end: usize,
+    pub node: usize,
+    pub look: JointLook,
+    pub profile: Profile,
+    pub kind: MaterialKind,
+    /// Distance from the node's centre to where the member is cut, m.
+    pub back: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct JointState {
+    pub pose: JointPose,
+    /// The connection has failed: its fuse parts (pin, bolts, weld) are
+    /// gone and the member has come away from the node.
+    pub failed: bool,
+}
+
+/// The body of a node where joints meet.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Hub {
+    pub node: usize,
+    pub radius: f32,
+    /// A cast concrete block instead of a steel ball.
+    pub concrete: bool,
 }
 
 impl Remnant {
@@ -110,6 +147,17 @@ pub struct VisualScene {
     /// their ids in `debris`.
     pub spawned: Vec<(u64, DebrisPiece)>,
     pub time: f32,
+    /// Connection hardware, in member order. Empty unless the structure has
+    /// joints.
+    pub joints: Vec<JointInstance>,
+    /// This frame's pose of each of `joints`.
+    pub joint_states: Vec<JointState>,
+    pub hubs: Vec<Hub>,
+    /// This frame's position and rotation of each of `hubs`.
+    pub hub_poses: Vec<(Vec3, Quat)>,
+    /// World pose carrying each member's end a and end b hardware.
+    end_poses: Vec<[MemberPose; 2]>,
+    joint_failed: Vec<[bool; 2]>,
     broken: Vec<bool>,
     prev_positions: Vec<Vec3>,
 }
@@ -126,7 +174,42 @@ impl VisualScene {
             .collect();
         let mut particles = ParticlePool::new(config.max_particles);
         particles.ground_y = config.debris.ground_y;
+        let mut joints = Vec::new();
+        for (i, m) in structure.members.iter().enumerate() {
+            for (end, node) in [m.a, m.b].into_iter().enumerate() {
+                let look = structure.joint(i, end);
+                if look != JointLook::None {
+                    joints.push(JointInstance {
+                        member: i,
+                        end,
+                        node,
+                        look,
+                        profile: m.style.profile,
+                        kind: m.style.kind,
+                        back: structure.trim(i, end),
+                    });
+                }
+            }
+        }
+        let hubs: Vec<Hub> = (0..structure.node_radius.len())
+            .filter(|&n| structure.node_radius[n] > 0.0)
+            .map(|n| Hub {
+                node: n,
+                radius: structure.node_radius[n],
+                concrete: joints
+                    .iter()
+                    .filter(|j| j.node == n)
+                    .all(|j| j.look == JointLook::Monolithic),
+            })
+            .collect();
+        let straight = MemberPose::straight(Vec3::ZERO, Vec3::X);
         Self {
+            joint_states: Vec::with_capacity(joints.len()),
+            hub_poses: Vec::with_capacity(hubs.len()),
+            end_poses: vec![[straight; 2]; if joints.is_empty() { 0 } else { slots.len() }],
+            joint_failed: vec![[false; 2]; slots.len()],
+            joints,
+            hubs,
             broken: vec![false; slots.len()],
             gpu: vec![GpuMember::default(); slots.len()],
             slots,
@@ -165,9 +248,16 @@ impl VisualScene {
         }
 
         self.gpu.resize(self.slots.len(), GpuMember::default());
+        let track = !self.end_poses.is_empty();
         for i in 0..self.structure.members.len() {
             if !self.broken[i] {
-                self.gpu[i] = self.structure.gpu_member(i, frame, member_flags);
+                let pose = self.structure.pose(i, frame);
+                self.gpu[i] = self
+                    .structure
+                    .gpu_member_posed(i, &pose, frame, member_flags);
+                if track {
+                    self.end_poses[i] = [pose; 2];
+                }
             }
         }
         for r in &self.remnants {
@@ -175,6 +265,13 @@ impl VisualScene {
             let pose = r
                 .local_pose(age)
                 .transformed(node_rot(r.anchor), frame.node_positions[r.anchor]);
+            if track {
+                for end in 0..2 {
+                    if r.rides[end] {
+                        self.end_poses[r.member][end] = pose;
+                    }
+                }
+            }
             let st = &r.state;
             self.gpu[r.slot] = GpuMember {
                 pa: pose.pa.extend(pose.stub_a),
@@ -206,6 +303,25 @@ impl VisualScene {
             };
         }
 
+        self.joint_states.clear();
+        for j in &self.joints {
+            let vm = &self.structure.members[j.member];
+            let q = node_rot(j.node) * vm.rest_frame;
+            self.joint_states.push(JointState {
+                pose: JointPose {
+                    node: node_part_pose(frame.node_positions[j.node], q, j.end, j.back),
+                    member: member_part_pose(&self.end_poses[j.member][j.end], j.end, j.back),
+                },
+                failed: self.joint_failed[j.member][j.end],
+            });
+        }
+        self.hub_poses.clear();
+        self.hub_poses.extend(
+            self.hubs
+                .iter()
+                .map(|h| (frame.node_positions[h.node], node_rot(h.node))),
+        );
+
         self.debris.step(dt);
         self.particles.step(dt);
         self.prev_positions.clear();
@@ -233,7 +349,15 @@ impl VisualScene {
     fn break_member(&mut self, br: &VisualBreak, frame: &VisualFrame, dt: f32) {
         let i = br.member;
         self.broken[i] = true;
-        self.slots_revision += 1;
+        // A connection that lets go where hardware is drawn frees the whole
+        // member from that node; anywhere else the member itself tears.
+        let released = (br.cause == breakit_core::BreakCause::Connection)
+            .then_some(if br.position < 0.5 { 0 } else { 1 })
+            .filter(|&end| self.structure.joint(i, end) != JointLook::None);
+        if released.is_none() {
+            self.slots_revision += 1;
+        }
+        let (lo, hi) = self.structure.window(i);
         let vm = self.structure.members[i].clone();
         let (profile, kind) = (vm.style.profile, vm.style.kind);
         let pose = self.structure.pose(i, frame);
@@ -246,7 +370,9 @@ impl VisualScene {
 
         // Keep the whole fracture face inside the member.
         let margin = ((cut_reach(kind, depth) + 0.1 * depth) / l).min(0.45);
-        let sb = br.position.clamp(margin, 1.0 - margin);
+        let sb = br
+            .position
+            .clamp(margin.max(lo + 0.02), (1.0 - margin).min(hi - 0.02));
         // Concrete loses a crushed zone between its two faces.
         let gap = match kind {
             MaterialKind::Concrete | MaterialKind::ReinforcedConcrete => {
@@ -305,6 +431,55 @@ impl VisualScene {
         let (ring_b, omega_b) = ring_of(&mut rng, (1.0 - sb) * l, pose.tb);
         let inv_a = node_q(vm.a).inverse();
         let inv_b = node_q(vm.b).inverse();
+        if let Some(end) = released {
+            // One whole piece, hanging on by its other end.
+            self.joint_failed[i][end] = true;
+            let (anchor, relaxed, ring, omega, inv) = if end == 0 {
+                (vm.b, &relaxed_b, ring_b, omega_b, inv_b)
+            } else {
+                (vm.a, &relaxed_a, ring_a, omega_a, inv_a)
+            };
+            self.add_remnant(
+                Remnant {
+                    member: i,
+                    slot: 0,
+                    anchor,
+                    bent: to_local(&pose, anchor),
+                    relaxed: to_local(relaxed, anchor),
+                    clip: Vec4::new(lo, hi, 0.0, 0.0),
+                    profile,
+                    kind,
+                    flags: 0,
+                    seed: vm.seed,
+                    born: self.time,
+                    state,
+                    ring: inv * ring,
+                    omega: omega * 0.5,
+                    free_end_b: end == 1,
+                    rides: [true; 2],
+                },
+                Some(i),
+                false,
+            );
+            let (origin, axis) = if end == 0 {
+                (pose.pa, pose.ta)
+            } else {
+                (pose.pb, -pose.tb)
+            };
+            let kind = match kind {
+                MaterialKind::Timber => BurstKind::Splinters,
+                MaterialKind::Concrete | MaterialKind::ReinforcedConcrete => BurstKind::Dust,
+                _ => BurstKind::Sparks,
+            };
+            self.particles.emit(&ParticleBurst {
+                kind,
+                origin,
+                axis,
+                count: 24,
+                scale: size,
+            });
+            return;
+        }
         self.add_remnant(
             Remnant {
                 member: i,
@@ -312,7 +487,7 @@ impl VisualScene {
                 anchor: vm.a,
                 bent: to_local(&pose, vm.a),
                 relaxed: to_local(&relaxed_a, vm.a),
-                clip: Vec4::new(0.0, sb - gap, 0.0, 1.0),
+                clip: Vec4::new(lo, sb - gap, 0.0, 1.0),
                 profile,
                 kind,
                 flags: 0,
@@ -322,6 +497,7 @@ impl VisualScene {
                 ring: inv_a * ring_a,
                 omega: omega_a,
                 free_end_b: true,
+                rides: [true, false],
             },
             Some(i),
             true,
@@ -333,7 +509,7 @@ impl VisualScene {
                 anchor: vm.b,
                 bent: to_local(&pose, vm.b),
                 relaxed: to_local(&relaxed_b, vm.b),
-                clip: Vec4::new(sb + gap, 1.0, 1.0, 0.0),
+                clip: Vec4::new(sb + gap, hi, 1.0, 0.0),
                 profile,
                 kind,
                 flags: 0,
@@ -343,6 +519,7 @@ impl VisualScene {
                 ring: inv_b * ring_b,
                 omega: omega_b,
                 free_end_b: false,
+                rides: [false, true],
             },
             None,
             true,
@@ -399,6 +576,7 @@ impl VisualScene {
                             ring: Vec3::ZERO,
                             omega: 0.0,
                             free_end_b: true,
+                            rides: [false; 2],
                         },
                         None,
                         false,
@@ -441,8 +619,8 @@ mod tests {
 
     fn one_member(kind: MaterialKind) -> (VisualScene, VisualFrame) {
         let (a, b) = (Vec3::new(0.0, 3.0, 0.0), Vec3::new(4.0, 3.0, 0.0));
-        let structure = VisualStructure {
-            members: vec![VisualMember {
+        let structure = VisualStructure::from_members(
+            vec![VisualMember {
                 a: 0,
                 b: 1,
                 style: MemberStyle {
@@ -453,9 +631,8 @@ mod tests {
                 rest_length: 4.0,
                 seed: 0.42,
             }],
-            node_count: 2,
-            consumed_breaks: 0,
-        };
+            2,
+        );
         let frame = VisualFrame {
             node_positions: vec![a, b],
             node_rotations: vec![Quat::IDENTITY; 2],
@@ -568,5 +745,94 @@ mod tests {
         for g in &rc.gpu {
             assert!(g.pa.is_finite() && g.pb.is_finite() && g.ta.is_finite());
         }
+    }
+
+    fn jointed(looks: [JointLook; 2]) -> (VisualScene, VisualFrame) {
+        let (scene, frame) = one_member(MaterialKind::Steel);
+        let structure = scene.structure.with_joints(vec![looks]);
+        (VisualScene::new(structure, SceneConfig::default()), frame)
+    }
+
+    #[test]
+    fn joints_trim_the_member_and_sit_on_its_ends() {
+        let (mut scene, frame) = jointed([JointLook::Bolted, JointLook::None]);
+        scene.update(&frame, 1.0 / 60.0, 0);
+        assert_eq!((scene.joints.len(), scene.hubs.len()), (1, 1));
+        let back = scene.joints[0].back;
+        assert!(back > 0.15 && back < 0.3, "{back}");
+        // Only the jointed end is cut back.
+        let clip = scene.gpu[0].clip;
+        assert!((clip.x - back / 4.0).abs() < 1e-6 && clip.y == 1.0);
+        let j = scene.joint_states[0];
+        assert!(!j.failed);
+        let cut = Vec3::new(back, 3.0, 0.0);
+        assert!((j.pose.node.0 - cut).length() < 1e-5);
+        assert!((j.pose.member.0 - cut).length() < 1e-5);
+        assert_eq!(scene.hub_poses[0].0, Vec3::new(0.0, 3.0, 0.0));
+    }
+
+    #[test]
+    fn a_pin_lets_the_member_turn_in_the_node() {
+        let (mut scene, mut frame) = jointed([JointLook::Pinned, JointLook::Pinned]);
+        // Both nodes turn; a pinned-pinned member stays straight.
+        frame.node_rotations[0] = Quat::from_rotation_z(-0.2);
+        frame.node_rotations[1] = Quat::from_rotation_z(0.2);
+        scene.update(&frame, 1.0 / 60.0, 0);
+        let g = scene.gpu[0];
+        assert!((g.ta.truncate() - Vec3::X).length() < 1e-5);
+        assert!((g.tb.truncate() - Vec3::X).length() < 1e-5);
+        let j = scene.joint_states[0].pose;
+        assert!((j.node.1.angle_between(j.member.1) - 0.2).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_failed_connection_frees_the_member_whole() {
+        let (mut scene, mut frame) = jointed([JointLook::Bolted, JointLook::Welded]);
+        scene.update(&frame, 1.0 / 60.0, 0);
+        frame.breaks.push(VisualBreak {
+            member: 0,
+            position: 0.05,
+            cause: BreakCause::Connection,
+        });
+        frame.members[0].broken = true;
+        scene.update(&frame, 1.0 / 60.0, 0);
+        frame.breaks.clear();
+        // Still one slot, no fracture faces, nothing hidden.
+        assert_eq!((scene.slots.len(), scene.slots_revision), (1, 0));
+        let g = scene.gpu[0];
+        assert_eq!((g.clip.z, g.clip.w), (0.0, 0.0));
+        assert_eq!(g.info.w as u32 & flags::HIDDEN, 0);
+        assert!(scene.joint_states[0].failed && !scene.joint_states[1].failed);
+        // Node a moves away: its side of the joint goes with it, the member
+        // and its end plate stay with node b.
+        for _ in 0..240 {
+            scene.update(&frame, 1.0 / 60.0, 0);
+        }
+        let before = scene.joint_states[0].pose;
+        frame.node_positions[0] += Vec3::new(0.0, -1.0, 0.0);
+        scene.update(&frame, 1.0 / 60.0, 0);
+        let after = scene.joint_states[0].pose;
+        assert!((after.node.0 - before.node.0 - Vec3::new(0.0, -1.0, 0.0)).length() < 1e-5);
+        assert!((after.member.0 - before.member.0).length() < 1e-5);
+    }
+
+    #[test]
+    fn mid_span_breaks_keep_the_hardware_on_each_half() {
+        let (mut scene, mut frame) = jointed([JointLook::Bolted, JointLook::Bolted]);
+        scene.update(&frame, 1.0 / 60.0, 0);
+        break_it(&mut scene, &mut frame);
+        assert_eq!(scene.slots.len(), 2);
+        let (a, b) = (scene.gpu[0], scene.gpu[1]);
+        assert!(a.clip.x > 0.0 && b.clip.y < 1.0);
+        assert!(scene.joint_states.iter().all(|j| !j.failed));
+        for _ in 0..240 {
+            scene.update(&frame, 1.0 / 60.0, 0);
+        }
+        frame.node_positions[1] += Vec3::new(0.0, -0.5, 0.0);
+        let before = [scene.joint_states[0].pose, scene.joint_states[1].pose];
+        scene.update(&frame, 1.0 / 60.0, 0);
+        assert!((scene.joint_states[0].pose.member.0 - before[0].member.0).length() < 1e-5);
+        let moved = scene.joint_states[1].pose.member.0 - before[1].member.0;
+        assert!((moved - Vec3::new(0.0, -0.5, 0.0)).length() < 1e-4);
     }
 }

@@ -125,11 +125,7 @@ fn setup(
     }
     let node_count = 2 * members.len();
     commands.insert_resource(StructureVisual::from_scene(VisualScene::new(
-        VisualStructure {
-            members,
-            node_count,
-            consumed_breaks: 0,
-        },
+        VisualStructure::from_members(members, node_count),
         SceneConfig::default(),
     )));
     let centre = Vec3::new(
