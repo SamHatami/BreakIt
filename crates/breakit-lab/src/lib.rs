@@ -18,6 +18,7 @@ pub mod hall;
 pub mod look;
 pub mod palette;
 pub mod props;
+pub mod rigs;
 pub mod scenery;
 pub mod surface;
 pub mod table;
@@ -32,6 +33,7 @@ use bevy::prelude::*;
 pub use hall::HallSpec;
 pub use look::{AntiAlias, LabQuality, Look, HALL_LAYER};
 pub use palette::Mat;
+pub use rigs::{LabRigs, RigModels, RigSet, RigSlot};
 pub use scenery::{Anchor, Scenery};
 pub use surface::{LabMaterial, LabSurface, LabWater, SurfaceKind};
 pub use table::{Flat, Flume, PlayTable, Ravine, ShakeTable, TableInsert, TableTop, TableWater};
@@ -159,6 +161,7 @@ impl Plugin for LabPlugin {
             .init_resource::<GlobalAmbientLight>()
             .add_systems(Startup, spawn_hall);
         surface::build(app);
+        rigs::build(app);
         app.add_systems(
             Update,
             (
@@ -180,6 +183,11 @@ struct HallPart;
 
 #[derive(Component)]
 struct TablePart;
+
+/// A part of the table that rides the shake platform. `rigs::shake` moves
+/// it with the table motion.
+#[derive(Component)]
+pub struct ShakePlatform;
 
 /// A scenery material: procedural where the material has a look, plain
 /// `StandardMaterial` otherwise.
@@ -312,25 +320,30 @@ fn rebuild_table(
         commands.entity(e).despawn();
     }
     let t0 = Instant::now();
-    let scenery = table::build(&table, settings.floor_y());
+    let (scenery, platform) = table::build_parts(&table, settings.floor_y());
     stats.table_build_ms = t0.elapsed().as_secs_f32() * 1000.0;
-    stats.table_triangles = scenery.triangles();
-    stats.table_meshes = scenery.bufs.len();
+    stats.table_triangles = scenery.triangles() + platform.triangles();
+    stats.table_meshes = scenery.bufs.len() + platform.bufs.len();
     stats.table_name = table.insert.name().to_string();
-    for (mat, buf) in scenery.bufs {
-        if buf.is_empty() {
-            continue;
-        }
-        let material = maker.handle(&mut cache, mat, true);
-        let mut e = commands.spawn((
-            Mesh3d(meshes.add(buf.into_mesh())),
-            Transform::IDENTITY,
-            TablePart,
-            Name::new(format!("table {mat:?}")),
-        ));
-        insert_material(&mut e, material);
-        if palette::blended(mat) {
-            e.insert(NotShadowCaster);
+    for (riding, scenery) in [(false, scenery), (true, platform)] {
+        for (mat, buf) in scenery.bufs {
+            if buf.is_empty() {
+                continue;
+            }
+            let material = maker.handle(&mut cache, mat, true);
+            let mut e = commands.spawn((
+                Mesh3d(meshes.add(buf.into_mesh())),
+                Transform::IDENTITY,
+                TablePart,
+                Name::new(format!("table {mat:?}")),
+            ));
+            insert_material(&mut e, material);
+            if palette::blended(mat) {
+                e.insert(NotShadowCaster);
+            }
+            if riding {
+                e.insert(ShakePlatform);
+            }
         }
     }
 }

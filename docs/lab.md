@@ -121,8 +121,7 @@ The game's frame-time read-out (top right, F3 toggles) shows the average and wor
 
 ## Open points
 
-- The load rigs (fan wall, shake platform actuators, flume paddle on the table, traffic carts) from the concept canvas are not built yet. They belong next to the scenarios that drive them; build them in lab metres and scale by `model_scale`.
-- To move the table with a shake rig, expose a table root entity (today the table parts are separate entities at the origin).
+- The load rigs and the rig park are in `rigs/` and have their own page, `docs/rigs.md`. The shake platform is built into `TableTop::platform` and spawned as `ShakePlatform` parts, which the shake rig moves.
 - Looks were tuned on a software rasteriser; exposure, lamp intensity and the f-number want a pass on a real GPU.
 - The reflection map is taken from the middle of the table and has no parallax: reflections are right in direction, not in position. Good enough for curved steel and rippled water; a large flat mirror would give it away.
 - Ambient occlusion can speckle faintly on far walls when the camera is focused close and the background is sharp (depth of field off). With depth of field on, the blur hides it.

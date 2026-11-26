@@ -128,6 +128,9 @@ pub struct TableTop<'a> {
     pub out: &'a mut Scenery,
     /// False when the water is drawn elsewhere: leave the water surface out.
     pub still_water: bool,
+    /// What rides the shake platform: drawn apart from the rest so the
+    /// shake rig can move it (see `rigs::shake`). Empty for most inserts.
+    pub platform: Scenery,
 }
 
 impl TableTop<'_> {
@@ -213,6 +216,13 @@ impl TableTop<'_> {
 
 /// Builds the whole table: frame, legs down to `floor_y`, and the insert.
 pub fn build(table: &PlayTable, floor_y: f32) -> Scenery {
+    let (mut out, platform) = build_parts(table, floor_y);
+    out.merge(platform);
+    out
+}
+
+/// The table as what stands still and what rides the shake platform.
+pub fn build_parts(table: &PlayTable, floor_y: f32) -> (Scenery, Scenery) {
     let mut out = Scenery::default();
     let half = table.size * 0.5;
     frame(&mut out, half, floor_y);
@@ -220,9 +230,11 @@ pub fn build(table: &PlayTable, floor_y: f32) -> Scenery {
         half,
         out: &mut out,
         still_water: table.still_water,
+        platform: Scenery::default(),
     };
     table.insert.build(&mut top);
-    out
+    let platform = top.platform;
+    (out, platform)
 }
 
 fn frame(s: &mut Scenery, half: Vec2, floor_y: f32) {
@@ -519,11 +531,11 @@ impl TableInsert for Flume {
                 Vec3::new(x1, y(x1), -w),
             ]);
         }
-        // A paddle housing at the -x end.
-        top.out.m(Mat::MachineBlue).aabb(
-            Vec3::new(-h.x, wl - 0.5, -w),
-            Vec3::new(-h.x + PADDLE_HOUSING, 0.6, w),
-        );
+        // A bulkhead at the -x end, behind the paddle (`rigs::paddle`), whose
+        // plate rests with its face at -h.x + 0.4.
+        top.out
+            .m(Mat::MachineBlue)
+            .aabb(Vec3::new(-h.x, wl - 0.5, -w), Vec3::new(-h.x + 0.2, 0.6, w));
     }
 }
 
@@ -554,20 +566,26 @@ impl TableInsert for ShakeTable {
         top.surface(Vec2::new(-h.x, o), Vec2::new(h.x, h.y), 0.0);
         top.surface(Vec2::new(-h.x, -o), Vec2::new(-o, o), 0.0);
         top.surface(Vec2::new(o, -o), Vec2::new(h.x, o), 0.0);
-        // Pit and platform.
+        // Pit, and the platform that rides the table motion.
         top.out
             .m(Mat::TableDark)
             .aabb(Vec3::new(-o, -BASIN_DEPTH, -o), Vec3::new(o, -1.0, o));
-        top.out
+        let mut plat = TableTop {
+            half: top.half,
+            out: &mut top.platform,
+            still_water: top.still_water,
+            platform: Scenery::default(),
+        };
+        plat.out
             .m(Mat::MachineBlue)
             .aabb(Vec3::new(-p, -0.6, -p), Vec3::new(p, 0.0, p));
-        top.grid(Vec2::splat(-p), Vec2::splat(p), 0.0);
+        plat.grid(Vec2::splat(-p), Vec2::splat(p), 0.0);
         // Bolt holes on a 1 m pitch.
         let mut x = -p + 0.5;
         while x < p {
             let mut z = -p + 0.5;
             while z < p {
-                top.out.m(Mat::TableDark).disc(
+                plat.out.m(Mat::TableDark).disc(
                     Vec3::new(x + 0.25, 0.006, z + 0.25),
                     Vec3::Y,
                     0.07,
@@ -577,10 +595,10 @@ impl TableInsert for ShakeTable {
             }
             x += 1.0;
         }
-        // Actuator rods under the edges.
+        // Bearing pads under the edges.
         for (dx, dz) in [(1.0f32, 0.0f32), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
             let c = Vec3::new(dx * (p - 0.4), -0.6, dz * (p - 0.4));
-            top.out
+            top.platform
                 .m(Mat::Stainless)
                 .cylinder(c, c - Vec3::Y * 0.4, 0.12, 10, false);
         }

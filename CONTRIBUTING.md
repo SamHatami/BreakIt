@@ -80,6 +80,7 @@ minimal and say so in the PR description, or ask that area's owner to do it.
 | Playground | `crates/breakit-playground/`, `breakit-game/src/playground/` | `docs/playground.md` |
 | Lab and play tables | `crates/breakit-lab/` | `docs/lab.md` |
 | Water | `crates/breakit-water/`, `crates/breakit-water-render/`, `breakit-game/src/water.rs` | `docs/water.md` |
+| Load rigs | `breakit-lab/src/rigs/`, `breakit-game/src/rigs.rs` | `docs/rigs.md` |
 | Game UI and flow | `breakit-game/src/ui/`, `flow.rs`, `history.rs` | `docs/game-ui.md` |
 | Game shell | the rest of `breakit-game/src/` | `README.md` |
 
