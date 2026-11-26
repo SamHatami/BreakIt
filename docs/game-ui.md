@@ -65,8 +65,10 @@ and clicks (`ui/pointer.rs`) write the same actions.
 `UiTheme` whenever the theme or the node changes.
 
 A new look is a new `UiTheme` preset: colours per swatch, text sizes per
-role, corner radius. Two exist, `drafting` (paper and ink) and `slate`
-(dark, cyan). F10 cycles them; `BREAKIT_THEME=1` starts on the second.
+role, corner radius. Four exist to compare directions: `drafting` (paper
+and ink), `slate` (dark, rounded, cyan), `blueprint` (cyanotype, white
+linework) and `hangar` (black plates, heavy borders, hazard yellow). F10
+cycles them; `BREAKIT_THEME=<n>` starts on preset n.
 
 The stress ramp in the UI (blue, amber, orange, red at 50/80/100%) is the
 colour-blind-safe one from the canvas. The member shader in

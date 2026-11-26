@@ -162,6 +162,66 @@ impl UiTheme {
         }
     }
 
+    /// "Blueprint": cyanotype panels, white linework, hairline rules,
+    /// square corners. Reads like the engineer's own drawing set.
+    pub fn blueprint() -> Self {
+        Self {
+            name: "Blueprint",
+            panel: hex(0x163A5F),
+            raised: hex(0x1D4A78),
+            ink: hex(0xF2F6FA),
+            muted: hex(0xA9C1DA),
+            rule: hex(0x3E6893),
+            accent: hex(0xF2F6FA),
+            on_accent: hex(0x163A5F),
+            fail: hex(0xFF7A66),
+            on_fail: hex(0x1A0D0A),
+            ok: hex(0xF2F6FA),
+            instrument: hex(0x0F2A45),
+            chart: hex(0x12324F),
+            instrument_ink: hex(0xF2F6FA),
+            instrument_muted: hex(0x8FAAC6),
+            scene_text: hex(0xE4ECF4),
+            scrim: Color::srgba(0.03, 0.10, 0.18, 0.62),
+            ramp: RAMP,
+            thin: 1.0,
+            strong: 1.0,
+            radius: 0.0,
+            sizes: [24.0, 15.0, 13.0, 10.0, 12.0, 28.0, 30.0],
+            font: None,
+        }
+    }
+
+    /// "Hangar": the lab's own signage. Black plates, heavy borders,
+    /// hazard-yellow accent, larger type for reading at a glance.
+    pub fn hangar() -> Self {
+        Self {
+            name: "Hangar",
+            panel: hex(0x111111),
+            raised: hex(0x1E1E1E),
+            ink: hex(0xF5F5F0),
+            muted: hex(0xA8A8A0),
+            rule: hex(0x3A3A36),
+            accent: hex(0xFFC400),
+            on_accent: hex(0x111111),
+            fail: hex(0xFF4D2E),
+            on_fail: hex(0x111111),
+            ok: hex(0xF5F5F0),
+            instrument: hex(0x0A0A0A),
+            chart: hex(0x171717),
+            instrument_ink: hex(0xFFC400),
+            instrument_muted: hex(0x9A9A92),
+            scene_text: hex(0xF5F5F0),
+            scrim: Color::srgba(0.0, 0.0, 0.0, 0.7),
+            ramp: RAMP,
+            thin: 2.0,
+            strong: 3.0,
+            radius: 2.0,
+            sizes: [26.0, 16.0, 13.0, 11.0, 13.0, 30.0, 34.0],
+            font: None,
+        }
+    }
+
     pub fn color(&self, s: Swatch) -> Color {
         match s {
             Swatch::Panel => self.panel,
@@ -240,7 +300,7 @@ pub struct Themes {
 impl Default for Themes {
     fn default() -> Self {
         Self {
-            presets: vec![UiTheme::drafting(), UiTheme::slate()],
+            presets: vec![UiTheme::drafting(), UiTheme::slate(), UiTheme::blueprint(), UiTheme::hangar()],
             active: 0,
         }
     }
