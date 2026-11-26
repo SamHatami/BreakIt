@@ -149,10 +149,16 @@ fn cases(size: &str) -> Vec<Case> {
 
 /// Solver configurations under test: (name, config).
 fn configs() -> Vec<(&'static str, SimConfig)> {
+    let tol = |t: f64| SimConfig {
+        linear_tolerance: t,
+        ..Default::default()
+    };
     vec![
         ("direct", SimConfig::default()),
+        ("tol-1e-4", tol(1e-4)),
+        ("tol-1e-3", tol(1e-3)),
         (
-            "direct-fresh",
+            "fresh",
             SimConfig {
                 refactor_every: 1,
                 ..Default::default()
@@ -195,7 +201,7 @@ fn main() {
     let dt = 1.0 / 60.0;
 
     println!(
-        "| structure | members | dofs | solver | elastic ms/frame (mean / p99) | refactor % / CG iters per solve | probe disp mm | static mm | collapse ms/frame (mean / p99 / max) | refactor % / CG iters per solve | breaks |"
+        "| structure | members | dofs | solver | elastic ms/frame (mean / p99) | refactor % / CG iters per solve / ms assembly + factor + solve | probe disp mm | static mm | collapse ms/frame (mean / p99 / max) | refactor % / CG iters per solve / ms assembly + factor + solve | breaks |"
     );
     println!("|---|---|---|---|---|---|---|---|---|---|---|");
     for size in sizes.split(',') {
@@ -257,11 +263,15 @@ fn main() {
                 }
                 let co = timing(t);
                 let st_co = sim.solver_stats();
-                let work = |st: linsolve::Stats| {
+                let work = |st: linsolve::Stats, frames: usize| {
+                    let ms = |s: f64| s * 1e3 / frames as f64;
                     format!(
-                        "{:.1}% / {:.2}",
+                        "{:.1}% / {:.2} / {:.2} + {:.2} + {:.2}",
                         100.0 * st.factorizations as f64 / st.solves.max(1) as f64,
-                        st.cg_iterations as f64 / st.solves.max(1) as f64
+                        st.cg_iterations as f64 / st.solves.max(1) as f64,
+                        ms(st.assembly_seconds),
+                        ms(st.factor_seconds),
+                        ms(st.solve_seconds),
                     )
                 };
                 println!(
@@ -272,13 +282,13 @@ fn main() {
                     name,
                     el.mean,
                     el.p99,
-                    work(st_el),
+                    work(st_el, frames_elastic),
                     disp,
                     stat.map_or("-".into(), |v| format!("{v:.4}")),
                     co.mean,
                     co.p99,
                     co.max,
-                    work(st_co),
+                    work(st_co, frames_collapse),
                     sim.break_events().len(),
                 );
             }

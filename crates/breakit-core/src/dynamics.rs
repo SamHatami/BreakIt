@@ -60,9 +60,10 @@ pub struct SimConfig {
     /// factorisation only preconditions conjugate gradients on the current
     /// matrix, so the answer is the current system's to this tolerance.
     pub linear_tolerance: f64,
-    /// Direct solver only: refactorise once a solve needs more conjugate
-    /// gradient iterations than this.
-    pub refactor_after_iters: usize,
+    /// Direct solver only: the cost of a factorisation in conjugate gradient
+    /// iterations. A new factorisation is computed once the old one has cost
+    /// that many extra iterations.
+    pub refactor_cost: usize,
     pub gravity: Vec3,
     /// Linear velocity damping, 1/s. Keeps collapses readable and lets
     /// structures settle.
@@ -79,7 +80,7 @@ impl Default for SimConfig {
             iterations: 1,
             refactor_every: 0,
             linear_tolerance: 1e-6,
-            refactor_after_iters: 4,
+            refactor_cost: 10,
             gravity: Vec3::new(0.0, -9.81, 0.0),
             damping: 0.5,
             plasticity: true,
@@ -495,6 +496,7 @@ impl DynamicSim {
             },
         };
         let ih2 = 1.0 / (h * h);
+        let t0 = std::time::Instant::now();
         sys.lin.clear();
         for (bi, b) in self.bodies.iter().enumerate() {
             if let Some(d) = sys.trans[bi] {
@@ -542,10 +544,11 @@ impl DynamicSim {
             }
             sys.lin.add_block(i, &kb);
         }
+        sys.lin.stats.assembly_seconds += t0.elapsed().as_secs_f64();
         let policy = Policy {
             tolerance: self.config.linear_tolerance,
-            refactor_after_iters: self.config.refactor_after_iters,
-            max_iters: 4 * self.config.refactor_after_iters.max(2),
+            refactor_cost: self.config.refactor_cost,
+            max_iters: 2 * self.config.refactor_cost.max(4),
             max_age: self.config.refactor_every,
         };
         if sys.lin.solve(&mut sys.rhs, &mut sys.delta, &policy) {

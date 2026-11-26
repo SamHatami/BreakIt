@@ -41,11 +41,13 @@ const ABSENT: u32 = u32::MAX;
 /// How hard the solver works per call.
 #[derive(Clone, Copy, Debug)]
 pub struct Policy {
-    /// CG stops when the preconditioned residual norm has dropped by this factor.
+    /// CG stops when the residual norm has dropped below this fraction of
+    /// the right-hand side's norm.
     pub tolerance: f64,
-    /// Refactorise before the next solve once a solve needs more CG
-    /// iterations than this.
-    pub refactor_after_iters: usize,
+    /// Cost of a numeric factorisation, in CG iterations. Once the extra
+    /// iterations spent because the factorisation is old add up to this, a
+    /// new one is computed before the next solve.
+    pub refactor_cost: usize,
     /// Give up on CG at this many iterations: refactorise and solve directly.
     pub max_iters: usize,
     /// Refactorise at least every this many solves (0 = no limit).
@@ -60,6 +62,11 @@ pub struct Stats {
     pub cg_iterations: usize,
     /// Solves where CG hit `max_iters` and a direct solve took over.
     pub fallbacks: usize,
+    /// Seconds spent in numeric factorisation, in solves (CG and triangular
+    /// solves) and, filled in by the caller, in assembling the matrix.
+    pub factor_seconds: f64,
+    pub solve_seconds: f64,
+    pub assembly_seconds: f64,
 }
 
 pub struct LinSolver {
@@ -74,6 +81,10 @@ pub struct LinSolver {
     has_factor: bool,
     want_factor: bool,
     age: usize,
+    /// CG iterations of the first solve after the last factorisation, and
+    /// the iterations spent beyond that since.
+    base_iters: usize,
+    wasted_iters: usize,
     stack: MemBuffer,
     r: Vec<f64>,
     z: Vec<f64>,
@@ -145,6 +156,8 @@ impl LinSolver {
             has_factor: false,
             want_factor: true,
             age: 0,
+            base_iters: 0,
+            wasted_iters: 0,
             r: vec![0.0; n],
             z: vec![0.0; n],
             p: vec![0.0; n],
@@ -188,6 +201,15 @@ impl LinSolver {
     /// `b` is overwritten with scratch data. Returns false if the matrix is
     /// not positive definite.
     pub fn solve(&mut self, b: &mut [f64], x: &mut [f64], policy: &Policy) -> bool {
+        let t0 = std::time::Instant::now();
+        let f0 = self.stats.factor_seconds;
+        let ok = self.solve_inner(b, x, policy);
+        self.stats.solve_seconds +=
+            t0.elapsed().as_secs_f64() - (self.stats.factor_seconds - f0);
+        ok
+    }
+
+    fn solve_inner(&mut self, b: &mut [f64], x: &mut [f64], policy: &Policy) -> bool {
         self.stats.solves += 1;
         if self.n == 0 {
             return true;
@@ -209,7 +231,11 @@ impl LinSolver {
         self.stats.cg_iterations += iters.unwrap_or(policy.max_iters);
         match iters {
             Some(k) => {
-                if k > policy.refactor_after_iters {
+                if self.age == 2 {
+                    self.base_iters = k;
+                }
+                self.wasted_iters += k.saturating_sub(self.base_iters);
+                if self.wasted_iters >= policy.refactor_cost {
                     self.want_factor = true;
                 }
                 true
@@ -236,6 +262,7 @@ impl LinSolver {
 
     fn factor(&mut self) -> bool {
         self.stats.factorizations += 1;
+        let t0 = std::time::Instant::now();
         let stack = MemStack::new(&mut self.stack);
         let ok = self
             .symbolic
@@ -249,8 +276,10 @@ impl LinSolver {
                 Default::default(),
             )
             .is_ok();
+        self.stats.factor_seconds += t0.elapsed().as_secs_f64();
         self.has_factor = ok;
         self.want_factor = !ok;
+        self.wasted_iters = 0;
         ok
     }
 
@@ -299,16 +328,23 @@ impl LinSolver {
         );
         x.fill(0.0);
         r.copy_from_slice(b);
-        z.copy_from_slice(&r);
-        self.apply_factor(&mut z);
-        p.copy_from_slice(&z);
-        let mut rz = dot(&r, &z);
-        let target = rz * policy.tolerance * policy.tolerance;
-        let mut result = None;
-        if rz <= 0.0 {
-            result = Some(0);
-        } else {
+        let target = dot(b, b) * policy.tolerance * policy.tolerance;
+        let mut result = if target > 0.0 { None } else { Some(0) };
+        let mut rz = 0.0;
+        if result.is_none() {
             for k in 1..=policy.max_iters {
+                z.copy_from_slice(&r);
+                self.apply_factor(&mut z);
+                let rz_new = dot(&r, &z);
+                if k == 1 {
+                    p.copy_from_slice(&z);
+                } else {
+                    let beta = rz_new / rz;
+                    for i in 0..self.n {
+                        p[i] = z[i] + beta * p[i];
+                    }
+                }
+                rz = rz_new;
                 self.matvec(&p, &mut ap);
                 let pap = dot(&p, &ap);
                 if pap <= 0.0 || !pap.is_finite() {
@@ -319,17 +355,9 @@ impl LinSolver {
                     x[i] += alpha * p[i];
                     r[i] -= alpha * ap[i];
                 }
-                z.copy_from_slice(&r);
-                self.apply_factor(&mut z);
-                let rz_new = dot(&r, &z);
-                if rz_new <= target {
+                if dot(&r, &r) <= target {
                     result = Some(k);
                     break;
-                }
-                let beta = rz_new / rz;
-                rz = rz_new;
-                for i in 0..self.n {
-                    p[i] = z[i] + beta * p[i];
                 }
             }
         }
