@@ -184,7 +184,38 @@ fn cases(size: &str) -> Vec<Case> {
 
 /// Solver configurations under test: (name, config).
 fn configs() -> Vec<(&'static str, SimConfig)> {
-    vec![("direct", SimConfig::default())]
+    let sub = |substeps: usize| SimConfig {
+        substeps,
+        ..Default::default()
+    };
+    // The solver before the step check and implicit plasticity existed.
+    let old = |substeps: usize| SimConfig {
+        step_check: false,
+        implicit_plasticity: false,
+        ..sub(substeps)
+    };
+    vec![
+        ("16 old", old(16)),
+        (
+            "16 check only",
+            SimConfig {
+                step_check: true,
+                ..old(16)
+            },
+        ),
+        (
+            "4 check only",
+            SimConfig {
+                step_check: true,
+                ..old(4)
+            },
+        ),
+        ("16", sub(16)),
+        ("8", sub(8)),
+        ("4", sub(4)),
+        ("2", sub(2)),
+        ("1", sub(1)),
+    ]
 }
 
 struct Timing {
@@ -221,9 +252,9 @@ fn main() {
     let dt = 1.0 / 60.0;
 
     println!(
-        "| structure | members | dofs | solver | elastic ms/frame (mean / p99) | probe disp mm | static mm | collapse ms/frame (mean / p99 / max) | breaks |"
+        "| structure | members | dofs | solver | elastic ms/frame (mean / p99) | probe disp mm | static mm | collapse ms/frame (mean / p99 / max) | breaks | first break s | factor / reject / backtrack per frame |"
     );
-    println!("|---|---|---|---|---|---|---|---|---|");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|");
     for size in sizes.split(',') {
         for case in cases(size) {
             let s = &case.s;
@@ -281,8 +312,9 @@ fn main() {
                     t.push(t0.elapsed().as_secs_f64() * 1e3);
                 }
                 let co = timing(t);
+                let st = sim.solver_stats();
                 println!(
-                    "| {} | {} | {} | {} | {:.2} / {:.2} | {:.4} | {} | {:.2} / {:.2} / {:.2} | {} |",
+                    "| {} | {} | {} | {} | {:.2} / {:.2} | {:.4} | {} | {:.2} / {:.2} / {:.2} | {} | {} | {:.2} / {:.2} / {:.2} |",
                     case.name,
                     s.members.len(),
                     s.nodes.len() * 6,
@@ -295,6 +327,12 @@ fn main() {
                     co.p99,
                     co.max,
                     sim.break_events().len(),
+                    sim.break_events()
+                        .first()
+                        .map_or("-".into(), |e| format!("{:.3}", e.time)),
+                    st.factorizations as f64 / frames_collapse as f64,
+                    st.stale_rejects as f64 / frames_collapse as f64,
+                    st.backtracks as f64 / frames_collapse as f64,
                 );
             }
         }

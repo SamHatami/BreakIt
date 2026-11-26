@@ -58,6 +58,17 @@ pub struct SimConfig {
     /// Direct solver only: check every step for sufficient decrease of the
     /// substep objective; refactorise early or shorten the step when it fails.
     pub step_check: bool,
+    /// Direct solver only: relaxation time τ (s) of plastic flow. Stress above
+    /// yield decays as exp(−t/τ), so a member overloaded by ΔN stretches
+    /// plastically at ΔN / (k τ) whatever the substep count. The default,
+    /// 1/960 s, is the rate the solver used to have at 16 substeps, when it
+    /// returned all overstress to the yield surface once per substep.
+    pub plastic_relaxation: f64,
+    /// Direct solver only: let members yield inside the substep solve (with
+    /// their tangent stiffness in the matrix) instead of solving elastically
+    /// and returning the overstress afterwards. The old way limits plastic
+    /// flow to one return per substep, so it slows down with fewer substeps.
+    pub implicit_plasticity: bool,
     pub gravity: Vec3,
     /// Linear velocity damping, 1/s. Keeps collapses readable and lets
     /// structures settle.
@@ -80,6 +91,8 @@ impl Default for SimConfig {
             iterations: env("BK_IT", 1),
             refactor_every: env("BK_REF", 4),
             step_check: env("BK_CHECK", 1) != 0,
+            plastic_relaxation: 1.0 / 960.0,
+            implicit_plasticity: env("BK_IMPL", 1) != 0,
             gravity: Vec3::new(0.0, -9.81, 0.0),
             damping: 0.5,
             plasticity: true,
@@ -137,6 +150,11 @@ struct Beam {
     n_yield: f64,
     /// Plastic moments about local y and z.
     m_plastic: [f64; 2],
+    /// Plastic moments reduced by the axial force of the previous substep,
+    /// held fixed while a substep is solved.
+    mp_now: [f64; 2],
+    /// Which yield conditions were active at the last material update.
+    yield_mask: u8,
     plastic_elongation: f64,
     /// Plastic hinge rotations [axis][end], axis 0 = y, 1 = z.
     hinge: [[f64; 2]; 2],
@@ -172,6 +190,129 @@ pub struct DynamicSim {
     time: f64,
     direct: Option<direct::Cache>,
     stats: SolverStats,
+    /// A member started or stopped yielding, so its tangent stiffness in the
+    /// factorised matrix is out of date.
+    yield_changed: bool,
+}
+
+/// Elastic deformations of a beam, net of its committed plastic deformation.
+struct Strains {
+    axial: f64,
+    twist: f64,
+    /// End rotations [axis][end].
+    th: [[f64; 2]; 2],
+}
+
+/// Internal forces of a beam for given strains, after the plastic return of
+/// this substep, with their tangent stiffness and incremental energy.
+struct Response {
+    n: f64,
+    kt_axial: f64,
+    dp_axial: f64,
+    /// End moments, tangent and plastic rotation increments per axis.
+    m: [[f64; 2]; 2],
+    kt: [[[f64; 2]; 2]; 2],
+    dp: [[f64; 2]; 2],
+    energy: f64,
+    yield_mask: u8,
+}
+
+/// Viscoplastic return of one force: minimises over the plastic increment dp
+/// ½ k (c − dp)² + fy |dp| + ½ k r dp², with r = τ/h. Returns
+/// (force, tangent stiffness, energy, dp).
+fn return_1d(k: f64, c: f64, fy: f64, r: f64) -> (f64, f64, f64, f64) {
+    let trial = k * c;
+    let excess = trial.abs() - fy;
+    if excess.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+        return (trial, k, 0.5 * k * c * c, 0.0);
+    }
+    let dp = excess / (k * (1.0 + r)) * trial.signum();
+    let e = c - dp;
+    (
+        k * e,
+        k * r / (1.0 + r),
+        0.5 * k * e * e + fy * dp.abs() + 0.5 * k * r * dp * dp,
+        dp,
+    )
+}
+
+/// The same for the two end moments of one bending plane, which are coupled:
+/// M = [[k4, k2], [k2, k4]] (θ − dp). Returns (M, tangent, energy, dp).
+#[allow(clippy::type_complexity)]
+fn return_bend(
+    k4: f64,
+    k2: f64,
+    th: [f64; 2],
+    mp: f64,
+    r: f64,
+) -> ([f64; 2], [[f64; 2]; 2], f64, [f64; 2]) {
+    let trial = [k4 * th[0] + k2 * th[1], k2 * th[0] + k4 * th[1]];
+    let mut act = [trial[0].abs() > mp, trial[1].abs() > mp];
+    let mut sg = [trial[0].signum(), trial[1].signum()];
+    let kd = k4 * (1.0 + r);
+    let mut dp = [0.0; 2];
+    let mut m = trial;
+    if act[0] || act[1] {
+        for _ in 0..4 {
+            let f = [trial[0] - mp * sg[0], trial[1] - mp * sg[1]];
+            dp = match act {
+                [true, true] => {
+                    let det = kd * kd - k2 * k2;
+                    [(kd * f[0] - k2 * f[1]) / det, (kd * f[1] - k2 * f[0]) / det]
+                }
+                [true, false] => [f[0] / kd, 0.0],
+                [false, true] => [0.0, f[1] / kd],
+                [false, false] => [0.0; 2],
+            };
+            m = [
+                trial[0] - k4 * dp[0] - k2 * dp[1],
+                trial[1] - k2 * dp[0] - k4 * dp[1],
+            ];
+            let mut changed = false;
+            for i in 0..2 {
+                if act[i] && dp[i] * sg[i] < 0.0 {
+                    act[i] = false;
+                    changed = true;
+                } else if !act[i] && m[i].abs() > mp * (1.0 + 1e-12) {
+                    act[i] = true;
+                    sg[i] = m[i].signum();
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+    // Tangent K − K_A (K_AA + η)⁻¹ K_Aᵀ over the active ends A.
+    let kt = match act {
+        [true, true] => {
+            let det = kd * kd - k2 * k2;
+            // K (K + ηI)⁻¹ ηI, with η = k4 r.
+            let eta = k4 * r;
+            let inv = [[kd / det, -k2 / det], [-k2 / det, kd / det]];
+            let a = eta * (k4 * inv[0][0] + k2 * inv[1][0]);
+            let b = eta * (k4 * inv[0][1] + k2 * inv[1][1]);
+            [[a, b], [b, a]]
+        }
+        [true, false] => [
+            [k4 - k4 * k4 / kd, k2 - k4 * k2 / kd],
+            [k2 - k4 * k2 / kd, k4 - k2 * k2 / kd],
+        ],
+        [false, true] => [
+            [k4 - k2 * k2 / kd, k2 - k4 * k2 / kd],
+            [k2 - k4 * k2 / kd, k4 - k4 * k4 / kd],
+        ],
+        [false, false] => [[k4, k2], [k2, k4]],
+    };
+    let e = [th[0] - dp[0], th[1] - dp[1]];
+    let mut energy = 0.5 * (k4 * (e[0] * e[0] + e[1] * e[1]) + 2.0 * k2 * e[0] * e[1]);
+    if act[0] || act[1] {
+        // Not when elastic: mp may be infinite there.
+        energy += mp * (dp[0].abs() + dp[1].abs())
+            + 0.5 * k4 * r * (dp[0] * dp[0] + dp[1] * dp[1]);
+    }
+    (m, kt, energy, dp)
 }
 
 /// Work counters of the direct solver since the simulation was created.
@@ -224,6 +365,8 @@ impl DynamicSim {
                 ei_l: [e * sec.iy / l, e * sec.iz / l],
                 n_yield: fy * sec.area,
                 m_plastic: [fy * sec.zy, fy * sec.zz],
+                mp_now: [fy * sec.zy, fy * sec.zz],
+                yield_mask: 0,
                 plastic_elongation: 0.0,
                 hinge: [[0.0; 2]; 2],
                 plastic_strain: 0.0,
@@ -275,6 +418,7 @@ impl DynamicSim {
             time: 0.0,
             direct: None,
             stats: SolverStats::default(),
+            yield_changed: false,
         }
     }
 
@@ -393,7 +537,7 @@ impl DynamicSim {
         self.time += h;
         for i in 0..self.beams.len() {
             if !self.beams[i].broken {
-                self.update_material(i);
+                self.update_material(i, h);
             }
         }
     }
@@ -461,20 +605,94 @@ impl DynamicSim {
         }
     }
 
-    /// All six constraints of a beam at the current state:
-    /// (value, stiffness, gradients [x_a, φ_a, x_b, φ_b]).
-    fn beam_constraints(&self, i: usize) -> [(f64, f64, [Vec3; 4]); 6] {
+    /// τ/h of the plastic return: (inside the solve, at the material update).
+    /// `None` inside the solve means the solve is elastic.
+    fn plastic_ratio(&self, h: f64) -> (Option<f64>, f64) {
+        let c = &self.config;
+        if c.solver == Solver::Direct && c.implicit_plasticity {
+            let r = c.plastic_relaxation.max(0.0) / h;
+            (c.plasticity.then_some(r), r)
+        } else {
+            (None, 0.0)
+        }
+    }
+
+    fn strains(&self, i: usize, gm: &Geom) -> Strains {
+        let bm = &self.beams[i];
+        let mut th = [[0.0; 2]; 2];
+        for axis in 0..2 {
+            let u = gm.axes[axis];
+            th[axis] = [
+                gm.e.cross(&gm.ta).dot(&u) - bm.hinge[axis][0],
+                gm.e.cross(&gm.tb).dot(&u) - bm.hinge[axis][1],
+            ];
+        }
+        Strains {
+            axial: gm.len - bm.l0 - bm.plastic_elongation,
+            twist: gm.na.cross(&gm.nb).dot(&gm.e),
+            th,
+        }
+    }
+
+    /// Internal forces for `st`. `r` = τ/h of the plastic return, `None` for
+    /// an elastic response.
+    fn response(&self, i: usize, st: &Strains, r: Option<f64>) -> Response {
+        let bm = &self.beams[i];
+        let r = r.filter(|_| !bm.brittle);
+        let (fy, rr) = (
+            if r.is_some() {
+                bm.n_yield
+            } else {
+                f64::INFINITY
+            },
+            r.unwrap_or(0.0),
+        );
+        let (n, kt_axial, mut energy, dp_axial) = return_1d(bm.k_axial, st.axial, fy, rr);
+        energy += 0.5 * bm.k_torsion * st.twist * st.twist;
+        let mut out = Response {
+            n,
+            kt_axial,
+            dp_axial,
+            m: [[0.0; 2]; 2],
+            kt: [[[0.0; 2]; 2]; 2],
+            dp: [[0.0; 2]; 2],
+            energy,
+            yield_mask: (dp_axial != 0.0) as u8,
+        };
+        for axis in 0..2 {
+            let mp = if r.is_some() {
+                bm.mp_now[axis]
+            } else {
+                f64::INFINITY
+            };
+            let (k4, k2) = (4.0 * bm.ei_l[axis], 2.0 * bm.ei_l[axis]);
+            let (m, kt, e, dp) = return_bend(k4, k2, st.th[axis], mp, rr);
+            out.m[axis] = m;
+            out.kt[axis] = kt;
+            out.dp[axis] = dp;
+            out.energy += e;
+            for end in 0..2 {
+                out.yield_mask |= ((dp[end] != 0.0) as u8) << (1 + axis * 2 + end);
+            }
+        }
+        out
+    }
+
+    /// The six generalised forces of a beam at the current state and its
+    /// energy: (force, tangent stiffness, gradients [x_a, φ_a, x_b, φ_b]).
+    /// The nodal forces are −Σ force·gradient and the Gauss-Newton stiffness is
+    /// Σ stiffness·gradient·gradientᵀ. Elastic: force = k·C and energy = Σ ½kC².
+    #[allow(clippy::type_complexity)]
+    fn beam_constraints(&self, i: usize, r: Option<f64>) -> ([(f64, f64, [Vec3; 4]); 6], f64) {
         let gm = self.geom(i);
         let bm = &self.beams[i];
+        let st = self.strains(i, &gm);
+        let resp = self.response(i, &st, r);
         let z = Vec3::zeros();
         let mut out = [(0.0, 0.0, [z; 4]); 6];
-        out[0] = (
-            gm.len - bm.l0 - bm.plastic_elongation,
-            bm.k_axial,
-            [-gm.e, z, gm.e, z],
-        );
+        out[0] = (resp.n, resp.kt_axial, [-gm.e, z, gm.e, z]);
         out[1] = (
-            gm.na.cross(&gm.nb).dot(&gm.e),
+            bm.k_torsion * st.twist,
             bm.k_torsion,
             [
                 z,
@@ -486,23 +704,41 @@ impl DynamicSim {
         let p = |v: Vec3| v - gm.e * gm.e.dot(&v);
         for axis in 0..2 {
             let u = gm.axes[axis];
-            let th_a = gm.e.cross(&gm.ta).dot(&u) - bm.hinge[axis][0];
-            let th_b = gm.e.cross(&gm.tb).dot(&u) - bm.hinge[axis][1];
             let ga = p(gm.ta.cross(&u)) / gm.len;
             let gb = p(gm.tb.cross(&u)) / gm.len;
             let pa = gm.ta.cross(&u.cross(&gm.e));
             let pb = gm.tb.cross(&u.cross(&gm.e));
-            out[2 + axis * 2] = (
-                th_a + th_b,
-                3.0 * bm.ei_l[axis],
-                [-(ga + gb), pa, ga + gb, pb],
-            );
-            out[3 + axis * 2] = (th_a - th_b, bm.ei_l[axis], [-(ga - gb), pa, ga - gb, -pb]);
+            // The 2x2 tangent between the end moments as two scalar terms
+            // along its eigenvectors. Elastic: θa + θb and θa − θb.
+            let kt = resp.kt[axis];
+            let ang = 0.5 * (2.0 * kt[0][1]).atan2(kt[0][0] - kt[1][1]);
+            let (sn, cs) = ang.sin_cos();
+            let m = resp.m[axis];
+            for (j, v) in [[cs, sn], [-sn, cs]].into_iter().enumerate() {
+                let lam =
+                    kt[0][0] * v[0] * v[0] + 2.0 * kt[0][1] * v[0] * v[1] + kt[1][1] * v[1] * v[1];
+                out[2 + axis * 2 + j] = (
+                    m[0] * v[0] + m[1] * v[1],
+                    lam.max(0.0),
+                    [
+                        -(ga * v[0] + gb * v[1]),
+                        pa * v[0],
+                        ga * v[0] + gb * v[1],
+                        pb * v[1],
+                    ],
+                );
+            }
         }
-        out
+        (out, resp.energy)
     }
 
-    /// The substep objective Φ = ½|x − x̃|²_M / h² + Σ ½ k C(x)² at the
+    /// Energy of a beam alone, for the step check.
+    fn beam_energy(&self, i: usize, r: Option<f64>) -> f64 {
+        let gm = self.geom(i);
+        self.response(i, &self.strains(i, &gm), r).energy
+    }
+
+    /// The substep objective Φ = ½|x − x̃|²_M / h² + Σ beam energy at the
     /// current state (same residual definitions as `assemble_direct`).
     fn objective(&self, h: f64) -> f64 {
         let ih2 = 1.0 / (h * h);
@@ -516,11 +752,10 @@ impl DynamicSim {
                 phi += 0.5 * ih2 / b.inv_inertia * 4.0 * dq.imag().norm_squared();
             }
         }
+        let r = self.plastic_ratio(h).0;
         for i in 0..self.beams.len() {
             if !self.beams[i].broken {
-                for (c, k, _) in self.beam_constraints(i) {
-                    phi += 0.5 * k * c * c;
-                }
+                phi += self.beam_energy(i, r);
             }
         }
         phi
@@ -565,6 +800,7 @@ impl DynamicSim {
                 }
             }
         }
+        let r = self.plastic_ratio(h).0;
         let mut blocks = Vec::with_capacity(if with_blocks { self.beams.len() } else { 0 });
         for i in 0..self.beams.len() {
             if self.beams[i].broken {
@@ -573,8 +809,9 @@ impl DynamicSim {
             let (a, b) = (self.beams[i].a, self.beams[i].b);
             let slots = [cache.trans[a], cache.rot[a], cache.trans[b], cache.rot[b]];
             let mut kb = [[0.0f64; 144]; 1];
-            for (c, k, g) in self.beam_constraints(i) {
-                phi += 0.5 * k * c * c;
+            let (terms, energy) = self.beam_constraints(i, r);
+            phi += energy;
+            for (f, k, g) in terms {
                 if with_blocks {
                     let flat: [f64; 12] = std::array::from_fn(|j| g[j / 3][j % 3]);
                     for r in 0..12 {
@@ -586,7 +823,7 @@ impl DynamicSim {
                 for (s, slot) in slots.iter().enumerate() {
                     if let Some(d) = slot {
                         for k3 in 0..3 {
-                            rhs[d + k3] -= k * c * g[s][k3];
+                            rhs[d + k3] -= f * g[s][k3];
                         }
                     }
                 }
@@ -638,7 +875,8 @@ impl DynamicSim {
         }
         let mut cache = self.direct.take().unwrap();
         let check = self.config.step_check;
-        let mut refactor = cache.needs_factor(self.config.refactor_every);
+        let mut refactor = cache.needs_factor(self.config.refactor_every)
+            || std::mem::take(&mut self.yield_changed);
         let base: Vec<(Vec3, UnitQuaternion<f64>)> = if check {
             self.bodies.iter().map(|b| (b.x, b.q)).collect()
         } else {
@@ -732,63 +970,60 @@ impl DynamicSim {
         }
     }
 
-    fn update_material(&mut self, i: usize) {
+    fn update_material(&mut self, i: usize, h: f64) {
         let gm = self.geom(i);
+        let st = self.strains(i, &gm);
         let plastic = self.config.plasticity;
+        // The same plastic return the solve used, now committed.
+        let (in_solve, r) = self.plastic_ratio(h);
+        let implicit = in_solve.is_some();
+        let resp = self.response(i, &st, plastic.then_some(r));
         let bm = &mut self.beams[i];
         let mut cause = None;
 
-        let mut n = bm.k_axial * (gm.len - bm.l0 - bm.plastic_elongation);
-        if plastic && n.abs() > bm.n_yield {
-            if bm.brittle {
-                cause = Some(BreakCause::Brittle);
-            } else {
-                let dp = (n.abs() - bm.n_yield) / bm.k_axial * n.signum();
-                bm.plastic_elongation += dp;
-                bm.plastic_strain += dp.abs() / bm.l0;
-                n = bm.n_yield * n.signum();
-                if bm.plastic_strain > bm.rupture_strain {
-                    cause = Some(BreakCause::Rupture);
-                }
+        if plastic && bm.brittle && resp.n.abs() > bm.n_yield {
+            cause = Some(BreakCause::Brittle);
+        }
+        if resp.dp_axial != 0.0 {
+            bm.plastic_elongation += resp.dp_axial;
+            bm.plastic_strain += resp.dp_axial.abs() / bm.l0;
+            if bm.plastic_strain > bm.rupture_strain {
+                cause = Some(BreakCause::Rupture);
             }
         }
 
-        let ratio = (n.abs() / bm.n_yield).min(1.0);
+        // Axial force reduces the plastic moment: Mp,N = Mp (1 - n²),
+        // exact for a rectangle and close for tubes.
+        let ratio = (resp.n.abs() / bm.n_yield).min(1.0);
+        let reduce = (1.0 - ratio * ratio).max(0.05);
         let mut util = ratio * ratio;
         for axis in 0..2 {
-            let u = gm.axes[axis];
-            let k4 = 4.0 * bm.ei_l[axis];
-            let k2 = 2.0 * bm.ei_l[axis];
-            let mut th = [
-                gm.e.cross(&gm.ta).dot(&u) - bm.hinge[axis][0],
-                gm.e.cross(&gm.tb).dot(&u) - bm.hinge[axis][1],
-            ];
             let mut mmax: f64 = 0.0;
             for end in 0..2 {
-                let other = 1 - end;
-                let m = k4 * th[end] + k2 * th[other];
-                // Axial force reduces the plastic moment: Mp,N = Mp (1 - n²),
-                // exact for a rectangle and close for tubes.
-                let ratio = (n.abs() / bm.n_yield).min(1.0);
-                let mp = bm.m_plastic[axis] * (1.0 - ratio * ratio).max(0.05);
-                if plastic && m.abs() > mp {
-                    if bm.brittle {
-                        cause = Some(BreakCause::Brittle);
-                    } else {
-                        let d = (m.abs() - mp) / k4 * m.signum();
-                        bm.hinge[axis][end] += d;
-                        th[end] -= d;
-                        bm.hinge_rotation += d.abs();
-                        if bm.hinge_rotation > bm.hinge_capacity {
-                            cause = Some(BreakCause::Hinge);
-                        }
+                let m = resp.m[axis][end];
+                if plastic && bm.brittle && m.abs() > bm.m_plastic[axis] * reduce {
+                    cause = Some(BreakCause::Brittle);
+                }
+                let d = resp.dp[axis][end];
+                if d != 0.0 {
+                    bm.hinge[axis][end] += d;
+                    bm.hinge_rotation += d.abs();
+                    if bm.hinge_rotation > bm.hinge_capacity {
+                        cause = Some(BreakCause::Hinge);
                     }
                 }
-                mmax = mmax.max((k4 * th[end] + k2 * th[other]).abs());
+                mmax = mmax.max(m.abs());
             }
             util += mmax / bm.m_plastic[axis];
+            bm.mp_now[axis] = bm.m_plastic[axis] * reduce;
         }
         bm.utilization = util;
+        if bm.yield_mask != resp.yield_mask {
+            bm.yield_mask = resp.yield_mask;
+            // Only matters when the matrix holds tangent stiffnesses.
+            self.yield_changed |= implicit;
+        }
+        let bm = &mut self.beams[i];
 
         if let Some(cause) = cause {
             bm.broken = true;
