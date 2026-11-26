@@ -6,8 +6,7 @@
 //!
 //! Scenes: stress, breaks, impacts, ambience, rigs, ui, collapse, and one
 //! story per material: steel, timber, concrete, composite (all by default).
-//! `BREAKIT_STYLE=synth` renders pure synthesis instead of the default
-//! recordings-plus-synthesis. Each scene is a scripted sequence of the same commands the game
+//! Each scene is a scripted sequence of the same commands the game
 //! sends, so what you hear is what the game plays.
 
 use std::path::{Path, PathBuf};
@@ -56,10 +55,6 @@ impl Script {
 
     fn render(mut self) -> Vec<f32> {
         let mut m = Mixer::new(SR);
-        // BREAKIT_STYLE=synth renders the pure synthesis path.
-        if std::env::var("BREAKIT_STYLE").is_ok_and(|s| s == "synth") {
-            m.handle(Command::Style(breakit_audio::SoundStyle::Synth));
-        }
         m.handle(Command::Listener {
             position: [0.0, 1.5, 6.0],
             right: [1.0, 0.0, 0.0],

@@ -7,11 +7,11 @@
 
 use crate::ambience::AmbientVoice;
 use crate::dsp::{soft_clip, OnePole};
+use crate::material;
 use crate::material::StressVoice;
 use crate::reverb::Hall;
 use crate::rigs::RigVoice;
 use crate::ui::ui_voice;
-use crate::{material, recorded, SoundStyle};
 use crate::{AmbientKind, BoxVoice, Bus, Command, MaterialKind, Place, Pos, RigKind, Voice};
 
 /// Samples processed per internal block. Positions and gains are updated
@@ -190,7 +190,6 @@ pub struct Mixer {
     reverb: Hall,
     bus_gain: [f32; 4],
     master: f32,
-    style: SoundStyle,
     seed: u32,
     impact_window: (u32, u32),
     /// Sample counter.
@@ -228,7 +227,6 @@ impl Mixer {
             reverb: Hall::new(sr),
             bus_gain: [1.0, 0.8, 0.6, 0.7],
             master: 0.8,
-            style: SoundStyle::default(),
             seed: 1,
             impact_window: (0, 0),
             clock: 0,
@@ -285,10 +283,7 @@ impl Mixer {
                 place,
             } => {
                 let seed = self.next_seed();
-                if let Some(v) = match self.style {
-                    SoundStyle::Synth => material::damage_voice(material, state, size, sr, seed),
-                    SoundStyle::Recorded => recorded::damage_voice(material, state, size, sr, seed),
-                } {
+                if let Some(v) = material::damage_voice(material, state, size, sr, seed) {
                     self.play(v, Bus::Structure, Some(place), 1.0, 3.0);
                 }
             }
@@ -299,10 +294,7 @@ impl Mixer {
                 place,
             } => {
                 let seed = self.next_seed();
-                let v = match self.style {
-                    SoundStyle::Synth => material::break_voice(material, cause, size, sr, seed),
-                    SoundStyle::Recorded => recorded::break_voice(material, cause, size, sr, seed),
-                };
+                let v = material::break_voice(material, cause, size, sr, seed);
                 self.play(v, Bus::Structure, Some(place), 1.0, 4.0);
             }
             Command::Impact {
@@ -319,10 +311,7 @@ impl Mixer {
                     return;
                 }
                 let seed = self.next_seed();
-                if let Some(v) = match self.style {
-                    SoundStyle::Synth => material::impact_voice(material, speed, size, sr, seed),
-                    SoundStyle::Recorded => recorded::impact_voice(material, speed, size, sr, seed),
-                } {
+                if let Some(v) = material::impact_voice(material, speed, size, sr, seed) {
                     self.impact_window.1 += 1;
                     self.play(v, Bus::Structure, Some(place), 1.0, 3.0);
                 }
@@ -394,7 +383,6 @@ impl Mixer {
             }
             Command::Volume { bus, gain } => self.bus_gain[bus.index()] = gain.clamp(0.0, 2.0),
             Command::Master(g) => self.master = g.clamp(0.0, 2.0),
-            Command::Style(s) => self.style = s,
             Command::ResetStructure => {
                 for bed in &mut self.beds {
                     bed.voice.reset();

@@ -24,10 +24,8 @@ pub mod dsp;
 pub mod material;
 pub mod mixer;
 pub mod output;
-pub mod recorded;
 pub mod reverb;
 pub mod rigs;
-mod sample_index;
 pub mod ui;
 pub mod wav;
 
@@ -213,23 +211,9 @@ pub enum Command {
     Volume { bus: Bus, gain: f32 },
     /// Master volume, linear 0..1.
     Master(f32),
-    /// How damage, breaks and impacts are made: pure synthesis, or CC0
-    /// recordings layered with synthesis.
-    Style(SoundStyle),
     /// Stop all structure sounds (stress beds to zero, one-shots cut), e.g.
     /// when a test run is reset.
     ResetStructure,
-}
-
-/// How structure one-shots (damage, breaks, impacts) are made.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum SoundStyle {
-    /// Everything synthesised.
-    Synth,
-    /// CC0 recordings for the transients, varied and layered with
-    /// synthesised bodies and tails. See `recorded.rs` and `samples/`.
-    #[default]
-    Recorded,
 }
 
 /// Anything that renders sound. Voices are mono; the mixer positions them.
