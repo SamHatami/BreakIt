@@ -5,6 +5,7 @@ description = "Engine-free procedural audio for BreakIt: material stress and fra
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 
 [features]
 default = ["device"]
@@ -15,3 +16,6 @@ device = ["dep:cpal"]
 [dependencies]
 breakit-core = { path = "../breakit-core" }
 cpal = { version = "0.17", optional = true }
+
+[lints]
+workspace = true

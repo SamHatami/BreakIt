@@ -5,6 +5,7 @@ description = "Structural solver for BreakIt: 3D beam frames, static FEM and rea
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 faer = "0.22"
@@ -16,3 +17,6 @@ serde = { version = "1", features = ["derive"], optional = true }
 # Serialize/Deserialize on scenario-facing data (load cases, materials are not
 # covered yet), for scenario files.
 serde = ["dep:serde", "nalgebra/serde-serialize"]
+
+[lints]
+workspace = true

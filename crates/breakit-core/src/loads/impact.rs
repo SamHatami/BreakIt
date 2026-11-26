@@ -64,7 +64,7 @@ pub const DEFAULT_CONTACT_TIME: f64 = 0.05;
 /// Default pad damping, fraction of critical.
 pub const DEFAULT_PAD_DAMPING_RATIO: f64 = 0.1;
 /// Contact events kept for the rig.
-const MAX_EVENTS: usize = 64;
+const MAX_EVENTS: usize = 64; // keep the doc on `ImpactorRig::events` in step
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -128,7 +128,7 @@ pub struct ImpactorRig {
     pub contact_force: Vec3,
     /// Largest contact force so far, N.
     pub peak_force: f64,
-    /// Contact events, oldest first (the last [`MAX_EVENTS`]).
+    /// Contact events, oldest first (the last 64).
     pub events: Vec<ContactEvent>,
 }
 

@@ -1,0 +1,8 @@
+# rustfmt defaults, made explicit. CI runs `cargo fmt --all --check`.
+# Run `cargo fmt --all` before every commit. Only stable options here, so
+# nobody needs nightly.
+edition = "2021"
+style_edition = "2021"
+newline_style = "Unix"
+use_field_init_shorthand = true
+use_try_shorthand = true

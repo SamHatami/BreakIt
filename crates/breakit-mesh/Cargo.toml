@@ -5,8 +5,12 @@ description = "Engine-free procedural geometry for BreakIt: parametric member pr
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 breakit-core = { path = "../breakit-core" }
 glam = { version = "0.33", features = ["bytemuck"] }
 bytemuck = { version = "1", features = ["derive"] }
+
+[lints]
+workspace = true

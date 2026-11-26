@@ -435,10 +435,10 @@ fn structure_sounds(
     }
 
     // Damage onsets (breaks are reported separately below).
-    for i in 0..n {
+    for (i, seen) in st.states.iter_mut().enumerate().take(n) {
         let d = sim.damage(i);
-        if d.state > st.states[i] {
-            st.states[i] = d.state;
+        if d.state > *seen {
+            *seen = d.state;
             if d.state != DamageState::Broken {
                 sound.send(Command::Damage {
                     material: d.kind,

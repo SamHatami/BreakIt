@@ -144,7 +144,7 @@ impl ParticlePool {
             p.position += p.velocity * dt;
             if p.position.y < self.ground_y {
                 p.position.y = self.ground_y;
-                p.velocity.y = -0.3 * p.velocity.y;
+                p.velocity.y *= -0.3;
                 p.velocity.x *= 0.5;
                 p.velocity.z *= 0.5;
             }

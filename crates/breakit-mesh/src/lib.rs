@@ -17,7 +17,7 @@
 //!   records, and handles breaks without re-meshing: the two halves keep
 //!   drawing the same template, each clamped to its side of a per-material
 //!   fracture surface ([`cut`]), and stay attached to their nodes.
-//! * [`fracture`], [`debris`], [`particles`]: the loose parts of a break:
+//! * [`fracture`](mod@fracture), [`debris`], [`particles`]: the loose parts of a break:
 //!   chunks as cheap visual-only rigid bodies, plus sparks, dust, splinters
 //!   and fibres.
 //!

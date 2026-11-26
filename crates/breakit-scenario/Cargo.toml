@@ -5,8 +5,12 @@ description = "BreakIt scenarios: data-driven test briefs (limits, anchors, load
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 breakit-core = { path = "../breakit-core" }
 ron = "0.12"
 serde = { version = "1", features = ["derive"] }
+
+[lints]
+workspace = true

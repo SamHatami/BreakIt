@@ -5,6 +5,7 @@ description = "BreakIt game: Bevy app shell (camera, build mode, frame rendering
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 publish = false
 
 [dependencies]
@@ -17,3 +18,6 @@ breakit-scenario = { path = "../breakit-scenario" }
 # Pinned on purpose: Bevy breaks its API every release. Upgrade deliberately,
 # following that release's migration guide.
 bevy = { version = "=0.20.1", default-features = false, features = ["3d", "ui"] }
+
+[lints]
+workspace = true

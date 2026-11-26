@@ -181,7 +181,7 @@ impl Profile {
             for v in lp {
                 if pts
                     .last()
-                    .map_or(true, |q| (*q - v.p).length_squared() > 1e-14)
+                    .is_none_or(|q| (*q - v.p).length_squared() > 1e-14)
                 {
                     pts.push(v.p);
                 }

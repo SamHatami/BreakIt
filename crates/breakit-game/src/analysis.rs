@@ -333,8 +333,8 @@ mod tests {
         );
         sim.step(1.0 / 60.0);
         // Only the supported ends sit on the banks; the span is over the gap.
-        for n in 0..d.nodes.len() {
-            if d.supports[n].is_none() {
+        for (n, support) in d.supports.iter().enumerate().take(d.nodes.len()) {
+            if support.is_none() {
                 assert!(
                     sim.clearance(n).unwrap() > 0.1,
                     "node {n} touches the table"

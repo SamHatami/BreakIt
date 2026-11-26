@@ -1473,7 +1473,7 @@ mod tests {
                     break;
                 }
             }
-            out.extend(std::iter::repeat(0.0).take(SR as usize / 4));
+            out.extend(std::iter::repeat_n(0.0, SR as usize / 4));
             out
         };
         for m in MATS {

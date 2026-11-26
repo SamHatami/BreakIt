@@ -1,5 +1,7 @@
 # Notes for agents
 
+- Read `CONTRIBUTING.md` first: checks to run before pushing, crate dependency direction, who owns which files, and the shared files to touch as little as possible.
+- CI denies all warnings: run `cargo fmt --all` and `cargo clippy --workspace --all-targets -- -D warnings` before every push. The toolchain is pinned in `rust-toolchain.toml`.
 - Physics lives in `crates/breakit-core` and must not depend on Bevy or any engine.
 - Every solver change must keep `cargo test --release` green; the static FEM is the oracle for the dynamic solver.
 - Units are SI, world is Y-up.
