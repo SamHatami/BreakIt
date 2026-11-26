@@ -50,9 +50,10 @@
 
 use std::sync::Arc;
 
-use super::{smooth_ramp, View, G};
+use super::{smooth_ramp, Geometry, View, G};
+use crate::frame::member_axes;
 use crate::section::Shape;
-use crate::Vec3;
+use crate::{NodeLoad, NodeSpring, Structure, Vec3};
 
 /// Water kinematics from a simulation, read by [`Water::apply`] in place of
 /// the analytic [`Sea`]. See the module docs.
@@ -811,6 +812,87 @@ impl Water {
             let buoy = self.density * G * g.solid_area * half_length;
             out[n] += (drag + Vec3::y() * buoy) * (wet * scale);
         }
+    }
+
+    /// What still water does for a structure at rest, for a static check:
+    /// the buoyant force on every node at the built position, and a vertical
+    /// spring per node with the water-plane stiffness `ρ g × waterline
+    /// area`, which is how much more the water pushes back for every metre
+    /// the node sinks. Uses the still level at time `t` and the same rules
+    /// for what displaces water as [`Self::apply`], for an undamaged
+    /// structure. Nodes with nothing in the surface get no spring.
+    pub fn static_support(&self, s: &Structure, t: f64) -> (Vec<NodeLoad>, Vec<NodeSpring>) {
+        let level = self.still_level(t);
+        let mut lift = vec![0.0; s.nodes.len()];
+        let mut spring = vec![0.0; s.nodes.len()];
+        if level > self.bed {
+            let geometry = Geometry::new(s);
+            let n = self.samples.max(1);
+            for (m, g) in s.members.iter().zip(&geometry.members) {
+                let (xa, xb) = (s.nodes[m.a], s.nodes[m.b]);
+                let length = (xb - xa).norm();
+                if length < 1e-12 {
+                    continue;
+                }
+                let (x, y, z) = member_axes(&xa, &xb);
+                let dry_inside = self.sealed && matches!(g.shape, Shape::Tube { .. });
+                let area = if dry_inside {
+                    g.outer_area
+                } else {
+                    g.solid_area
+                };
+                let ds = length / n as f64;
+                // The section's own height, plus the rise of the sample's
+                // length along a sloping member, so the support changes
+                // smoothly however the member lies.
+                let section = match g.shape {
+                    Shape::Tube { .. } => 0.5 * g.depth_y * (1.0 - x.y * x.y).max(0.0).sqrt(),
+                    Shape::Rect { .. } => 0.5 * (g.depth_y * y.y.abs() + g.depth_z * z.y.abs()),
+                };
+                let along = 0.5 * ds * x.y.abs();
+                let round = matches!(g.shape, Shape::Tube { .. }) && along < 0.1 * section;
+                let half = if round { section } else { section + along };
+                for i in 0..n {
+                    let f = (i as f64 + 0.5) / n as f64;
+                    let p = xa + (xb - xa) * f;
+                    if p.y + half < self.bed {
+                        continue;
+                    }
+                    let rise = level - p.y;
+                    let force = self.density * G * area * ds * wet_fraction(rise, half, round);
+                    // d(wet)/d(rise): the waterline across the section.
+                    let t = if half > 1e-9 { rise / half } else { 2.0 };
+                    let slope = if t.abs() >= 1.0 {
+                        0.0
+                    } else if round {
+                        2.0 / std::f64::consts::PI * (1.0 - t * t).sqrt() / half
+                    } else {
+                        0.5 / half
+                    };
+                    let k = self.density * G * area * ds * slope;
+                    lift[m.a] += force * (1.0 - f);
+                    lift[m.b] += force * f;
+                    spring[m.a] += k * (1.0 - f);
+                    spring[m.b] += k * f;
+                }
+            }
+        }
+        let loads = lift
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| **f > 0.0)
+            .map(|(node, f)| NodeLoad::force(node, Vec3::new(0.0, *f, 0.0)))
+            .collect();
+        let springs = spring
+            .iter()
+            .enumerate()
+            .filter(|(_, k)| **k > 0.0)
+            .map(|(node, k)| NodeSpring {
+                node,
+                stiffness: Vec3::new(0.0, *k, 0.0),
+            })
+            .collect();
+        (loads, springs)
     }
 
     /// The flume rig at time `t` with window factor `ramp`. The solitary
