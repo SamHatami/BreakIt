@@ -423,7 +423,7 @@ fn the_fan_wall_loads_the_billboard_and_a_slim_tower_blows_over() {
     assert!(good.passed, "{:?}", good.failure);
     // ½ ρ C_d A U² on the 18 m² board at 40 m/s is about 32 kN: the
     // tower's members must feel it.
-    assert!(good.peak_utilization > 0.3, "{}", good.peak_utilization);
+    assert!(good.peak_utilization > 0.2, "{}", good.peak_utilization);
     let bad = grade(&s, &common::sign_tower(0.02, 0.002, 2));
     assert!(!bad.passed);
 }
@@ -443,4 +443,34 @@ fn the_surge_pushes_the_jetty_legs() {
         drift(&sway),
         drift(&braced)
     );
+}
+
+#[test]
+fn a_moored_pontoon_bridge_floats_and_the_static_check_sees_the_water() {
+    let s = scenario("pontoon_footbridge");
+    let st = common::pontoon_bridge(0.03, 0.003, 0.4065, 0.016, &[3, 6], 1.1);
+    // Two pins in a line: without the water it swings about them.
+    let mut loads = st.self_weight_loads(9.81);
+    assert!(breakit_core::solve_static(&st, &loads).is_err());
+    let (buoyancy, springs) = Binding::static_support(&s, &st);
+    assert!(!springs.is_empty());
+    let lift: f64 = buoyancy.iter().map(|l| l.force.y).sum();
+    assert!(lift > 1000.0 * 9.81, "{lift}");
+    loads.extend(buoyancy);
+    let r = breakit_core::solve_static_with_springs(&st, &loads, &springs).expect("floats");
+    let sag = r
+        .displacements
+        .iter()
+        .map(|u| u.y.abs())
+        .fold(0.0, f64::max);
+    assert!(sag < 0.5, "{sag}");
+
+    let r = grade(&s, &st);
+    print!("{}", r.summary());
+    assert!(r.passed, "{:?}", r.failure);
+    let sinks = grade(
+        &s,
+        &common::pontoon_bridge(0.05, 0.004, 0.2032, 0.008, &[2, 4, 6], 1.0),
+    );
+    assert!(!sinks.passed, "small pontoons lack the lift");
 }

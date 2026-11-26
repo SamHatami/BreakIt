@@ -20,7 +20,7 @@ use breakit_core::loads::traffic::{Axle as CoreAxle, Drive, Lane, LaneLine, Traf
 use breakit_core::loads::water::{Airy, Solitary, Water, Waves};
 use breakit_core::loads::wind::{Gusts, Profile, Wind, AIR_DENSITY};
 use breakit_core::loads::{LoadCase, LoadKind, LoadSet, Window, G};
-use breakit_core::{Structure, Vec3};
+use breakit_core::{NodeLoad, NodeSpring, Structure, Vec3};
 
 use crate::scenario::{Deck, Event, Scenario, Wave};
 
@@ -52,6 +52,11 @@ pub fn resolve_deck(d: &Deck, s: &Structure) -> Lane {
     t.prepare(s);
     t.lane(0).cloned().unwrap_or_default()
 }
+
+/// Horizontal stiffness given to a floating node in the static check, as a
+/// share of its water-plane stiffness. Still water has none; this only
+/// keeps a free raft from being a mechanism.
+pub const FLOAT_DRIFT_STIFFNESS: f64 = 1e-3;
 
 /// Where the scenario's loads land on one structure.
 #[derive(Clone, Debug)]
@@ -283,6 +288,32 @@ impl Binding {
             }
         }
         LoadSet::new(cases)
+    }
+
+    /// What the scenario's still water does for the structure at rest, for
+    /// the build-mode static check: buoyant node forces at the built
+    /// position and the water-plane springs (core
+    /// [`Water::static_support`]), at the level the water reaches by the end
+    /// of the test. Every sprung node also gets a soft horizontal spring
+    /// ([`FLOAT_DRIFT_STIFFNESS`] of its vertical one), so a structure held
+    /// only by floats has a static solution. Empty without a water event.
+    pub fn static_support(scenario: &Scenario, s: &Structure) -> (Vec<NodeLoad>, Vec<NodeSpring>) {
+        let loads = Self::load_set(scenario, 0.0);
+        let (mut forces, mut springs) = (Vec::new(), Vec::new());
+        for c in &loads.cases {
+            if let LoadKind::Water(w) = &c.kind {
+                let t = (scenario.duration - c.window.start).max(0.0);
+                let (f, k) = w.static_support(s, t);
+                forces.extend(f);
+                springs.extend(k);
+            }
+        }
+        for k in &mut springs {
+            let h = k.stiffness.y * FLOAT_DRIFT_STIFFNESS;
+            k.stiffness.x += h;
+            k.stiffness.z += h;
+        }
+        (forces, springs)
     }
 
     /// Ground (shake table) acceleration of `loads` at solver time `t`,

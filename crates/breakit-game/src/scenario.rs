@@ -10,7 +10,7 @@
 
 use bevy::math::Vec3;
 use bevy::prelude::Resource;
-use breakit_core::NodeLoad;
+use breakit_core::{NodeLoad, NodeSpring};
 use breakit_scenario as bs;
 use breakit_scenario::{check_limits, Bill, Binding, CostModel, PlayMode, Violation};
 
@@ -407,7 +407,19 @@ impl Scenario {
                 }
             }
         }
+        // Still water: buoyancy at the built position (its springs are in
+        // `static_springs`).
+        out.extend(Binding::static_support(&self.def, &s).0);
         out
+    }
+
+    /// Elastic supports for build mode's static check: the water-plane
+    /// stiffness of floats, so a structure resting on pontoons solves.
+    pub fn static_springs(&self, design: &Design) -> Vec<NodeSpring> {
+        if design.beams.is_empty() {
+            return Vec::new();
+        }
+        Binding::static_support(&self.def, &design.to_structure()).1
     }
 }
 

@@ -50,7 +50,7 @@ pub use material::{ConcreteClass, Material, MaterialKind, SteelGrade, TimberClas
 pub use model::{Member, NodeLoad, NodeSpring, Structure, Support};
 pub use section::{Section, Shape};
 pub use simd::SimdLevel;
-pub use statics::{solve_static, MemberForces, StaticResult};
+pub use statics::{solve_static, solve_static_with_springs, MemberForces, StaticResult};
 
 /// nalgebra vector type used across the crate.
 pub type Vec3 = nalgebra::Vector3<f64>;
