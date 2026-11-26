@@ -2,11 +2,13 @@
 //!
 //! `cargo run --release -p breakit-water-render --example flume` then:
 //! 1 regular waves, 2 a solitary surge, 3 a flood rising and draining,
-//! V next camera view, F4 quality preset (lab and water together).
+//! V next camera view, F4 quality preset (lab and water together),
+//! F drops a pontoon raft with cargo and three timber logs into the flume.
 //!
 //! `-- --program waves|surge|flood` picks what the rig does at the start,
 //! `-- --quality low|medium|high|ultra` the preset, `-- --dx 0.15` the cell
-//! size of the simulation.
+//! size of the simulation, `-- --floats` drops the raft and the logs when
+//! the stills or the clip start.
 //! `-- --capture <dir>` saves one still per view after `--at <seconds>` of
 //! simulated time and exits. `-- --clip <dir> --view beach --frames 60
 //! --fps 15` saves numbered frames of one view for a clip.
@@ -17,17 +19,24 @@ use bevy::app::AppExit;
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use bevy::window::PresentMode;
+use breakit_core::loads::{Geometry, View};
+use breakit_core::section::Shape;
+use breakit_core::{
+    DynamicSim, LoadCase, LoadKind, LoadSet, Material, Section, SimConfig, Structure,
+    Vec3 as CoreVec3, Window as LoadWindow,
+};
 use breakit_lab::{Flume, LabCamera, LabPlugin, LabQuality, LabSettings, PlayTable};
 use breakit_water::{Config, Drive, FlumeSetup, Program, WaterSim};
 use breakit_water_render::{LiveWater, WaterLook, WaterQuality, WaterRenderPlugin, WaterRenderSet};
 
 /// (focus, distance, yaw, pitch, label)
-const VIEWS: [(Vec3, f32, f32, f32, &str); 5] = [
+const VIEWS: [(Vec3, f32, f32, f32, &str); 6] = [
     (Vec3::new(8.0, -0.9, 0.0), 9.5, 0.55, 0.3, "beach"),
     (Vec3::new(-1.0, -0.4, 0.0), 8.5, -0.5, 0.24, "pier"),
     (Vec3::new(6.0, -0.6, 0.0), 7.0, 1.35, 0.2, "low"),
     (Vec3::new(0.0, -0.5, 0.0), 27.0, 0.4, 0.5, "table"),
     (Vec3::new(2.0, -0.8, 0.0), 14.0, 0.0, 1.15, "top"),
+    (Vec3::new(-7.0, -1.0, 0.0), 10.0, -0.5, 0.6, "raft"),
 ];
 
 /// Pile positions (x, z) of the stand-in pier, m, and their radius.
@@ -40,6 +49,10 @@ const PILES: [(f32, f32); 6] = [
     (2.0, 1.0),
 ];
 const PILE_RADIUS: f32 = 0.11;
+
+/// Frames before the first shot: the lab needs a few to bake its
+/// reflection maps.
+const WARM_UP: u32 = 50;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Rig {
@@ -64,6 +77,19 @@ struct Script {
     shot: u32,
     still_level: f64,
     depth: f64,
+    /// Drop the floats when the stills or the clip start.
+    floats: bool,
+}
+
+/// Things floating in the flume: a pontoon raft and timber logs, simulated
+/// by the structural solver with the water as their only load.
+#[derive(Resource)]
+struct Floats {
+    structure: Structure,
+    sim: DynamicSim,
+    loads: LoadSet,
+    geometry: Geometry,
+    bars: Vec<Entity>,
 }
 
 fn main() {
@@ -137,11 +163,19 @@ fn main() {
             shot: 0,
             still_level: setup.still_level,
             depth: setup.still_level - setup.bed,
+            floats: args.iter().any(|a| a == "--floats"),
         })
         .add_systems(Startup, setup_scene)
         .add_systems(
             Update,
-            (keys, run_water, place_camera, shoot)
+            (
+                keys,
+                drop_floats,
+                run_water,
+                sync_floats,
+                place_camera,
+                shoot,
+            )
                 .chain()
                 .before(WaterRenderSet),
         )
@@ -256,7 +290,129 @@ fn drive(script: &Script, t: f64) -> Drive {
     }
 }
 
-fn run_water(time: Res<Time>, mut script: ResMut<Script>, mut water: ResMut<LiveWater>) {
+/// F, or the start of a scripted run with `--floats`: the raft is set on
+/// the water and the logs are let go above it.
+fn drop_floats(
+    mut commands: Commands,
+    keys: Res<ButtonInput<KeyCode>>,
+    script: Res<Script>,
+    floats: Option<Res<Floats>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut mats: ResMut<Assets<StandardMaterial>>,
+) {
+    // In a clip, just after the first frame is taken.
+    let scripted = script.floats && script.frame == WARM_UP + 3 && floats.is_none();
+    if !(keys.just_pressed(KeyCode::KeyF) || scripted) {
+        return;
+    }
+    if let Some(old) = floats {
+        for e in &old.bars {
+            commands.entity(*e).despawn();
+        }
+    }
+    let level = script.still_level;
+    let (steel, timber) = (Material::steel(), Material::timber());
+    let mut s = Structure::new();
+    // The raft: two thin-walled 813 mm pontoons tied by three tubes.
+    let pontoon = Section::tube(0.4065, 0.006);
+    let tie = Section::tube(0.057, 0.005);
+    let side = |s: &mut Structure, z: f64| {
+        s.add_line(
+            CoreVec3::new(-10.0, level, z),
+            CoreVec3::new(-7.0, level, z),
+            2,
+            &steel,
+            &pontoon,
+        )
+    };
+    let (left, right) = (side(&mut s, -0.9), side(&mut s, 0.9));
+    for (a, b) in left.iter().zip(&right) {
+        s.add_member(*a, *b, steel.clone(), tie.clone());
+    }
+    // The logs, let go at different heights.
+    for (x, z, turn, height) in [
+        (-5.6, -1.4, 0.3, 1.2),
+        (-4.6, 0.2, -0.5, 2.0),
+        (-5.2, 1.5, 1.2, 2.8),
+    ] {
+        let half = CoreVec3::new(f64::cos(turn), 0.12, f64::sin(turn));
+        let mid = CoreVec3::new(x, level + height, z);
+        s.add_line(mid - half, mid + half, 2, &timber, &Section::rect(0.2, 0.2));
+    }
+    let mut case = breakit_core::loads::water::Water::current(level, CoreVec3::zeros());
+    case.bed = level - script.depth;
+    let mut loads = LoadSet::new(vec![LoadCase::new(
+        "Water",
+        LoadWindow::new(0.0, None, 0.0),
+        LoadKind::Water(case),
+    )]);
+    loads.prepare(&s);
+    let mut sim = DynamicSim::new(&s, SimConfig::default());
+    sim.add_point_mass(left[1], 300.0);
+    sim.add_point_mass(right[1], 300.0);
+
+    let tube = meshes.add(Cylinder::new(1.0, 1.0));
+    let block = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
+    let paint = mats.add(StandardMaterial {
+        base_color: Color::srgb(0.85, 0.62, 0.12),
+        perceptual_roughness: 0.45,
+        ..default()
+    });
+    let wood = mats.add(StandardMaterial {
+        base_color: Color::srgb(0.62, 0.45, 0.27),
+        perceptual_roughness: 0.8,
+        ..default()
+    });
+    let bars = s
+        .members
+        .iter()
+        .map(|m| {
+            let (mesh, mat) = match m.section.shape {
+                Shape::Tube { .. } => (tube.clone(), paint.clone()),
+                Shape::Rect { .. } => (block.clone(), wood.clone()),
+            };
+            commands
+                .spawn((Mesh3d(mesh), MeshMaterial3d(mat), Transform::IDENTITY))
+                .id()
+        })
+        .collect();
+    commands.insert_resource(Floats {
+        geometry: Geometry::new(&s),
+        structure: s,
+        sim,
+        loads,
+        bars,
+    });
+}
+
+/// Moves the drawn members with the simulated ones.
+fn sync_floats(floats: Option<Res<Floats>>, mut bars: Query<&mut Transform>) {
+    let Some(f) = floats else { return };
+    for (m, e) in f.structure.members.iter().zip(&f.bars) {
+        let at = |n: usize| {
+            let p = f.sim.position(n);
+            Vec3::new(p.x as f32, p.y as f32, p.z as f32)
+        };
+        let (a, b) = (at(m.a), at(m.b));
+        let len = a.distance(b).max(1e-3);
+        let size = match m.section.shape {
+            Shape::Tube { ro, .. } => Vec3::new(ro as f32, len, ro as f32),
+            Shape::Rect { b, h } => Vec3::new(b as f32, len, h as f32),
+        };
+        if let Ok(mut t) = bars.get_mut(*e) {
+            *t = Transform::from_translation((a + b) * 0.5)
+                .with_rotation(Quat::from_rotation_arc(Vec3::Y, (b - a) / len))
+                .with_scale(size);
+        }
+    }
+}
+
+fn run_water(
+    time: Res<Time>,
+    mut script: ResMut<Script>,
+    mut water: ResMut<LiveWater>,
+    mut floats: Option<ResMut<Floats>>,
+) {
     // Captures run on simulated time: a frame takes as long as it takes.
     let scripted = script.capture.is_some() || script.clip.is_some();
     let mut span = if !scripted {
@@ -273,8 +429,21 @@ fn run_water(time: Res<Time>, mut script: ResMut<Script>, mut water: ResMut<Live
         let dt = span.min(1.0 / 60.0);
         let t = water.sim.solver.time() - script.since;
         let drive = drive(&script, t);
-        // The piles stand in the water: blockage from their wet length.
-        water.sim.solver.clear_blockage();
+        // What floats slows the water and splashes into it...
+        match floats.as_deref() {
+            Some(f) => water.sim.couple(
+                &View {
+                    structure: &f.structure,
+                    sim: &f.sim,
+                    geometry: &f.geometry,
+                    time: t,
+                },
+                1.0,
+                2.0,
+            ),
+            None => water.sim.solver.clear_blockage(),
+        }
+        // ...and so do the piles, by their wet length.
         let field = water.sim.field();
         for (x, z) in PILES {
             if let Some((surface, bed)) = field.column(x as f64, z as f64) {
@@ -287,6 +456,12 @@ fn run_water(time: Res<Time>, mut script: ResMut<Script>, mut water: ResMut<Live
             }
         }
         water.sim.advance(dt, drive);
+        if let Some(f) = floats.as_deref_mut() {
+            if let LoadKind::Water(w) = &mut f.loads.cases[0].kind {
+                w.field = Some(water.sim.field());
+            }
+            f.loads.step(&f.structure, &mut f.sim, dt);
+        }
         span -= dt;
     }
 }
@@ -300,8 +475,6 @@ fn place_camera(script: Res<Script>, mut cam: Single<(&mut Transform, &mut LabCa
 }
 
 fn shoot(mut commands: Commands, mut script: ResMut<Script>, mut exit: MessageWriter<AppExit>) {
-    // The lab needs a few frames to bake its reflection maps.
-    const WARM_UP: u32 = 50;
     const BETWEEN: u32 = 6;
     if let Some(dir) = script.clip.clone() {
         if script.frame <= WARM_UP {
