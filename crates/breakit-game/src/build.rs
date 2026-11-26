@@ -431,7 +431,10 @@ fn frame_view(
 }
 
 fn draw_build_guides(mut gizmos: Gizmos, design: Res<Design>, tool: Res<BuildTool>) {
-    let grid_color = Color::srgba(0.55, 0.65, 0.75, 0.22);
+    // On the table top the table's own grid shows the snap points; keep the
+    // build-plane grid faint there so the two don't fight.
+    let on_table = tool.plane == BuildPlane::Ground && tool.level == 0.0;
+    let grid_color = Color::srgba(0.6, 0.65, 0.7, if on_table { 0.08 } else { 0.25 });
     let rot = match tool.plane {
         BuildPlane::Ground => Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
         BuildPlane::Wall => Quat::IDENTITY,

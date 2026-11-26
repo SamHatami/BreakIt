@@ -300,7 +300,12 @@ pub struct Themes {
 impl Default for Themes {
     fn default() -> Self {
         Self {
-            presets: vec![UiTheme::drafting(), UiTheme::slate(), UiTheme::blueprint(), UiTheme::hangar()],
+            presets: vec![
+                UiTheme::drafting(),
+                UiTheme::slate(),
+                UiTheme::blueprint(),
+                UiTheme::hangar(),
+            ],
             active: 0,
         }
     }

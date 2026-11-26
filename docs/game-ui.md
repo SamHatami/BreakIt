@@ -50,6 +50,8 @@ and clicks (`ui/pointer.rs`) write the same actions.
 | Tab, Q / E | drawing plane, move plane down / up |
 | D | exaggerate deflection |
 | C | clear to the sheet's start |
+| T | next play table (until sheets choose their own) |
+| F3 | frame-time read-out |
 | Space | run test; in a test, pause |
 | , . | test slower / faster |
 | H | stress heatmap during a test |

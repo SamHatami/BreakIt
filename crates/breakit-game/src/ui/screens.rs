@@ -987,7 +987,7 @@ pub fn build_overlay(p: &mut ChildSpawnerCommands, v: &GameView) {
 }
 
 /// The controls card. Keep in step with `flow::keyboard_actions`.
-const CONTROLS: [(&str, &str); 15] = [
+const CONTROLS: [(&str, &str); 16] = [
     ("RMB drag", "orbit"),
     ("MMB / Shift+RMB", "pan"),
     ("Wheel", "zoom"),
@@ -1000,6 +1000,7 @@ const CONTROLS: [(&str, &str); 15] = [
     ("Tab, Q / E", "drawing plane, plane down / up"),
     ("D", "exaggerate deflection"),
     ("C", "clear to the sheet's start"),
+    ("T / F3", "next play table / frame time"),
     ("Space", "run test; in a test: pause"),
     (", .", "test slower / faster; H heatmap"),
     ("F1 / Esc", "brief / pause or back"),

@@ -12,6 +12,7 @@ mod capture;
 mod design;
 mod flow;
 mod history;
+mod perf;
 mod render;
 mod scenario;
 mod testrun;
@@ -19,6 +20,7 @@ mod ui;
 mod visuals;
 
 use bevy::prelude::*;
+use breakit_lab::{LabPlugin, PlayTable};
 
 /// Which physics runs: the static check while building (and behind the
 /// register and brief), the real-time solver in a test and its report.
@@ -40,6 +42,7 @@ fn main() {
             ..default()
         }))
         .insert_resource(ClearColor(Color::srgb(0.1, 0.11, 0.13)))
+        .add_plugins(LabPlugin)
         .insert_resource(design::Design::default())
         .add_plugins((
             flow::FlowPlugin,
@@ -51,6 +54,21 @@ fn main() {
             visuals::VisualsPlugin,
             ui::GameUiPlugin,
             capture::CapturePlugin,
+            perf::PerfPlugin,
         ))
+        .add_systems(Update, cycle_table.run_if(in_state(flow::Screen::Build)))
         .run();
+}
+
+/// T: next built-in play table (ravine, flat, flume, shake table) until
+/// scenarios choose their own.
+fn cycle_table(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut table: ResMut<PlayTable>,
+    mut index: Local<usize>,
+) {
+    if keys.just_pressed(KeyCode::KeyT) {
+        *index += 1;
+        *table = PlayTable::builtin(*index);
+    }
 }

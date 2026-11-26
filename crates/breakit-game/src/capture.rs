@@ -1,10 +1,10 @@
 //! Scripted capture for headless checks: set `BREAKIT_CAPTURE=<dir>` and
 //! the game walks the whole loop on its own (register, brief, build a
-//! truss on sheet B-02, test, report), saves a screenshot of each screen
-//! and exits. Used by agents and CI to see the game without a person at
+//! truss on sheet B-02, test, report), saves a screenshot of each screen,
+//! pulls the camera back for a shot of the lab and exits. Used by agents and CI to see the game without a person at
 //! the screen, e.g. `xvfb-run cargo run -p breakit-game`.
 //!
-//! `BREAKIT_THEME=1` starts with the second theme preset, for comparing
+//! `BREAKIT_THEME=<n>` starts with theme preset n, for comparing
 //! looks. `BREAKIT_TRUSS=steel` builds the web in steel instead of timber;
 //! `BREAKIT_TRUSS=weak` lays a bare timber plank instead, which breaks.
 
@@ -16,6 +16,7 @@ use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 
 use crate::analysis::Simulation;
 use crate::build::BuildTool;
+use crate::camera::OrbitCamera;
 use crate::design::{BeamKind, Design};
 use crate::flow::{Revision, Revisions, Screen, UiAction};
 use crate::scenario::{Sheets, TestRecord};
@@ -65,6 +66,7 @@ fn capture_script(
     sim: Option<Res<Simulation>>,
     mut actions: MessageWriter<UiAction>,
     mut exit: MessageWriter<AppExit>,
+    mut orbit: Single<&mut OrbitCamera>,
 ) {
     s.frame += 1;
     let waited = s.frame - s.since;
@@ -142,6 +144,16 @@ fn capture_script(
             advance(&mut s);
         }
         10 if waited >= 30 => {
+            orbit.distance = 70.0;
+            orbit.pitch = 0.22;
+            orbit.yaw = 0.75;
+            advance(&mut s);
+        }
+        11 if waited >= 40 => {
+            shot(&mut commands, "6-lab.png");
+            advance(&mut s);
+        }
+        12 if waited >= 30 => {
             exit.write(AppExit::Success);
         }
         _ => {}
