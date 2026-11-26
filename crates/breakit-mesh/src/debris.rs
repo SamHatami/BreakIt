@@ -25,7 +25,8 @@
 
 use glam::{Mat3, Quat, Vec2, Vec3};
 
-use crate::fracture::DebrisPiece;
+use crate::fracture::{DebrisPiece, PiecePart};
+use crate::state::MaterialKind;
 
 /// Corners beyond this many are ignored by the contact solver (fracture
 /// always gives 8).
@@ -99,7 +100,29 @@ pub struct DebrisBody {
     /// over a few steps instead of leaving a residual wobble.
     warm: [(f32, Vec2); MAX_CONTACTS],
     pub asleep: bool,
+    /// What it is made of, for impact sounds.
+    pub kind: MaterialKind,
+    pub part: PiecePart,
 }
+
+/// A piece hitting the ground hard enough to be heard.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DebrisImpact {
+    pub position: Vec3,
+    /// Closing speed along the contact normal, m/s.
+    pub speed: f32,
+    /// Bounding radius of the piece, m.
+    pub radius: f32,
+    pub kind: MaterialKind,
+    pub part: PiecePart,
+}
+
+/// Impacts slower than this (m/s) are resting contact, not hits.
+pub const IMPACT_MIN_SPEED: f32 = 0.5;
+
+/// At most this many impacts are kept for a consumer that has not drained
+/// them (the oldest are dropped).
+const MAX_PENDING_IMPACTS: usize = 64;
 
 /// Inverse inertia (unit mass, local diagonal) of the box bounding `points`.
 fn box_inv_inertia(points: &[Vec3], radius: f32) -> Vec3 {
@@ -149,6 +172,8 @@ pub struct DebrisWorld {
     next_id: u64,
     /// Ids removed by the piece cap during the last `add`/`step`.
     pub removed: Vec<u64>,
+    /// Ground hits since the last [`DebrisWorld::drain_impacts`].
+    impacts: Vec<DebrisImpact>,
 }
 
 impl DebrisWorld {
@@ -179,6 +204,8 @@ impl DebrisWorld {
             last_dt: 1.0 / 60.0,
             warm: [(0.0, Vec2::ZERO); MAX_CONTACTS],
             asleep: false,
+            kind: piece.kind,
+            part: piece.part,
         });
         let max = self.config.max_pieces;
         if self.bodies.len() > max {
@@ -187,6 +214,11 @@ impl DebrisWorld {
                 .extend(self.bodies.drain(..extra).map(|b| b.id));
         }
         id
+    }
+
+    /// Takes the ground hits recorded since the last call (for sound).
+    pub fn drain_impacts(&mut self) -> impl Iterator<Item = DebrisImpact> + '_ {
+        self.impacts.drain(..)
     }
 
     pub fn awake_count(&self) -> usize {
@@ -207,17 +239,33 @@ impl DebrisWorld {
         let h = dt / n as f32;
         for b in &mut self.bodies {
             b.age += dt;
+            let mut hit = 0.0f32;
             for _ in 0..n {
                 if b.asleep {
                     break;
                 }
-                step_body(b, &c, h);
+                hit = hit.max(step_body(b, &c, h));
+            }
+            if hit >= IMPACT_MIN_SPEED {
+                if self.impacts.len() >= MAX_PENDING_IMPACTS {
+                    self.impacts.remove(0);
+                }
+                self.impacts.push(DebrisImpact {
+                    position: b.position,
+                    speed: hit,
+                    radius: b.radius,
+                    kind: b.kind,
+                    part: b.part,
+                });
             }
         }
     }
 }
 
-fn step_body(b: &mut DebrisBody, c: &DebrisConfig, dt: f32) {
+/// Advances one piece by `dt`. Returns the fastest closing speed of a corner
+/// that hit the ground this step (0 if none), for impact sounds.
+fn step_body(b: &mut DebrisBody, c: &DebrisConfig, dt: f32) -> f32 {
+    let mut hit = 0.0f32;
     let damp = (-c.damping * dt).exp();
     b.velocity = (b.velocity + c.gravity * dt) * damp;
     b.angular_velocity *= damp;
@@ -242,6 +290,7 @@ fn step_body(b: &mut DebrisBody, c: &DebrisConfig, dt: f32) {
         }
         deepest = deepest.max(depth);
         let vn = b.velocity.y + b.angular_velocity.cross(arm).y;
+        hit = hit.max(-vn);
         let rn = arm.cross(Vec3::Y);
         let rx = arm.cross(Vec3::X);
         let rz = arm.cross(Vec3::Z);
@@ -339,6 +388,7 @@ fn step_body(b: &mut DebrisBody, c: &DebrisConfig, dt: f32) {
         b.rest_position = b.position;
         b.rest_rotation = b.rotation;
     }
+    hit
 }
 
 #[cfg(test)]
@@ -449,6 +499,44 @@ mod tests {
         for kind in MaterialKind::ALL {
             drop_fractures(&[kind], &[kind as u32], profile);
         }
+    }
+
+    #[test]
+    fn falling_pieces_report_impacts_and_resting_ones_do_not() {
+        let pose = MemberPose::straight(Vec3::new(0.0, 5.0, 0.0), Vec3::new(4.0, 5.0, 0.0));
+        let profile = Profile::Rect { b: 0.2, h: 0.3 };
+        let mut w = DebrisWorld::new(DebrisConfig::default());
+        for kind in MaterialKind::ALL {
+            let f = fracture(&BreakInput {
+                profile: &profile,
+                kind,
+                pose: &pose,
+                position: 0.5,
+                velocity_a: Vec3::ZERO,
+                velocity_b: Vec3::ZERO,
+                seed: kind as u32,
+            });
+            for p in &f.pieces {
+                w.add(p);
+            }
+        }
+        let mut hits = Vec::new();
+        for _ in 0..60 * 10 {
+            w.step(DT);
+            hits.extend(w.drain_impacts());
+        }
+        assert!(!hits.is_empty(), "falling pieces should report ground hits");
+        assert!(hits
+            .iter()
+            .all(|h| h.speed >= IMPACT_MIN_SPEED && h.position.is_finite()));
+        for _ in 0..60 {
+            w.step(DT);
+        }
+        assert_eq!(
+            w.drain_impacts().count(),
+            0,
+            "resting contact reported as impacts"
+        );
     }
 
     /// The old jitter case: small concrete chunks that never slept.

@@ -2086,6 +2086,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "breakit-audio"
+version = "0.1.0"
+dependencies = [
+ "breakit-core",
+ "cpal",
+]
+
+[[package]]
 name = "breakit-core"
 version = "0.1.0"
 dependencies = [
@@ -2100,6 +2108,7 @@ name = "breakit-game"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "breakit-audio",
  "breakit-core",
  "breakit-lab",
  "breakit-render",

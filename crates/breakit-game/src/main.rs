@@ -12,6 +12,7 @@ mod design;
 mod hud;
 mod perf;
 mod render;
+mod sound;
 mod test_scenario;
 mod visuals;
 
@@ -48,6 +49,7 @@ fn main() {
             capture::CapturePlugin,
             test_scenario::TestScenarioPlugin,
             perf::PerfPlugin,
+            sound::SoundPlugin,
         ))
         .add_systems(Update, (toggle_mode, cycle_table))
         .run();
