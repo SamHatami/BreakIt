@@ -9,6 +9,9 @@
 //! `--views play,hall` keeps only those views, `--tables` adds the play view
 //! of the other tables.
 //! `-- --bench` prints frame times for each quality preset.
+//! `-- --rig wind|quake|flume|trucks` calls that load rig to the table and
+//! runs it (R steps through them); the views `rig`, `rigs` and `park` look
+//! at it.
 
 use std::path::PathBuf;
 
@@ -17,16 +20,62 @@ use bevy::post_process::dof::DepthOfFieldMode;
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use bevy::window::PresentMode;
-use breakit_lab::{LabCamera, LabPlugin, LabQuality, LabSettings, LabStats, PlayTable};
+use breakit_lab::rigs::{
+    FanSetup, FlumeDrive, PaddleSetup, RigLive, RigSetup, ShakeSetup, TableDrive, VehicleDrive,
+    WheelDrive, WindDrive,
+};
+use breakit_lab::{
+    LabCamera, LabPlugin, LabQuality, LabRigs, LabSettings, LabStats, PlayTable, RigSet,
+};
 
 /// (focus, distance, yaw, pitch, label)
-const VIEWS: [(Vec3, f32, f32, f32, &str); 5] = [
+const VIEWS: [(Vec3, f32, f32, f32, &str); 8] = [
     (Vec3::new(0.0, 0.8, 0.0), 13.0, 0.6, 0.32, "play"),
     (Vec3::new(0.0, 0.5, 0.0), 9.0, -0.5, 0.12, "low"),
     (Vec3::new(0.0, 0.0, 0.0), 30.0, 0.9, 0.45, "table"),
     (Vec3::new(0.0, 0.0, 0.0), 75.0, 0.5, 0.25, "wide"),
     (Vec3::new(-240.0, 43.0, -220.0), 729.0, 1.08, 0.11, "hall"),
+    (Vec3::new(-3.0, 1.5, 0.0), 24.0, 0.75, 0.3, "rig"),
+    (Vec3::new(-6.0, 0.0, -4.0), 52.0, 0.55, 0.38, "rigs"),
+    (Vec3::new(-31.0, -10.0, -24.0), 40.0, 2.5, 0.5, "park"),
 ];
+
+/// A load rig run by the example, with made-up signals.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Demo {
+    #[default]
+    None,
+    Wind,
+    Quake,
+    Flume,
+    Trucks,
+}
+
+impl Demo {
+    const ALL: [Demo; 5] = [
+        Demo::None,
+        Demo::Wind,
+        Demo::Quake,
+        Demo::Flume,
+        Demo::Trucks,
+    ];
+
+    fn parse(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|d| format!("{d:?}").eq_ignore_ascii_case(name))
+    }
+
+    /// The built-in table the rig belongs with.
+    fn table(self) -> usize {
+        match self {
+            Demo::None | Demo::Trucks => 0,
+            Demo::Wind => 1,
+            Demo::Flume => 2,
+            Demo::Quake => 3,
+        }
+    }
+}
 
 #[derive(Resource)]
 struct Script {
@@ -63,8 +112,11 @@ fn main() {
             .collect(),
         None => (0..VIEWS.len()).collect(),
     };
-    let mut shots: Vec<(usize, usize)> = views.into_iter().map(|v| (v, 0)).collect();
-    if value("--views").is_none() || args.iter().any(|a| a == "--tables") {
+    let demo = value("--rig")
+        .and_then(|r| Demo::parse(r))
+        .unwrap_or_default();
+    let mut shots: Vec<(usize, usize)> = views.into_iter().map(|v| (v, demo.table())).collect();
+    if (value("--views").is_none() && demo == Demo::None) || args.iter().any(|a| a == "--tables") {
         shots.extend((1..4).map(|t| (0, t)));
     }
     App::new()
@@ -88,8 +140,15 @@ fn main() {
             step: 0,
             times: Vec::new(),
         })
+        .insert_resource(demo)
         .add_systems(Startup, setup)
-        .add_systems(Update, (keys, script, place_camera).chain())
+        .add_systems(
+            Update,
+            (
+                (keys, script, place_camera).chain(),
+                run_rigs.before(RigSet),
+            ),
+        )
         .run();
 }
 
@@ -137,7 +196,13 @@ fn keys(
     mut script: ResMut<Script>,
     mut table: ResMut<PlayTable>,
     mut settings: ResMut<LabSettings>,
+    mut demo: ResMut<Demo>,
 ) {
+    if input.just_pressed(KeyCode::KeyR) {
+        let i = Demo::ALL.iter().position(|d| *d == *demo).unwrap_or(0);
+        *demo = Demo::ALL[(i + 1) % Demo::ALL.len()];
+        *table = PlayTable::builtin(demo.table());
+    }
     for (k, i) in [
         (KeyCode::Digit1, 0),
         (KeyCode::Digit2, 1),
@@ -175,6 +240,7 @@ fn script(
     mut settings: ResMut<LabSettings>,
     stats: Res<LabStats>,
     time: Res<Time<Real>>,
+    demo: Res<Demo>,
     mut exit: MessageWriter<AppExit>,
 ) {
     script.frame += 1;
@@ -221,7 +287,8 @@ fn script(
     let Some(dir) = script.capture.clone() else {
         return;
     };
-    let wait = 40;
+    // A rig needs time to roll in and spin up.
+    let wait = if *demo == Demo::None { 40 } else { 70 };
     let Some(&(view, tbl)) = script.shots.get(script.step) else {
         // Give the last screenshot time to be written.
         if script.frame > 20 {
@@ -231,13 +298,17 @@ fn script(
     };
     if script.frame == 1 {
         script.view = view;
-        if tbl != 0 || script.step == 0 {
+        if tbl != demo.table() || script.step == 0 {
             *table = PlayTable::builtin(tbl);
         }
     }
     if script.frame == wait + if script.step == 0 { 60 } else { 0 } {
+        let rig = match *demo {
+            Demo::None => String::new(),
+            d => format!("-{d:?}").to_lowercase(),
+        };
         let name = format!(
-            "{}-{}.png",
+            "{}-{}{rig}.png",
             VIEWS[view].4,
             table.insert.name().replace(' ', "-")
         );
@@ -255,4 +326,95 @@ fn place_camera(script: Res<Script>, mut cam: Single<(&mut Transform, &mut LabCa
     *cam.0 = Transform::from_translation(focus + rot * Vec3::new(0.0, 0.0, dist))
         .looking_at(focus, Vec3::Y);
     cam.1.focus_distance = dist;
+}
+
+/// Calls the demo's rig to the table and drives it with made-up signals,
+/// the way the game drives it from the load models.
+fn run_rigs(demo: Res<Demo>, time: Res<Time>, mut rigs: ResMut<LabRigs>) {
+    let t = time.elapsed_secs();
+    let mut setup = RigSetup::default();
+    let mut live = RigLive {
+        time: t,
+        ..default()
+    };
+    match *demo {
+        Demo::None => {}
+        Demo::Wind => {
+            setup.fan = Some(FanSetup { direction: Vec3::X });
+            let ramp = ((t - 4.0) / 3.0).clamp(0.0, 1.0);
+            let gust = 4.0 * (t * 0.9).sin() * (t * 0.37).cos() * ramp;
+            let speed = 25.0 * ramp + gust;
+            live.wind = Some(WindDrive {
+                fan_drive: (speed / 32.0).clamp(0.0, 1.0),
+                speed,
+                direction: Vec3::X,
+                gust,
+            });
+        }
+        Demo::Quake => {
+            setup.shake = Some(ShakeSetup::default());
+            // A 1.5 Hz table motion with a wandering envelope, 0.4 g peak.
+            let w = std::f32::consts::TAU * 1.5;
+            let env = 0.5 + 0.5 * (t * 0.6).sin();
+            let a = 3.9 * env;
+            live.table = Some(TableDrive {
+                displacement: Vec3::X * (-a / (w * w) * (w * t).sin()),
+                velocity: Vec3::X * (-a / w * (w * t).cos()),
+                acceleration: Vec3::X * (a * (w * t).sin()),
+                drive: env,
+            });
+        }
+        Demo::Flume => {
+            let paddle = PaddleSetup::default();
+            setup.paddle = Some(paddle);
+            let w = std::f32::consts::TAU / 2.6;
+            let ramp = ((t - 4.0) / 3.0).clamp(0.0, 1.0);
+            let stroke = 0.28 * ramp;
+            live.flume = Some(FlumeDrive {
+                bed: paddle.bed,
+                still_level: -1.0,
+                depth: -1.0 - paddle.bed,
+                paddle_rest: paddle.rest,
+                paddle_position: stroke * (w * t).sin(),
+                paddle_velocity: stroke * w * (w * t).cos(),
+                wave_height: 0.5 * ramp,
+                wave_period: 2.6,
+                direction: Vec3::X,
+                current_speed: 0.0,
+            });
+        }
+        Demo::Trucks => {
+            let convoy: [(&str, &[f32]); 4] = [
+                ("Loaded tipper", &[0.0, 3.4, 4.7]),
+                ("Coil hauler", &[0.0, 3.8, 5.1]),
+                ("Mobile crane", &[0.0, 1.6, 4.4, 5.8]),
+                ("Delivery truck", &[0.0, 3.2]),
+            ];
+            for (k, (name, axles)) in convoy.into_iter().enumerate() {
+                let speed = 2.5;
+                let front = (10.0 + speed * t - 8.5 * k as f32).rem_euclid(34.0) - 14.0;
+                let braking = (4.0..7.0).contains(&front);
+                live.vehicles.push(VehicleDrive {
+                    name: name.to_string(),
+                    forward: Vec3::X,
+                    speed,
+                    wheels: axles
+                        .iter()
+                        .enumerate()
+                        .map(|(n, a)| WheelDrive {
+                            contact: Vec3::new(front - a, 0.0, 0.0),
+                            bounce: 0.03 * (t * 7.0 + n as f32 * 1.3 + k as f32).sin(),
+                            lifted: false,
+                        })
+                        .collect(),
+                    braking,
+                    fallen: false,
+                });
+            }
+        }
+    }
+    if rigs.setup != setup {
+        rigs.setup = setup;
+    }
+    rigs.live = live;
 }
