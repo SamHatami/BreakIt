@@ -92,7 +92,7 @@ mod tests {
         h.observe(&d);
         let b = d.add_node(Vec3::X);
         h.observe(&d);
-        d.add_beam(a, b, BeamKind::SteelTube);
+        d.add_beam(a, b, BeamKind::part("steel-tube-m"));
         h.observe(&d);
         assert_eq!(d.beams.len(), 1);
 

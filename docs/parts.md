@@ -48,7 +48,36 @@ not suit the material (welded timber).
 joint used, and every part and every family size × grade × joint inside the
 limits.
 
+## Automatic joints
+
+`auto_joint(choice, others, allowed)` picks a member end's joint from its
+material and the materials of the other members at that node: timber to
+timber dowelled, concrete to concrete monolithic, steel and mixed bolted,
+concrete to anything else on a pinned bearing, solid round bars pinned. The
+pick is always one of the family's joints. Steel defaults to bolted rather
+than welded because joints are priced per member end: an all-welded starter
+truss costs about 90 000 kr against the bridge sheet's 54 000 kr budget.
+Welding is stiffer and the player can choose it.
+
+## In the game (breakit-game)
+
+- `design::BeamKind(MemberChoice)` is what each `Beam` is built from;
+  `Beam.joints: [Option<JointSpec>; 2]` holds the player's override per end,
+  `None` = automatic. `Design::joints(i)` gives the actual joints,
+  `Design::member(i)` the full choice, and `to_structure` resolves it at the
+  member's length and calls `set_ends`. `Design::bill` prices joints by kind.
+- Palette (`build_drawer`): material tabs (keys 1 to 4) and the catalog parts
+  of that material. A scenario's material limits filter the parts.
+- Inspector (`build_inspector`): standard size (`[` `]` or the arrows), grade
+  (G), joint at each end (click: automatic, then each allowed type), section
+  and joint utilisation (`MemberState.joints` from
+  `MemberForces.joint_utilization` in build, `MemberDamage.joint` in the
+  test), cost including joints.
+- Visuals: `MemberStyle.profile` is the real section. The strong axis is
+  local y (up) in both the solver (`iz`) and the mesh (`h`).
+
 ## Not yet
 
 Cables (tension only), decks, supports and foundations, springs and dampers
-are later phases. The palette and inspector UI waits for the UI flow PR.
+are later phases. Engineer controls are open to everyone until the unlock
+model is decided; Sandbox custom dimensions have no UI yet.
