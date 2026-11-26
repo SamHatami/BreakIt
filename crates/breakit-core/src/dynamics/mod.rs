@@ -28,19 +28,21 @@
 //! rotations of a node.
 
 use nalgebra::{Quaternion, UnitQuaternion};
-use rayon::prelude::*;
 
 use crate::contact::{ContactEvent, Ground, NodeContact};
 use crate::damage::{self, Committed, Law, LawCache, MatState, Mech, MemberDamage};
 use crate::frame::member_axes;
 use crate::joint::{bending_stiffness, Joint};
 use crate::linsolve::{tri, Backend, LinSolver, Policy, Stats, BLOCK_NNZ};
+use crate::simd::SimdLevel;
 use crate::{Structure, Vec3};
 
+mod assemble;
 mod beam;
 mod direct;
 mod ground;
 mod plastic;
+mod pool;
 mod xpbd;
 
 use direct::DirectSystem;
@@ -71,12 +73,21 @@ pub struct SimConfig {
     /// than a new one; 1 factorises every substep.
     pub refactor_every: usize,
     /// Direct solver only: structures with at least this many members run
-    /// assembly and the step check on the rayon thread pool. Results do not
-    /// depend on the thread count. The default, `usize::MAX`, keeps everything
-    /// on the calling thread: on the 4-core cloud machine this was measured
-    /// on, threads gained at most 15% at 4,000 to 6,000 members and nothing
-    /// below.
+    /// assembly and the step check on the rayon thread pool, a thread per
+    /// thousand members or so. Results do not depend on the thread count:
+    /// they are the single-thread results bit for bit. `usize::MAX` keeps
+    /// everything, the linear solver included, on the calling thread.
+    ///
+    /// The default is 2,048. On the 4-core cloud machine this was measured
+    /// on, 4 threads took 15% off a frame at 2,200 to 5,800 members (2
+    /// threads: 7 to 10% from 3,900, nothing at 2,200) and nothing at
+    /// 1,300; a single-thread pool costs nothing either way.
     pub parallel_min_members: usize,
+    /// Direct solver only: instruction set of the assembly and linear-solver
+    /// kernels. The default is [`SimdLevel::from_env`];
+    /// [`SimdLevel::Scalar`] runs the whole simulation on the scalar
+    /// reference path.
+    pub simd: SimdLevel,
     /// Direct solver only: which linear solver to use. The default picks per
     /// structure.
     pub linear_backend: Backend,
@@ -126,7 +137,8 @@ impl Default for SimConfig {
             substeps: 4,
             iterations: 1,
             refactor_every: 0,
-            parallel_min_members: usize::MAX,
+            parallel_min_members: 2048,
+            simd: SimdLevel::from_env(),
             linear_backend: Backend::Auto,
             linear_tolerance: 1e-4,
             refactor_cost: 0,
@@ -381,7 +393,7 @@ impl DynamicSim {
             // Built here, not on the first step: the symbolic analysis of a
             // large structure costs several frames' worth of time.
             direct: (config.solver == Solver::Direct)
-                .then(|| DirectSystem::new(&bodies, &beams, config.linear_backend))
+                .then(|| DirectSystem::new(&bodies, &beams, &config))
                 .flatten(),
             config,
             bodies,
@@ -502,8 +514,20 @@ impl DynamicSim {
     /// Advance by `dt` seconds (one render frame).
     pub fn step(&mut self, dt: f64) {
         let h = dt / self.config.substeps as f64;
-        for _ in 0..self.config.substeps {
-            self.substep(h);
+        let pool = self.config.solver == Solver::Direct && self.runs_parallel();
+        let mut substeps = || {
+            for _ in 0..self.config.substeps {
+                self.substep(h);
+            }
+        };
+        if pool {
+            // Enter the thread pool once per frame. A parallel loop started
+            // from outside the pool hands its job over and blocks until a
+            // worker wakes, every time; started from a worker it costs
+            // nothing extra. A frame has a dozen or more such loops.
+            rayon::join(substeps, || ());
+        } else {
+            substeps();
         }
     }
 

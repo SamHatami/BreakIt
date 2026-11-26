@@ -33,6 +33,53 @@ type B6 = [f64; 36];
 type V6 = [f64; 6];
 const ZERO: B6 = [0.0; 36];
 
+/// The three blocks of the matrix a beam adds to when all twelve of its
+/// DOFs are unknowns and its ends are different nodes: then its packed
+/// block splits into fixed runs and needs no per-entry positions.
+#[derive(Clone, Copy)]
+struct Target {
+    /// Node blocks of ends a and b; `a == ABSENT` marks a beam that goes
+    /// through `beam_pos` instead.
+    a: u32,
+    b: u32,
+    /// Index into the matrix of the block coupling the two ends.
+    pair: u32,
+    /// The coupling block is stored with end a's rows and end b's columns.
+    flip: bool,
+}
+
+/// Add the lower triangle of one end's 6x6 block of a beam (`o` = 0 for end
+/// a, 6 for end b) to that node's block.
+#[inline(always)]
+fn add_node(dst: &mut B6, lower: &[f64; BLOCK_NNZ], o: usize) {
+    for r in 0..6 {
+        let row = &lower[tri(o + r, o)..][..r + 1];
+        for (c, v) in row.iter().enumerate() {
+            dst[c * 6 + r] += v;
+        }
+    }
+}
+
+/// Add the coupling 6x6 block of a beam (rows at end b, columns at end a) to
+/// the matrix block of the node pair; `flip` when that block is stored the
+/// other way round.
+#[inline(always)]
+fn add_pair(dst: &mut B6, lower: &[f64; BLOCK_NNZ], flip: bool) {
+    for r in 0..6 {
+        let row = &lower[tri(6 + r, 0)..][..6];
+        if flip {
+            dst[r * 6..r * 6 + 6]
+                .iter_mut()
+                .zip(row)
+                .for_each(|(d, v)| *d += v);
+        } else {
+            for c in 0..6 {
+                dst[c * 6 + r] += row[c];
+            }
+        }
+    }
+}
+
 // Every kernel below is generic over the instruction set and compiled once
 // per set `pulp` dispatches to (see `crate::simd`); the scalar copy is the
 // reference. The fixed 6x6 loops unroll and vectorise under each set.
@@ -241,6 +288,8 @@ pub(crate) struct BlockChol {
     pair_l: Vec<u32>,
     /// Per beam, the flat index into `a` of each packed lower-triangle entry.
     beam_pos: Vec<[u32; BLOCK_NNZ]>,
+    /// Per beam, its blocks when it takes the fast path of `add_block`.
+    target: Vec<Target>,
     col_ptr: Vec<u32>,
     row_idx: Vec<u32>,
     /// Off-diagonal blocks of the factor, by column.
@@ -352,6 +401,31 @@ impl BlockChol {
                 pos
             })
             .collect();
+        let target = layout
+            .ends
+            .iter()
+            .map(|e| match *e {
+                [Some(a), Some(b)]
+                    if a != b
+                        && layout.free[a as usize] == [true; 6]
+                        && layout.free[b as usize] == [true; 6] =>
+                {
+                    let (na, nb) = (inv[a as usize], inv[b as usize]);
+                    Target {
+                        a: na,
+                        b: nb,
+                        pair: (nn + pair_of(na.max(nb), na.min(nb))) as u32,
+                        flip: na > nb,
+                    }
+                }
+                _ => Target {
+                    a: ABSENT,
+                    b: ABSENT,
+                    pair: ABSENT,
+                    flip: false,
+                },
+            })
+            .collect();
         let dof_pos = layout
             .loc
             .iter()
@@ -386,6 +460,7 @@ impl BlockChol {
             pair_row,
             pair_l,
             beam_pos,
+            target,
             l: vec![ZERO; row_idx.len()],
             w: vec![ZERO; nn],
             col_ptr,
@@ -433,6 +508,13 @@ impl BlockChol {
 
     #[inline]
     pub fn add_block(&mut self, beam: usize, lower: &[f64; BLOCK_NNZ]) {
+        let t = self.target[beam];
+        if t.a != ABSENT {
+            add_node(&mut self.a[t.a as usize], lower, 0);
+            add_node(&mut self.a[t.b as usize], lower, 6);
+            add_pair(&mut self.a[t.pair as usize], lower, t.flip);
+            return;
+        }
         let vals = self.a.as_flattened_mut();
         for (&p, &v) in self.beam_pos[beam].iter().zip(lower) {
             if p != ABSENT {
@@ -837,6 +919,33 @@ mod tests {
             let diff: Vec<f64> = x.iter().zip(&x2).map(|(a, b)| a - b).collect();
             assert!(norm(&diff) < 1e-10 * norm(&x));
         }
+    }
+
+    /// The fixed-run path of `add_block` puts every entry where the
+    /// per-entry positions say.
+    #[test]
+    fn fast_add_block_matches_the_positions() {
+        let mut rng = Rng(0xA0761D6478BD642F);
+        let mut fast = 0;
+        for (nodes, pairs) in graphs(&mut rng) {
+            let blocks: Vec<_> = pairs
+                .iter()
+                .map(|&(a, b)| [Some(6 * a), Some(6 * a + 3), Some(6 * b), Some(6 * b + 3)])
+                .collect();
+            let mut chol = BlockChol::new(&NodeLayout::new(6 * nodes, &blocks));
+            for beam in 0..blocks.len() {
+                let block = random_block(&mut rng);
+                chol.clear();
+                chol.add_block(beam, &block);
+                let mut expected = vec![0.0; chol.a.len() * 36];
+                for (&p, &v) in chol.beam_pos[beam].iter().zip(&block) {
+                    expected[p as usize] += v;
+                }
+                assert_eq!(chol.a.as_flattened(), &expected[..]);
+                fast += (chol.target[beam].a != super::ABSENT) as usize;
+            }
+        }
+        assert!(fast > 0, "no beam took the fast path");
     }
 
     #[test]
