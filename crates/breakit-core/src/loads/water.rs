@@ -119,6 +119,31 @@ pub enum Waves {
     Solitary(Solitary),
 }
 
+/// Damage fraction from which a sealed section lets the water in: it then
+/// displaces only its material, like an open one.
+pub const FLOOD_DAMAGE: f64 = 0.75;
+
+/// Wave-radiation damping of a section moving in the surface, as a share
+/// of `ρ D sqrt(g D)` per metre and per m/s. An estimate: the exact value
+/// depends on the frequency; this gives a float a few bobs before it
+/// settles, as a real one has.
+pub const RADIATION: f64 = 0.3;
+
+/// Fraction of a section's area that is under water when the surface is
+/// `rise` above its axis and the section reaches `half` above and below
+/// it: a circle segment for a `round` section, a strip for a rectangle.
+pub fn wet_fraction(rise: f64, half: f64, round: bool) -> f64 {
+    if half <= 1e-9 {
+        return if rise >= 0.0 { 1.0 } else { 0.0 };
+    }
+    let t = (rise / half).clamp(-1.0, 1.0);
+    if round {
+        ((-t).acos() + t * (1.0 - t * t).sqrt()) / std::f64::consts::PI
+    } else {
+        0.5 * (t + 1.0)
+    }
+}
+
 /// Morison coefficients by section shape.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -172,8 +197,9 @@ pub struct Water {
     /// Water density, kg/m³ (1000: fresh water in the flume; sea 1025).
     pub density: f64,
     pub coefficients: Coefficients,
-    /// Sealed tubes displace their outer area; flooded ones only their
-    /// material.
+    /// Sealed tubes displace their outer area until they are badly damaged
+    /// ([`FLOOD_DAMAGE`]); flooded ones, and every other section, only
+    /// their material.
     pub sealed: bool,
     /// Integration samples per member (8 resolves a member crossing the
     /// surface to 1/8 of its length).
@@ -644,7 +670,7 @@ impl Water {
     }
 
     /// Add this frame's water forces to `out`.
-    pub fn apply(&mut self, v: &View, t: f64, ramp: f64, scale: f64, _dt: f64, out: &mut [Vec3]) {
+    pub fn apply(&mut self, v: &View, t: f64, ramp: f64, scale: f64, dt: f64, out: &mut [Vec3]) {
         let sea = self.sea(t, ramp);
         self.advance_paddle(&sea);
         // Simulated water is already in the flume: the ramp fades the
@@ -661,30 +687,63 @@ impl Water {
             Some(f) => f.kinematics(p),
             None => sea.kinematics(p),
         };
+        let surface_at = |x: f64, z: f64| match &field {
+            Some(f) => f.surface(x, z),
+            None => (sea.depth > 0.0).then(|| sea.surface(x, z)),
+        };
         let rho = self.density;
         let co = &self.coefficients;
         for m in 0..v.structure.members.len() {
-            let Some(mn) = v.member(m) else { continue };
-            if mn.xa.y.min(mn.xb.y) > top || mn.xa.y.max(mn.xb.y) < bed {
+            let g = &v.geometry.members[m];
+            let Some(mn) = v.member(m) else {
+                if v.sim.is_broken(m) {
+                    self.apply_to_debris(v, m, dt, scale, &surface_at, &kinematics, out);
+                }
+                continue;
+            };
+            if mn.xa.y.min(mn.xb.y) - g.depth_y.max(g.depth_z) > top || mn.xa.y.max(mn.xb.y) < bed {
                 continue;
             }
-            let g = &v.geometry.members[m];
             let (cd, ca) = match g.shape {
                 Shape::Tube { .. } => (co.tube_cd, co.tube_ca),
                 Shape::Rect { .. } => (co.rect_cd, co.rect_ca),
             };
             let inertia = rho * (1.0 + ca) * g.outer_area;
+            // A sealed section keeps the water out until it is badly damaged.
+            // Only a closed tube holds air; an I-beam's outline is not a hull.
+            let dry_inside = self.sealed
+                && matches!(g.shape, Shape::Tube { .. })
+                && v.sim.damage(m).damage < FLOOD_DAMAGE;
             let buoy = rho
                 * G
-                * if self.sealed {
+                * if dry_inside {
                     g.outer_area
                 } else {
                     g.solid_area
                 };
             let shape = g.shape;
             let (dy, dz) = (g.depth_y, g.depth_z);
+            // Half the height of the section as the water sees it rise.
+            let (round, half) = match shape {
+                Shape::Tube { .. } => (true, 0.5 * dy * (1.0 - mn.x.y * mn.x.y).max(0.0).sqrt()),
+                Shape::Rect { .. } => (false, 0.5 * (dy * mn.y.y.abs() + dz * mn.z.y.abs())),
+            };
+            let width = match shape {
+                Shape::Tube { .. } => dy,
+                Shape::Rect { .. } => 0.5 * (dy + dz),
+            };
             View::distribute(&mn, self.samples, out, |_, p, vel| {
-                let Some((u, a)) = kinematics(p) else {
+                let Some(surface) = surface_at(p.x, p.z) else {
+                    return Vec3::zeros();
+                };
+                let wet = wet_fraction(surface - p.y, half, round);
+                if wet <= 0.0 {
+                    return Vec3::zeros();
+                }
+                // A section floating in the surface feels the water just
+                // under it.
+                let q = Vec3::new(p.x, p.y.min(surface - 1e-6), p.z);
+                let Some((u, a)) = kinematics(q) else {
                     return Vec3::zeros();
                 };
                 let ur = u - vel;
@@ -698,8 +757,59 @@ impl Water {
                         mn.y * (q * dz * urn.dot(&mn.y)) + mn.z * (q * dy * urn.dot(&mn.z))
                     }
                 };
-                (an * inertia + drag + Vec3::y() * buoy) * scale
+                // Waves made by a section moving in the surface carry its
+                // energy away: what stops a float from bobbing for ever.
+                let waterline = 4.0 * wet * (1.0 - wet);
+                let radiation = urn * (RADIATION * rho * width * (G * width).sqrt() * waterline);
+                (an * inertia + drag + Vec3::y() * buoy) * (wet * scale) + radiation * scale
             });
+        }
+    }
+
+    /// Water on a broken member: each half goes with its end node, floods,
+    /// and feels buoyancy and drag there, so timber debris floats and steel
+    /// sinks slowly instead of falling through the water.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_to_debris(
+        &self,
+        v: &View,
+        m: usize,
+        dt: f64,
+        scale: f64,
+        surface_at: &dyn Fn(f64, f64) -> Option<f64>,
+        kinematics: &dyn Fn(Vec3) -> Option<(Vec3, Vec3)>,
+        out: &mut [Vec3],
+    ) {
+        let mem = &v.structure.members[m];
+        let g = &v.geometry.members[m];
+        let rest = (v.structure.nodes[mem.b] - v.structure.nodes[mem.a]).norm();
+        let half_length = 0.5 * rest;
+        let width = 0.5 * (g.depth_y + g.depth_z);
+        let cd = match g.shape {
+            Shape::Tube { .. } => self.coefficients.tube_cd,
+            Shape::Rect { .. } => self.coefficients.rect_cd,
+        };
+        for n in [mem.a, mem.b] {
+            let p = v.sim.position(n);
+            let Some(surface) = surface_at(p.x, p.z) else {
+                continue;
+            };
+            let wet = wet_fraction(surface - p.y, 0.5 * width, true);
+            if wet <= 0.0 {
+                continue;
+            }
+            let Some((u, _)) = kinematics(Vec3::new(p.x, p.y.min(surface - 1e-6), p.z)) else {
+                continue;
+            };
+            let ur = u - v.sim.velocity(n);
+            let mut drag = ur * (0.5 * self.density * cd * width * half_length * ur.norm());
+            // Explicit drag must not do more than stop the piece in a step.
+            let most = v.sim.node_mass(n) * ur.norm() / dt.max(1e-6);
+            if drag.norm() > most {
+                drag *= most / drag.norm();
+            }
+            let buoy = self.density * G * g.solid_area * half_length;
+            out[n] += (drag + Vec3::y() * buoy) * (wet * scale);
         }
     }
 

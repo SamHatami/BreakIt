@@ -2186,6 +2186,7 @@ name = "breakit-water-render"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "breakit-core",
  "breakit-lab",
  "breakit-water",
 ]
