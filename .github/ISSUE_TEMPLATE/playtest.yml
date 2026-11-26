@@ -1,0 +1,44 @@
+name: Playtest report
+description: Something confusing, wrong, slow or broken while playing a build.
+title: "[playtest] "
+labels: ["playtest"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Build
+      description: The first line of the read-out in the top right, or the window title (e.g. "BreakIt v0.1.0 (abc1234)").
+      placeholder: BreakIt v0.1.0 (abc1234)
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of report
+      options:
+        - Crash or freeze
+        - Physics looks wrong
+        - Confusing or hard to use
+        - Slow or stuttering
+        - Visual or sound glitch
+        - Idea or general feedback
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you saw. Steps to repeat it if you have them.
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: OS, GPU, and the fps the read-out showed if it matters.
+      placeholder: Windows 11, RTX 3060, 45 fps during collapse
+  - type: textarea
+    id: media
+    attributes:
+      label: Screenshots, clips, log
+      description: Drag files in here. For crashes and performance, attach logs/breakit.log (or breakit.prev.log after a crash) from the game folder.

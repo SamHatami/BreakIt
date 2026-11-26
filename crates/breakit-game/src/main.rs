@@ -4,6 +4,10 @@
 //! utilisation), then press Space to run it in the real-time solver and
 //! watch it hold or break.
 
+// Release builds on Windows open no console window; logs go to the file
+// set up in `release.rs`.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod analysis;
 mod build;
 mod camera;
@@ -11,6 +15,7 @@ mod capture;
 mod design;
 mod hud;
 mod perf;
+mod release;
 mod render;
 mod visuals;
 
@@ -26,13 +31,17 @@ pub enum Mode {
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "BreakIt".into(),
-                ..default()
-            }),
-            ..default()
-        }))
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: release::version_line(),
+                        ..default()
+                    }),
+                    ..default()
+                })
+                .set(release::log_plugin()),
+        )
         .insert_resource(ClearColor(Color::srgb(0.1, 0.11, 0.13)))
         .add_plugins(LabPlugin)
         .insert_resource(design::Design::starter_bridge())

@@ -3,7 +3,9 @@
 //! Shows the average and worst frame over the last two seconds, the CPU
 //! time of physics and of the member visuals, and what the lab costs. Set
 //! `BREAKIT_PERF_LOG=1` to also print it once a second (for runs without a
-//! screen, and for pasting into an issue).
+//! screen, and for pasting into an issue). It goes to the log file too.
+//! The first line is the build's version, so screenshots say what they
+//! were taken on.
 
 use std::collections::VecDeque;
 use std::time::Instant;
@@ -117,7 +119,8 @@ fn update_readout(
     };
     let visuals = render.map(|r| r.scene_update_ms).unwrap_or(0.0);
     let s = format!(
-        "{:.1} ms  {:.0} fps  worst {:.1} ms\nphysics {:.2} ms  visuals {:.2} ms\nlab {}k tris  {} meshes  {} lamps  table: {}",
+        "{}\n{:.1} ms  {:.0} fps  worst {:.1} ms\nphysics {:.2} ms  visuals {:.2} ms\nlab {}k tris  {} meshes  {} lamps  table: {}",
+        crate::release::version_line(),
         avg,
         1000.0 / avg.max(1e-3),
         worst,
@@ -131,7 +134,7 @@ fn update_readout(
     perf.since_log += dt;
     if perf.log && perf.since_log >= 1.0 {
         perf.since_log = 0.0;
-        println!("perf: {}", s.replace('\n', "  |  "));
+        info!("perf: {}", s.replace('\n', "  |  "));
     }
     let (t, vis) = &mut *text;
     let want = if perf.visible {

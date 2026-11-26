@@ -23,3 +23,11 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# Playtest builds (the release workflow): `cargo build --profile dist`.
+# Thin LTO makes the solver and Bevy a little faster for players without
+# slowing `cargo test --release`; symbols are stripped to keep the zip small.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+strip = true
