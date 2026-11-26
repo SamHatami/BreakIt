@@ -188,28 +188,16 @@ fn configs() -> Vec<(&'static str, SimConfig)> {
         substeps,
         ..Default::default()
     };
-    // The solver before the step check and implicit plasticity existed.
+    // The solver before the step check, implicit plasticity and tension
+    // stiffness existed (16 substeps was its default).
     let old = |substeps: usize| SimConfig {
         step_check: false,
         implicit_plasticity: false,
+        tension_stiffness: false,
         ..sub(substeps)
     };
     vec![
         ("16 old", old(16)),
-        (
-            "16 check only",
-            SimConfig {
-                step_check: true,
-                ..old(16)
-            },
-        ),
-        (
-            "4 check only",
-            SimConfig {
-                step_check: true,
-                ..old(4)
-            },
-        ),
         ("16", sub(16)),
         ("8", sub(8)),
         ("4", sub(4)),
@@ -252,7 +240,7 @@ fn main() {
     let dt = 1.0 / 60.0;
 
     println!(
-        "| structure | members | dofs | solver | elastic ms/frame (mean / p99) | probe disp mm | static mm | collapse ms/frame (mean / p99 / max) | breaks | first break s | factor / reject / backtrack per frame |"
+        "| structure | members | dofs | solver | elastic ms/frame (mean / p99) | probe disp mm | static mm | collapse ms/frame (mean / p99 / max) | breaks | first break s | factor / reject / backtrack / extra iter per frame |"
     );
     println!("|---|---|---|---|---|---|---|---|---|---|---|");
     for size in sizes.split(',') {
@@ -314,7 +302,7 @@ fn main() {
                 let co = timing(t);
                 let st = sim.solver_stats();
                 println!(
-                    "| {} | {} | {} | {} | {:.2} / {:.2} | {:.4} | {} | {:.2} / {:.2} / {:.2} | {} | {} | {:.2} / {:.2} / {:.2} |",
+                    "| {} | {} | {} | {} | {:.2} / {:.2} | {:.4} | {} | {:.2} / {:.2} / {:.2} | {} | {} | {:.2} / {:.2} / {:.2} / {:.2} |",
                     case.name,
                     s.members.len(),
                     s.nodes.len() * 6,
@@ -333,6 +321,7 @@ fn main() {
                     st.factorizations as f64 / frames_collapse as f64,
                     st.stale_rejects as f64 / frames_collapse as f64,
                     st.backtracks as f64 / frames_collapse as f64,
+                    st.extra_iterations as f64 / frames_collapse as f64,
                 );
             }
         }

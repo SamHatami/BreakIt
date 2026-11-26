@@ -50,13 +50,17 @@ pub struct SimConfig {
     pub substeps: usize,
     /// Gauss-Seidel sweeps or Gauss-Newton iterations per substep.
     pub iterations: usize,
-    /// Direct solver only: refactorise the system matrix every this many
-    /// solves and reuse the factorisation in between. The matrix only changes
-    /// as members rotate, so a factorisation a few substeps old still
-    /// converges. 4 with 16 substeps passes every test, including buckling.
+    /// Direct solver only: refactorise the system matrix at least every this
+    /// many solves and reuse the factorisation in between. The matrix only
+    /// changes as members rotate, yield or pick up tension, so a factorisation
+    /// a few substeps old usually still converges; `step_check` catches the
+    /// substeps where it does not.
     pub refactor_every: usize,
     /// Direct solver only: check every step for sufficient decrease of the
-    /// substep objective; refactorise early or shorten the step when it fails.
+    /// substep objective. A failing step from a reused factorisation is redone
+    /// with a fresh one; a failing step from a fresh one is shortened and
+    /// followed by another iteration. Without it, reusing a factorisation
+    /// while members rotate quickly (a buckled column folding over) diverges.
     pub step_check: bool,
     /// Direct solver only: relaxation time τ (s) of plastic flow. Stress above
     /// yield decays as exp(−t/τ), so a member overloaded by ΔN stretches
@@ -69,6 +73,10 @@ pub struct SimConfig {
     /// and returning the overstress afterwards. The old way limits plastic
     /// flow to one return per substep, so it slows down with fewer substeps.
     pub implicit_plasticity: bool,
+    /// Direct solver only: add the geometric stiffness of tensile axial forces
+    /// to the matrix. Without it a slender member in high tension (a tie, a
+    /// cable) is unstable sideways at any practical substep count.
+    pub tension_stiffness: bool,
     pub gravity: Vec3,
     /// Linear velocity damping, 1/s. Keeps collapses readable and lets
     /// structures settle.
@@ -79,20 +87,15 @@ pub struct SimConfig {
 
 impl Default for SimConfig {
     fn default() -> Self {
-        let env = |k: &str, d: usize| {
-            std::env::var(k)
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(d)
-        };
         Self {
             solver: Solver::Direct,
-            substeps: env("BK_SUB", 16),
-            iterations: env("BK_IT", 1),
-            refactor_every: env("BK_REF", 4),
-            step_check: env("BK_CHECK", 1) != 0,
+            substeps: 4,
+            iterations: 1,
+            refactor_every: 4,
+            step_check: true,
             plastic_relaxation: 1.0 / 960.0,
-            implicit_plasticity: env("BK_IMPL", 1) != 0,
+            implicit_plasticity: true,
+            tension_stiffness: true,
             gravity: Vec3::new(0.0, -9.81, 0.0),
             damping: 0.5,
             plasticity: true,
@@ -309,8 +312,7 @@ fn return_bend(
     let mut energy = 0.5 * (k4 * (e[0] * e[0] + e[1] * e[1]) + 2.0 * k2 * e[0] * e[1]);
     if act[0] || act[1] {
         // Not when elastic: mp may be infinite there.
-        energy += mp * (dp[0].abs() + dp[1].abs())
-            + 0.5 * k4 * r * (dp[0] * dp[0] + dp[1] * dp[1]);
+        energy += mp * (dp[0].abs() + dp[1].abs()) + 0.5 * k4 * r * (dp[0] * dp[0] + dp[1] * dp[1]);
     }
     (m, kt, energy, dp)
 }
@@ -326,12 +328,16 @@ pub struct SolverStats {
     pub stale_rejects: usize,
     /// Step halvings after a fresh-factorisation step failed the test.
     pub backtracks: usize,
+    /// Gauss-Newton iterations added to a substep after a shortened step.
+    pub extra_iterations: usize,
 }
 
 /// Sufficient-decrease constant of the step check: accepts steps whose true
 /// curvature is up to 2(1 − ARMIJO) = 1.5 times the factorised one.
 const ARMIJO: f64 = 0.25;
 const MAX_BACKTRACKS: usize = 4;
+/// Extra Gauss-Newton iterations allowed in a substep after a shortened step.
+const MAX_RELINEARISE: usize = 2;
 
 impl DynamicSim {
     pub fn new(s: &Structure, config: SimConfig) -> Self {
@@ -619,14 +625,13 @@ impl DynamicSim {
 
     fn strains(&self, i: usize, gm: &Geom) -> Strains {
         let bm = &self.beams[i];
-        let mut th = [[0.0; 2]; 2];
-        for axis in 0..2 {
+        let th = std::array::from_fn(|axis| {
             let u = gm.axes[axis];
-            th[axis] = [
+            [
                 gm.e.cross(&gm.ta).dot(&u) - bm.hinge[axis][0],
                 gm.e.cross(&gm.tb).dot(&u) - bm.hinge[axis][1],
-            ];
-        }
+            ]
+        });
         Strains {
             axial: gm.len - bm.l0 - bm.plastic_elongation,
             twist: gm.na.cross(&gm.nb).dot(&gm.e),
@@ -671,8 +676,8 @@ impl DynamicSim {
             out.kt[axis] = kt;
             out.dp[axis] = dp;
             out.energy += e;
-            for end in 0..2 {
-                out.yield_mask |= ((dp[end] != 0.0) as u8) << (1 + axis * 2 + end);
+            for (end, d) in dp.iter().enumerate() {
+                out.yield_mask |= ((*d != 0.0) as u8) << (1 + axis * 2 + end);
             }
         }
         out
@@ -828,6 +833,28 @@ impl DynamicSim {
                     }
                 }
             }
+            if with_blocks && self.config.tension_stiffness {
+                // Geometric stiffness of the axial force, (N/L)(I − e eᵀ) on
+                // the relative translation of the ends: the restoring force of
+                // a taut string. Tension only. Under compression the term is
+                // negative and could make the matrix indefinite; leaving it
+                // out there only makes the step slightly short.
+                let (n, e) = (terms[0].0, terms[0].2[2]);
+                if n > 0.0 {
+                    let gk = n / (self.bodies[b].x - self.bodies[a].x).norm();
+                    for r in 0..3 {
+                        for col in 0..=r {
+                            let v = gk * (if r == col { 1.0 } else { 0.0 } - e[r] * e[col]);
+                            kb[0][r * 12 + col] += v;
+                            kb[0][(6 + r) * 12 + 6 + col] += v;
+                            kb[0][(6 + r) * 12 + col] -= v;
+                            if r != col {
+                                kb[0][(6 + col) * 12 + r] -= v;
+                            }
+                        }
+                    }
+                }
+            }
             if with_blocks {
                 // Mirror the lower triangle so any (row, col) lookup works.
                 for r in 0..12 {
@@ -877,12 +904,13 @@ impl DynamicSim {
         let check = self.config.step_check;
         let mut refactor = cache.needs_factor(self.config.refactor_every)
             || std::mem::take(&mut self.yield_changed);
-        let base: Vec<(Vec3, UnitQuaternion<f64>)> = if check {
-            self.bodies.iter().map(|b| (b.x, b.q)).collect()
-        } else {
-            Vec::new()
-        };
+        let mut base: Vec<(Vec3, UnitQuaternion<f64>)> = Vec::new();
+        let mut relinearised = 0;
         loop {
+            if check {
+                base.clear();
+                base.extend(self.bodies.iter().map(|b| (b.x, b.q)));
+            }
             let (rhs, phi0, diag, blocks) = self.assemble_direct(&cache, h, refactor);
             if refactor {
                 self.stats.factorizations += 1;
@@ -913,8 +941,11 @@ impl DynamicSim {
                 refactor = true;
                 continue;
             }
-            // Fresh matrix and still too far: the problem is not quadratic
-            // enough at this step length, so shorten the step.
+            // Fresh matrix and still too far: Φ is not quadratic enough over
+            // this step (typically a yielding member unloads, and is five times
+            // stiffer again). Shorten the step, then linearise again from
+            // there: stopping here would leave the substep unconverged, and
+            // the leftover residual comes back as velocity every substep.
             let mut t = 1.0;
             for _ in 0..MAX_BACKTRACKS {
                 t *= 0.5;
@@ -924,7 +955,11 @@ impl DynamicSim {
                     break;
                 }
             }
-            break;
+            if relinearised == MAX_RELINEARISE {
+                break;
+            }
+            relinearised += 1;
+            self.stats.extra_iterations += 1;
         }
         self.direct = Some(cache);
     }
