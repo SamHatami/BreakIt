@@ -7,6 +7,7 @@ members = [
     "crates/breakit-mesh",
     "crates/breakit-parts",
     "crates/breakit-render",
+    "crates/breakit-scenario",
 ]
 
 [workspace.package]
