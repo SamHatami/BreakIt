@@ -449,6 +449,28 @@ impl DynamicSim {
     pub fn position(&self, node: usize) -> Vec3 {
         self.bodies[node].x
     }
+    /// Linear velocity of a node, m/s.
+    pub fn velocity(&self, node: usize) -> Vec3 {
+        self.bodies[node].v
+    }
+    /// Angular velocity of a node, rad/s.
+    pub fn angular_velocity(&self, node: usize) -> Vec3 {
+        self.bodies[node].w
+    }
+    /// Lumped translational mass of a node, kg: half the mass of every member
+    /// meeting there. 0 for nodes whose translation is fixed by a support.
+    pub fn node_mass(&self, node: usize) -> f64 {
+        let im = self.bodies[node].inv_mass;
+        if im > 0.0 {
+            1.0 / im
+        } else {
+            0.0
+        }
+    }
+    /// Number of nodes.
+    pub fn node_count(&self) -> usize {
+        self.bodies.len()
+    }
     pub fn displacement(&self, node: usize) -> Vec3 {
         self.bodies[node].x - self.bodies[node].x0
     }

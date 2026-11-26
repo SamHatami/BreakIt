@@ -2091,6 +2091,7 @@ version = "0.1.0"
 dependencies = [
  "faer",
  "nalgebra",
+ "serde",
 ]
 
 [[package]]
@@ -4124,6 +4125,7 @@ dependencies = [
  "num-complex",
  "num-rational",
  "num-traits",
+ "serde",
  "simba",
  "typenum",
 ]
@@ -4326,6 +4328,7 @@ dependencies = [
  "bytemuck",
  "num-traits",
  "rand 0.8.8",
+ "serde",
 ]
 
 [[package]]
