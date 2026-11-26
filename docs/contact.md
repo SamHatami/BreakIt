@@ -1,6 +1,6 @@
 # Ground contact (2026-11-26)
 
-`breakit-core/src/contact.rs`. Off by default; turn it on with `SimConfig::ground = Some(Ground { .. })`. The game uses `analysis::table_ground()`, a box version of the lab's default ravine table.
+`breakit-core/src/contact.rs`. Off by default; turn it on with `SimConfig::ground = Some(Ground { .. })`. The game builds it in `analysis::table_ground()` from the lab table's `PlayTable::contact_boxes()` (read when the simulation starts, so T in build mode changes it), over a floor at the basin bottom (y = -4).
 
 ## What touches what
 
