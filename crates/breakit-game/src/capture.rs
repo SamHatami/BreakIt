@@ -150,7 +150,7 @@ fn capture_script(
             advance(&mut s);
         }
         7 => {
-            let t = sim.map(|s| s.run().time()).unwrap_or(0.0);
+            let t = sim.map(|s| s.time()).unwrap_or(0.0);
             let after_break = rec.first_break.is_some_and(|b| t > b as f64 + 0.15);
             if *screen.get() == Screen::Test && (after_break || t > 7.0) {
                 shot(&mut commands, "4-test.png");
