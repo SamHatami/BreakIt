@@ -190,5 +190,5 @@ On the bridges assembly is now the largest part of a frame (bridge 60: 3.0 of 5.
 
 ## Next
 
-1. Speed: what is left is spread evenly between assembly and the solve. Collapse spikes on long bridges come from refactorisations; threads need re-measuring on a desktop CPU. Large 3D grids (tower 8x8x16) are limited by fill in the factorisation; a nested-dissection ordering or a looser `linear_tolerance` (1e-4 gave the same displacements and break counts in the bench) are the next levers there.
+1. Speed: on bridges assembly is now the largest part of a frame (about half), so that is the next thing to cut; the remaining collapse spikes are step-check retries, each paying an assembly and a factorisation. Bridge 120's solves are memory-bound (a single-precision copy of the factor for preconditioning is untried); threads need re-measuring on a desktop CPU. Large 3D grids (tower 8x8x16) are limited by fill in the factorisation; a nested-dissection ordering or a looser `linear_tolerance` (1e-4 gave the same displacements and break counts in the bench) are the next levers there.
 2. Done: sparse static solve; axial-bending interaction Mp,N = Mp (1 - n²). Open: biaxial interaction, plastic torsion.

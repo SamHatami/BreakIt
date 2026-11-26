@@ -502,6 +502,7 @@ impl BlockChol {
     }
 
     #[inline(always)]
+    #[allow(clippy::needless_range_loop)]
     fn factor_generic<const FMA: bool>(&mut self) -> bool {
         let nn = self.nn;
         let (diag, pairs) = self.a.split_at(nn);
