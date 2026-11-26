@@ -8,6 +8,12 @@
 //! `BREAKIT_THEME=<n>` starts with theme preset n, for comparing
 //! looks. `BREAKIT_TRUSS=steel` builds the web in steel instead of timber;
 //! `BREAKIT_TRUSS=weak` lays a bare timber plank instead, which breaks.
+//!
+//! `BREAKIT_FILM=<fps>` films the test: the clock advances exactly one
+//! frame of that rate per rendered frame, however slowly the machine draws,
+//! and every frame of the test is saved to `<dir>/film/NNNNN.png` (join them
+//! with ffmpeg). `BREAKIT_FILM_CAM=distance,yaw,pitch[,focus_y]` places the
+//! camera for it.
 
 use std::path::PathBuf;
 
@@ -36,6 +42,12 @@ impl Plugin for CapturePlugin {
         }
         if let Ok(dir) = std::env::var("BREAKIT_CAPTURE") {
             let _ = std::fs::create_dir_all(&dir);
+            if let Some(fps) = film_fps() {
+                let _ = std::fs::create_dir_all(PathBuf::from(&dir).join("film"));
+                app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+                    std::time::Duration::from_secs_f64(1.0 / fps),
+                ));
+            }
             app.insert_resource(CaptureDir(PathBuf::from(dir)))
                 .add_systems(Last, capture_script);
             if std::env::var("BREAKIT_NO_UI").is_ok() {
@@ -47,6 +59,12 @@ impl Plugin for CapturePlugin {
 
 #[derive(Resource)]
 struct CaptureDir(PathBuf);
+
+/// Frame rate of `BREAKIT_FILM`, if filming.
+fn film_fps() -> Option<f64> {
+    let fps: f64 = std::env::var("BREAKIT_FILM").ok()?.parse().ok()?;
+    (fps > 0.0).then_some(fps)
+}
 
 /// `BREAKIT_NO_UI=1`: hides every UI root, for clean shots of the scene
 /// (backgrounds for UI mock-ups).
@@ -72,6 +90,9 @@ struct Script {
     /// Frame the current step started on.
     since: u32,
     step: u32,
+    /// Film frames saved, and how many of them since the first break.
+    filmed: u32,
+    after_break: u32,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -146,8 +167,31 @@ fn capture_script(
             advance(&mut s);
         }
         6 if waited >= 10 => {
+            if film_fps().is_some() {
+                let cam = std::env::var("BREAKIT_FILM_CAM").unwrap_or_default();
+                let v: Vec<f32> = cam.split(',').filter_map(|x| x.parse().ok()).collect();
+                orbit.distance = v.first().copied().unwrap_or(9.5);
+                orbit.yaw = v.get(1).copied().unwrap_or(0.55);
+                orbit.pitch = v.get(2).copied().unwrap_or(0.3);
+                orbit.focus.y = v.get(3).copied().unwrap_or(0.1);
+            }
             actions.write(UiAction::RunTest);
             advance(&mut s);
+        }
+        7 if film_fps().is_some() => {
+            // Every frame of the test, then a few seconds of the wreck.
+            let name = format!("film/{:05}.png", s.filmed);
+            shot(&mut commands, &name);
+            s.filmed += 1;
+            orbit.yaw += 0.0012;
+            if rec.first_break.is_some() {
+                s.after_break += 1;
+            }
+            let fps = film_fps().unwrap_or(30.0);
+            if s.after_break as f64 > 9.0 * fps || *screen.get() == Screen::Report {
+                s.step = 12;
+                s.since = s.frame;
+            }
         }
         7 => {
             let t = sim.map(|s| s.run().time()).unwrap_or(0.0);
