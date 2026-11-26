@@ -159,3 +159,61 @@ fn deck_on_legs(r: f64, t: f64, braced: bool, y0: f64, y1: f64) -> Structure {
     }
     s
 }
+
+/// F-02 floating footbridge: two stringers at x = ±0.75 from the near-bank
+/// pins (z = -3.5) to z = 2.8, cross beams at every station, and a pontoon
+/// along x (from -2.4 to 2.4 m, centred `draft` below the path) under each of
+/// `pontoons` stations, each tied up to the path by posts and braces.
+/// Frame members are `r` x `t` tubes, pontoons `pr` x `pt`.
+pub fn pontoon_bridge(
+    r: f64,
+    t: f64,
+    pr: f64,
+    pt: f64,
+    pontoons: &[usize],
+    draft: f64,
+) -> Structure {
+    let (m, sec) = (Material::steel(), Section::tube(r, t));
+    let float = Section::tube(pr, pt);
+    let mut s = Structure::new();
+    let zs: Vec<f64> = (0..7).map(|k| -3.5 + 1.05 * k as f64).collect();
+    let rows: Vec<[usize; 2]> = zs
+        .iter()
+        .map(|&z| {
+            [
+                s.add_node(Vec3::new(-0.75, 0.0, z)),
+                s.add_node(Vec3::new(0.75, 0.0, z)),
+            ]
+        })
+        .collect();
+    for k in 0..zs.len() {
+        s.add_member(rows[k][0], rows[k][1], m.clone(), sec.clone());
+        if k + 1 < zs.len() {
+            for side in 0..2 {
+                s.add_member(rows[k][side], rows[k + 1][side], m.clone(), sec.clone());
+            }
+            // Plan bracing so the path is a stiff plate.
+            s.add_member(rows[k][0], rows[k + 1][1], m.clone(), sec.clone());
+        }
+    }
+    for &k in pontoons {
+        let z = zs[k];
+        let xs = [-2.4, -0.75, 0.75, 2.4];
+        let p: Vec<usize> = xs
+            .iter()
+            .map(|&x| s.add_node(Vec3::new(x, -draft, z)))
+            .collect();
+        for w in p.windows(2) {
+            s.add_member(w[0], w[1], m.clone(), float.clone());
+        }
+        // Posts and braces up to the path.
+        s.add_member(p[1], rows[k][0], m.clone(), sec.clone());
+        s.add_member(p[2], rows[k][1], m.clone(), sec.clone());
+        s.add_member(p[0], rows[k][0], m.clone(), sec.clone());
+        s.add_member(p[3], rows[k][1], m.clone(), sec.clone());
+        s.add_member(p[1], rows[k][1], m.clone(), sec.clone());
+    }
+    s.add_support(Support::pinned(rows[0][0]));
+    s.add_support(Support::pinned(rows[0][1]));
+    s
+}

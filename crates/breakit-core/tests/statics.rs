@@ -131,3 +131,36 @@ fn utilization_reaches_one_at_plastic_moment() {
     .unwrap();
     assert!(rel_err(r.member_forces[0].utilization, 1.0) < 1e-9);
 }
+
+#[test]
+fn a_raft_on_springs_sinks_by_load_over_stiffness() {
+    // A square frame held only by springs at its corners (a float on still
+    // water): the same load on every corner sinks each by P / k.
+    let mut s = Structure::new();
+    let ids: Vec<usize> = [(0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0)]
+        .iter()
+        .map(|&(x, z)| s.add_node(Vec3::new(x, 0.0, z)))
+        .collect();
+    for i in 0..4 {
+        s.add_member(ids[i], ids[(i + 1) % 4], Material::steel(), tube());
+    }
+    s.add_member(ids[0], ids[2], Material::steel(), tube());
+    let k = 1.0e5;
+    let springs: Vec<_> = ids
+        .iter()
+        .map(|&n| breakit_core::NodeSpring {
+            node: n,
+            stiffness: Vec3::new(k, k, k),
+        })
+        .collect();
+    let p = 1000.0;
+    let loads: Vec<_> = ids
+        .iter()
+        .map(|&n| NodeLoad::force(n, Vec3::new(0.0, -p, 0.0)))
+        .collect();
+    assert!(solve_static(&s, &loads).is_err());
+    let r = breakit_core::solve_static_with_springs(&s, &loads, &springs).unwrap();
+    for &n in &ids {
+        assert!(rel_err(-r.displacements[n].y, p / k) < 1e-9);
+    }
+}
