@@ -2121,6 +2121,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "breakit-parts"
+version = "0.1.0"
+dependencies = [
+ "breakit-core",
+ "breakit-mesh",
+ "ron",
+ "serde",
+]
+
+[[package]]
 name = "breakit-render"
 version = "0.1.0"
 dependencies = [
