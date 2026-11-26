@@ -25,7 +25,9 @@
 //! Units are SI throughout (m, kg, s, N, Pa). The world is Y-up, matching Bevy.
 //! The crate has no game-engine dependency on purpose.
 
+mod blockchol;
 pub mod concrete;
+pub mod contact;
 pub mod damage;
 pub mod dynamics;
 pub mod frame;
@@ -37,11 +39,12 @@ pub mod model;
 pub mod section;
 pub mod statics;
 
+pub use contact::{Block, ContactEvent, Ground};
 pub use damage::{DamageState, MemberDamage};
 pub use dynamics::{BreakCause, BreakEvent, DynamicSim, SimConfig, Solver, SolverStats};
 pub use joint::{Joint, JointKind};
 pub use loads::{LoadCase, LoadKind, LoadSet, RigState, Window};
-pub use material::{Material, MaterialKind};
+pub use material::{ConcreteClass, Material, MaterialKind, SteelGrade, TimberClass};
 pub use model::{Member, NodeLoad, Structure, Support};
 pub use section::{Section, Shape};
 pub use statics::{solve_static, MemberForces, StaticResult};

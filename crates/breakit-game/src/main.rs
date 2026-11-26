@@ -16,6 +16,7 @@ mod history;
 mod perf;
 mod render;
 mod scenario;
+mod sound;
 mod testrun;
 mod ui;
 mod visuals;
@@ -57,6 +58,7 @@ fn main() {
             capture::CapturePlugin,
             guides::GuidesPlugin,
             perf::PerfPlugin,
+            sound::SoundPlugin,
         ))
         .add_systems(Update, cycle_table.run_if(in_state(flow::Screen::Build)))
         .run();
