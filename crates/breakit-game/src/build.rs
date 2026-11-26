@@ -18,7 +18,7 @@ use bevy::window::PrimaryWindow;
 
 use crate::analysis::DeflectionScale;
 use crate::camera::OrbitCamera;
-use crate::design::{BeamKind, Design};
+use crate::design::{catalog, BeamKind, Design};
 use crate::flow::{FailurePins, Overlay, Screen, UiAction};
 use crate::history::History;
 use crate::scenario::{Scenario, Sheets};
@@ -150,6 +150,8 @@ pub struct BuildTool {
     pub cursor: Option<Vec3>,
     /// The sheet allows the load tool.
     pub loads_allowed: bool,
+    /// Catalog parts the sheet allows. A member may be any size or grade of
+    /// an allowed part's material.
     pub allowed: Vec<BeamKind>,
 }
 
@@ -162,6 +164,33 @@ impl BuildTool {
             kind: s.allowed.first().copied().unwrap_or_default(),
             ..Default::default()
         };
+    }
+
+    /// Whether the sheet allows this member's material.
+    pub fn allows(&self, k: BeamKind) -> bool {
+        self.allowed
+            .iter()
+            .any(|a| a.material_kind() == k.material_kind())
+    }
+
+    /// Material classes of the allowed parts, in palette order (keys 1-4).
+    pub fn classes(&self) -> Vec<breakit_core::MaterialKind> {
+        let mut out = Vec::new();
+        for k in &self.allowed {
+            if !out.contains(&k.material_kind()) {
+                out.push(k.material_kind());
+            }
+        }
+        out
+    }
+
+    /// The member the palette and inspector act on: the selected beam's,
+    /// else the one the next beam gets.
+    pub fn current(&self, design: &Design) -> BeamKind {
+        self.selected_beam
+            .and_then(|b| design.beams.get(b))
+            .map(|b| b.kind)
+            .unwrap_or(self.kind)
     }
 
     /// Ends the chain, else drops the selected beam. Returns whether there
@@ -253,6 +282,18 @@ fn update_cursor(
     }
 }
 
+/// Sets the member for the next beam and for the selected one, if the
+/// sheet allows its material.
+fn set_kind(design: &mut Design, tool: &mut BuildTool, k: BeamKind) {
+    if !tool.allows(k) {
+        return;
+    }
+    tool.kind = k;
+    if let Some(b) = tool.selected_beam {
+        design.set_beam_kind(b, k);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_actions(
     mut actions: MessageReader<UiAction>,
@@ -270,12 +311,51 @@ fn build_actions(
                     tool.selected = None;
                 }
             }
-            UiAction::SetMaterial(k) => {
-                if tool.allowed.contains(&k) {
-                    tool.kind = k;
-                    if let Some(b) = tool.selected_beam {
-                        design.set_beam_kind(b, k);
+            UiAction::SetMaterial(k) => set_kind(&mut design, &mut tool, k),
+            UiAction::MaterialTab(n) => {
+                let class = tool.classes().get(n as usize).copied();
+                let current = tool.current(&design);
+                if let Some(c) = class.filter(|c| *c != current.material_kind()) {
+                    if let Some(k) = tool.allowed.iter().find(|k| k.material_kind() == c) {
+                        let k = *k;
+                        set_kind(&mut design, &mut tool, k);
                     }
+                }
+            }
+            UiAction::StepSize(step) => {
+                let k = tool.current(&design);
+                if let Some((f, size, grade)) = catalog().family_of(&k.0) {
+                    let next = size as i32 + step as i32;
+                    if next >= 0 && (next as usize) < f.sizes.len() {
+                        let mut c = f.choice(next as usize, grade);
+                        c.joints = k.0.joints;
+                        set_kind(&mut design, &mut tool, BeamKind(c));
+                    }
+                }
+            }
+            UiAction::CycleGrade => {
+                let k = tool.current(&design);
+                if let Some((f, size, grade)) = catalog().family_of(&k.0) {
+                    let mut c = f.choice(size, (grade + 1) % f.grades.len());
+                    c.joints = k.0.joints;
+                    set_kind(&mut design, &mut tool, BeamKind(c));
+                }
+            }
+            UiAction::CycleJoint(end) => {
+                if let Some(b) = tool.selected_beam.filter(|&b| b < design.beams.len()) {
+                    let end = end as usize & 1;
+                    let beam = design.beams[b];
+                    let allowed = catalog().joints_for(&beam.kind.0);
+                    // Automatic, then each allowed type, then automatic again.
+                    let next = match beam.joints[end] {
+                        None => allowed.first().copied(),
+                        Some(j) => allowed
+                            .iter()
+                            .position(|a| *a == j)
+                            .and_then(|i| allowed.get(i + 1))
+                            .copied(),
+                    };
+                    design.set_joint(b, end, next);
                 }
             }
             UiAction::DeleteSelected => {

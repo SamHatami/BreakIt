@@ -13,9 +13,10 @@ use super::{GameView, View, ViewKey};
 use crate::analysis::FrameState;
 use crate::build::Tool;
 use crate::camera::OrbitCamera;
-use crate::design::{BeamKind, Design};
+use crate::design::{catalog, joint_class, Design};
 use crate::flow::{Screen, UiAction};
 use crate::scenario::{money, Sheets, TestEvent, TestRecord, CHART_COLUMNS};
+use breakit_parts::JointSpec;
 
 fn view(kind: View, node: Node) -> impl Bundle {
     (node, kind, ViewKey::default())
@@ -519,9 +520,78 @@ pub fn inspector_key(v: &GameView) -> String {
         (
             (m.utilization * 100.0).round(),
             m.axial.map(|a| (a / 100.0).round()),
+            m.joints.map(|j| (j * 100.0).round()),
         )
     });
     format!("{b:?} {} {m:?}", v.design.revision)
+}
+
+/// A label / value row the player can click, with its key hint. Quiet text
+/// on the scene; the hover outline is the only frame.
+fn kv_action(
+    p: &mut ChildSpawnerCommands,
+    label: &str,
+    value: impl FnOnce(&mut ChildSpawnerCommands),
+    key: &str,
+    action: UiAction,
+) {
+    p.spawn((
+        Node {
+            justify_content: JustifyContent::SpaceBetween,
+            align_items: AlignItems::Center,
+            padding: UiRect::vertical(Val::Px(3.0)),
+            column_gap: Val::Px(12.0),
+            ..default()
+        },
+        super::pointer::Clickable(action),
+        BlocksPointer,
+        Outline::new(Val::Px(1.0), Val::Px(2.0), Color::NONE),
+    ))
+    .with_children(|r| {
+        r.spawn(text(label, TextRole::Body, Swatch::Muted));
+        r.spawn(row(10.0)).with_children(|v| {
+            value(v);
+            v.spawn(caps(key, Swatch::Muted));
+        });
+    });
+}
+
+/// Clickable arrow for stepping through sizes.
+fn step_arrow(p: &mut ChildSpawnerCommands, glyph: &str, action: UiAction, enabled: bool) {
+    let mut e = p.spawn((
+        Node {
+            padding: UiRect::horizontal(Val::Px(4.0)),
+            ..default()
+        },
+        text(
+            glyph,
+            TextRole::Body,
+            if enabled { Swatch::Ink } else { Swatch::Rule },
+        ),
+        BlocksPointer,
+    ));
+    if enabled {
+        e.insert((
+            super::pointer::Clickable(action),
+            Outline::new(Val::Px(1.0), Val::Px(2.0), Color::NONE),
+        ));
+    }
+}
+
+/// The value and utilisation of one end joint.
+fn joint_value(p: &mut ChildSpawnerCommands, j: JointSpec, auto: bool, util: f32) {
+    let name = if auto {
+        format!("{} (auto)", j.label())
+    } else {
+        j.label().to_string()
+    };
+    p.spawn(text(name, TextRole::Body, Swatch::Ink));
+    if matches!(j, JointSpec::Monolithic | JointSpec::Rigid) {
+        // Full-strength joints have no capacity of their own.
+        p.spawn(text("full", TextRole::Label, Swatch::Muted));
+    } else {
+        p.spawn(tag_bundle(pct(util), util));
+    }
 }
 
 pub fn build_inspector(p: &mut ChildSpawnerCommands, v: &GameView) {
@@ -529,26 +599,88 @@ pub fn build_inspector(p: &mut ChildSpawnerCommands, v: &GameView) {
         return;
     };
     let beam = v.design.beams[i];
+    let kind = beam.kind;
+    let joints = v.design.joints(i);
     let len = v.design.beam_length(i);
     let m = v.state.members.get(i).copied().unwrap_or_default();
-    p.spawn(panel(Node {
+    let family = catalog().family_of(&kind.0);
+    let costs = &v.sheets.costs;
+    let joint_cost: f32 = joints
+        .iter()
+        .map(|j| costs.joints.price(joint_class(*j)) as f32)
+        .sum();
+    p.spawn(Node {
         width: Val::Px(280.0),
         flex_direction: FlexDirection::Column,
         ..default()
-    }))
+    })
     .with_children(|b| {
         b.spawn(caps(&format!("Member {}", i + 1), Swatch::Accent));
         b.spawn((
-            text(
-                format!("{} {}", beam.kind.label(), section_label(beam.kind)),
-                TextRole::Heading,
-                Swatch::Ink,
-            ),
+            text(kind.designation(), TextRole::Heading, Swatch::Ink),
             Node {
-                margin: UiRect::vertical(Val::Px(4.0)),
+                margin: UiRect::top(Val::Px(4.0)),
                 ..default()
             },
         ));
+        b.spawn((
+            text(
+                family
+                    .map(|(f, ..)| f.name.as_str())
+                    .unwrap_or(kind.label()),
+                TextRole::Label,
+                Swatch::Muted,
+            ),
+            Node {
+                margin: UiRect::bottom(Val::Px(6.0)),
+                ..default()
+            },
+        ));
+        if let Some((f, size, grade)) = family {
+            b.spawn(Node {
+                justify_content: JustifyContent::SpaceBetween,
+                align_items: AlignItems::Center,
+                padding: UiRect::vertical(Val::Px(3.0)),
+                ..default()
+            })
+            .with_children(|r| {
+                r.spawn(text("Size", TextRole::Body, Swatch::Muted));
+                r.spawn(row(6.0)).with_children(|s| {
+                    step_arrow(s, "<", UiAction::StepSize(-1), size > 0);
+                    s.spawn(text(&f.sizes[size].name, TextRole::Body, Swatch::Ink));
+                    step_arrow(s, ">", UiAction::StepSize(1), size + 1 < f.sizes.len());
+                    s.spawn(caps("[ ]", Swatch::Muted));
+                });
+            });
+            let g = kind.0.material.grade_label();
+            if f.grades.len() > 1 {
+                kv_action(
+                    b,
+                    "Grade",
+                    |v| {
+                        v.spawn(text(g, TextRole::Body, Swatch::Ink));
+                    },
+                    "G",
+                    UiAction::CycleGrade,
+                );
+            } else {
+                let _ = grade;
+                kv(b, "Grade", text(g, TextRole::Body, Swatch::Ink));
+            }
+        }
+        for (end, name) in ["End A", "End B"].into_iter().enumerate() {
+            kv_action(
+                b,
+                name,
+                |v| joint_value(v, joints[end], beam.joints[end].is_none(), m.joints[end]),
+                "",
+                UiAction::CycleJoint(end as u8),
+            );
+        }
+        b.spawn(Node {
+            height: Val::Px(6.0),
+            ..default()
+        });
         kv(
             b,
             "Length",
@@ -566,143 +698,156 @@ pub fn build_inspector(p: &mut ChildSpawnerCommands, v: &GameView) {
                 ),
             );
         }
-        kv(
-            b,
-            "Utilisation",
-            tag_bundle(pct(m.utilization), m.utilization),
-        );
+        kv(b, "Section", tag_bundle(pct(m.utilization), m.utilization));
         kv(
             b,
             "Cost / mass",
             text(
                 format!(
                     "{} / {:.0} kg",
-                    money(
-                        len * beam.kind.cost_per_metre(&v.sheets.costs)
-                            + 2.0 * v.sheets.costs.joints.bolted as f32
-                    ),
-                    len * beam.kind.mass_per_metre()
+                    money(len * kind.cost_per_metre(costs) + joint_cost),
+                    len * kind.mass_per_metre()
                 ),
                 TextRole::Body,
                 Swatch::Ink,
             ),
         );
         b.spawn(Node {
-            column_gap: Val::Px(6.0),
-            margin: UiRect::top(Val::Px(10.0)),
-            flex_wrap: FlexWrap::Wrap,
-            row_gap: Val::Px(6.0),
+            height: Val::Px(8.0),
             ..default()
-        })
-        .with_children(|r| {
-            for (n, k) in BeamKind::ALL.iter().enumerate() {
-                if !v.tool.allowed.contains(k) {
-                    continue;
-                }
-                let kind = if *k == beam.kind {
-                    ButtonKind::Selected
-                } else {
-                    ButtonKind::Secondary
-                };
-                button(
-                    r,
-                    k.label(),
-                    Some(&(n + 1).to_string()),
-                    UiAction::SetMaterial(*k),
-                    kind,
-                );
-            }
-            button(
-                r,
-                "Delete",
-                Some("Del"),
-                UiAction::DeleteSelected,
-                ButtonKind::Secondary,
-            );
         });
+        kv_action(b, "Delete member", |_| {}, "Del", UiAction::DeleteSelected);
     });
 }
 
-fn section_label(k: BeamKind) -> &'static str {
+/// Palette tab names for the material classes.
+fn class_label(k: breakit_core::MaterialKind) -> &'static str {
+    use breakit_core::MaterialKind::*;
     match k {
-        BeamKind::SteelTube => "tube 100 x 5",
-        BeamKind::Timber => "100 x 150",
+        Steel => "Steel",
+        Timber => "Timber",
+        Concrete => "Concrete",
+        Composite => "Carbon",
     }
 }
 
+pub fn drawer_key(v: &GameView) -> String {
+    format!(
+        "{:?} {} {:?} {}",
+        v.tool.kind,
+        v.tool.allowed.len(),
+        v.tool.selected_beam,
+        v.design.revision
+    )
+}
+
 pub fn build_drawer(p: &mut ChildSpawnerCommands, v: &GameView) {
-    // With a member selected, the drawer shows and swaps that member's part.
+    // With a member selected, the palette shows and swaps that member's part.
+    let current = v.tool.current(&v.design);
+    let class = current.material_kind();
     let sel_beam = v.tool.selected_beam.filter(|&i| i < v.design.beams.len());
-    let sel_kind = sel_beam.map(|i| v.design.beams[i].kind);
-    p.spawn(Node {
-        flex_direction: FlexDirection::Row,
-        column_gap: Val::Px(26.0),
-        ..default()
-    })
-    .with_children(|d| {
-        for (n, k) in BeamKind::ALL.iter().enumerate() {
-            if !v.tool.allowed.contains(k) {
-                continue;
+    p.spawn(column(10.0)).with_children(|d| {
+        d.spawn(Node {
+            margin: UiRect::bottom(Val::Px(4.0)),
+            ..default()
+        })
+        .with_children(|c| ramp_legend(c, 120.0));
+        // Material tabs, keys 1-4.
+        d.spawn(row(18.0)).with_children(|r| {
+            for (n, c) in v.tool.classes().into_iter().enumerate() {
+                let active = c == class;
+                r.spawn((
+                    column(3.0),
+                    super::pointer::Clickable(UiAction::MaterialTab(n as u8)),
+                    BlocksPointer,
+                    Outline::new(Val::Px(1.0), Val::Px(2.0), Color::NONE),
+                ))
+                .with_children(|t| {
+                    t.spawn(row(6.0)).with_children(|l| {
+                        l.spawn(caps(
+                            class_label(c),
+                            if active { Swatch::Ink } else { Swatch::Muted },
+                        ));
+                        l.spawn(caps(&(n + 1).to_string(), Swatch::Muted));
+                    });
+                    t.spawn((
+                        Node {
+                            height: Val::Px(2.0),
+                            ..default()
+                        },
+                        Skin::fill(if active {
+                            Swatch::Accent
+                        } else {
+                            Swatch::Clear
+                        })
+                        .square(),
+                    ));
+                });
             }
-            let selected = sel_kind.unwrap_or(v.tool.kind) == *k;
-            d.spawn((
-                Node {
-                    flex_direction: FlexDirection::Row,
-                    column_gap: Val::Px(10.0),
-                    ..default()
-                },
-                super::pointer::Clickable(UiAction::SetMaterial(*k)),
-                BlocksPointer,
-                Outline::new(Val::Px(1.0), Val::Px(2.0), Color::NONE),
-            ))
-            .with_children(|card| {
-                card.spawn((
+        });
+        // The parts of the active material, two columns.
+        d.spawn(Node {
+            flex_direction: FlexDirection::Row,
+            flex_wrap: FlexWrap::Wrap,
+            width: Val::Px(360.0),
+            row_gap: Val::Px(8.0),
+            ..default()
+        })
+        .with_children(|g| {
+            for k in v.tool.allowed.iter().filter(|k| k.material_kind() == class) {
+                let selected = k.same_section(current);
+                g.spawn((
                     Node {
-                        width: Val::Px(2.0),
+                        width: Val::Px(180.0),
+                        flex_direction: FlexDirection::Row,
+                        column_gap: Val::Px(8.0),
                         ..default()
                     },
-                    Skin::fill(if selected {
-                        Swatch::Accent
-                    } else {
-                        Swatch::Clear
-                    })
-                    .square(),
-                ));
-                card.spawn(column(3.0)).with_children(|c| {
-                    c.spawn(row(8.0)).with_children(|r| {
-                        r.spawn(text(
+                    super::pointer::Clickable(UiAction::SetMaterial(*k)),
+                    BlocksPointer,
+                    Outline::new(Val::Px(1.0), Val::Px(2.0), Color::NONE),
+                ))
+                .with_children(|card| {
+                    card.spawn((
+                        Node {
+                            width: Val::Px(2.0),
+                            ..default()
+                        },
+                        Skin::fill(if selected {
+                            Swatch::Accent
+                        } else {
+                            Swatch::Clear
+                        })
+                        .square(),
+                    ));
+                    card.spawn(column(2.0)).with_children(|c| {
+                        c.spawn(text(
                             k.label(),
                             TextRole::Body,
                             if selected { Swatch::Ink } else { Swatch::Muted },
                         ));
-                        r.spawn(caps(&(n + 1).to_string(), Swatch::Muted));
+                        c.spawn(text(
+                            format!(
+                                "{}  {:.0} kr/m",
+                                k.designation(),
+                                k.cost_per_metre(&v.sheets.costs)
+                            ),
+                            TextRole::Label,
+                            Swatch::Muted,
+                        ));
                     });
-                    c.spawn(text(
-                        format!(
-                            "{:.1} kg/m  /  {:.0} kr/m",
-                            k.mass_per_metre(),
-                            k.cost_per_metre(&v.sheets.costs)
-                        ),
-                        TextRole::Label,
-                        Swatch::Muted,
-                    ));
                 });
-            });
-        }
-        if let Some(i) = sel_beam {
-            d.spawn(text(
-                format!("applies to member {}", i + 1),
-                TextRole::Label,
-                Swatch::Muted,
-            ));
-        }
+            }
+        });
+        let note = match sel_beam {
+            Some(i) => format!("{}  applies to member {}", current.designation(), i + 1),
+            None => format!("next beam  {}", current.designation()),
+        };
+        d.spawn(text(note, TextRole::Label, Swatch::Muted));
     });
 }
 
 pub fn build_footer(p: &mut ChildSpawnerCommands, v: &GameView) {
-    // Legend above the parts, bottom left.
-    p.spawn(at(Some(EDGE), None, None, Some(96.0)))
-        .with_children(|c| ramp_legend(c, 120.0));
     // Tool hint and plane read-out, centred above the tool bar.
     p.spawn(Node {
         align_items: AlignItems::Center,

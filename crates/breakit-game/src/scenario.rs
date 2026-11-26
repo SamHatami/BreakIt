@@ -173,8 +173,10 @@ impl Scenario {
                 end,
             });
         }
-        let allowed = BeamKind::ALL
-            .into_iter()
+        let allowed = crate::design::catalog()
+            .parts
+            .iter()
+            .map(|p| BeamKind(p.choice))
             .filter(|k| {
                 sandbox
                     || def
@@ -402,7 +404,7 @@ impl ScenarioCheck {
 
     pub fn compute(s: &Scenario, design: &Design, costs: &CostModel) -> (Bill, Vec<Violation>) {
         let structure = design.to_structure();
-        let bill = costs.estimate(&structure);
+        let bill = design.bill(&structure, costs);
         let violations = if design.beams.is_empty() {
             vec![Violation::NoSupports]
         } else {
@@ -622,7 +624,7 @@ mod tests {
         assert_eq!(d.nodes.len(), 1);
         let base = d.add_node(Vec3::new(-1.0, 0.0, -1.0));
         assert!(d.supports[base].is_some());
-        d.add_beam(base, 0, BeamKind::SteelTube);
+        d.add_beam(base, 0, BeamKind::part("steel-tube-m"));
         let loads = s.static_loads(&d);
         assert!(loads.iter().any(|l| l.node == 0 && l.force.y < -30_000.0));
     }
