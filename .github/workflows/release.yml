@@ -9,11 +9,15 @@ name: Release
 #   the newest main. Only the newest push builds; older runs are cancelled.
 # - Run it by hand from the Actions tab (workflow_dispatch) to rebuild
 #   nightly without a push.
+# - Pull requests that change this file build the zips (kept as workflow
+#   artifacts for 7 days) but publish nothing.
 
 on:
   push:
     branches: [main]
     tags: ["v*"]
+  pull_request:
+    paths: [".github/workflows/release.yml"]
   workflow_dispatch:
 
 concurrency:
@@ -105,6 +109,7 @@ jobs:
   publish:
     name: publish release
     needs: build
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: write
