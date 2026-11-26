@@ -12,31 +12,29 @@
 //! draw calls, nothing per frame). The play table is rebuilt when
 //! [`PlayTable`] changes; scenarios supply a [`TableInsert`].
 
+pub mod envmap;
 pub mod geom;
 pub mod hall;
+pub mod look;
 pub mod palette;
 pub mod props;
 pub mod scenery;
+pub mod surface;
 pub mod table;
 
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use bevy::camera::Projection;
-use bevy::core_pipeline::tonemapping::Tonemapping;
-use bevy::light::{CascadeShadowConfigBuilder, NotShadowCaster};
-use bevy::pbr::{DistanceFog, FogFalloff};
-use bevy::post_process::bloom::Bloom;
-use bevy::post_process::dof::{DepthOfField, DepthOfFieldMode};
+use bevy::camera::visibility::RenderLayers;
+use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 
 pub use hall::HallSpec;
+pub use look::{AntiAlias, LabQuality, Look, HALL_LAYER};
 pub use palette::Mat;
 pub use scenery::{Anchor, Scenery};
+pub use surface::{LabMaterial, LabSurface, LabWater, SurfaceKind};
 pub use table::{Flat, Flume, PlayTable, Ravine, ShakeTable, TableInsert, TableTop};
-
-/// Super 35 sensor height, Bevy's default for depth of field, m.
-const SENSOR_HEIGHT: f32 = 0.018_66;
 
 #[derive(Resource, Clone, Debug)]
 pub struct LabSettings {
@@ -49,11 +47,14 @@ pub struct LabSettings {
     pub hall: HallSpec,
     /// Seed for the dressing.
     pub seed: u64,
-    /// Real point lights under the high-bay lamps (otherwise they only
-    /// glow). The most expensive part of the hall on a GPU.
-    pub lamp_lights: bool,
-    /// Depth of field on lab cameras. `None` turns it off.
-    pub dof: Option<DepthOfFieldMode>,
+    /// The preset `look` was last set from. Change it with
+    /// [`LabSettings::set_quality`].
+    pub quality: LabQuality,
+    /// Lights, reflections and the camera's post stack. Any knob can be
+    /// set by hand; the lab re-fits itself when it changes.
+    pub look: Look,
+    /// Steps through the quality presets. `None` leaves it to the game.
+    pub quality_key: Option<KeyCode>,
     /// Lens f-number for the depth of field.
     pub f_stops: f32,
 }
@@ -66,14 +67,26 @@ impl Default for LabSettings {
             table_height: 0.86,
             hall: HallSpec::default(),
             seed: 0xB2EA_4C17,
-            lamp_lights: true,
-            dof: Some(DepthOfFieldMode::Bokeh),
+            quality: LabQuality::default(),
+            look: LabQuality::default().look(),
+            quality_key: Some(KeyCode::F4),
             f_stops: 2.0,
         }
     }
 }
 
 impl LabSettings {
+    pub fn with_quality(mut self, quality: LabQuality) -> Self {
+        self.set_quality(quality);
+        self
+    }
+
+    /// Switches to a preset, replacing every knob in `look`.
+    pub fn set_quality(&mut self, quality: LabQuality) {
+        self.quality = quality;
+        self.look = quality.look();
+    }
+
     /// Lab metres to world units.
     pub fn lab_to_world(&self, p: Vec3) -> Vec3 {
         (p - self.lab_origin()) * self.model_scale
@@ -90,9 +103,10 @@ impl LabSettings {
     }
 }
 
-/// Put this on a 3D camera to give it the lab's lens: HDR, bloom,
-/// tonemapping, haze and depth of field focused at `focus_distance`
-/// (world units, typically the orbit distance).
+/// Put this on a 3D camera to give it the lab's lens: the hall's
+/// reflections and ambient light, ambient occlusion, bloom, grade, haze and
+/// depth of field focused at `focus_distance` (world units, typically the
+/// orbit distance). What exactly is on follows `LabSettings::look`.
 #[derive(Component, Clone, Copy, Debug)]
 pub struct LabCamera {
     pub focus_distance: f32,
@@ -105,7 +119,15 @@ pub struct LabStats {
     pub hall_meshes: usize,
     pub table_triangles: usize,
     pub table_meshes: usize,
+    /// Lamps that light the scene (the rest only glow).
     pub point_lights: usize,
+    /// Lamps that also cast shadows.
+    pub shadowed_lamps: usize,
+    /// Name of the quality preset in use.
+    pub quality: &'static str,
+    /// CPU time to paint and filter the reflection maps, ms (once per
+    /// reflection size).
+    pub environment_bake_ms: f32,
     /// CPU time to generate the hall and dressing, ms (once, at startup).
     pub hall_build_ms: f32,
     /// CPU time of the last table rebuild, ms.
@@ -133,13 +155,23 @@ impl Plugin for LabPlugin {
             .init_resource::<PlayTable>()
             .init_resource::<LabStats>()
             .init_resource::<LabAnchors>()
-            .insert_resource(GlobalAmbientLight {
-                color: Color::srgb(0.82, 0.88, 0.95),
-                brightness: 110.0,
-                ..default()
-            })
-            .add_systems(Startup, spawn_hall)
-            .add_systems(Update, (rebuild_table, lab_lens));
+            .init_resource::<look::LabEnvironment>()
+            .init_resource::<GlobalAmbientLight>()
+            .add_systems(Startup, spawn_hall);
+        surface::build(app);
+        app.add_systems(
+            Update,
+            (
+                rebuild_table,
+                (
+                    look::quality_key,
+                    look::light_hall,
+                    look::bake_environment,
+                    look::lab_lens,
+                )
+                    .chain(),
+            ),
+        );
     }
 }
 
@@ -149,28 +181,61 @@ struct HallPart;
 #[derive(Component)]
 struct TablePart;
 
-#[derive(Resource)]
-struct LabMaterials(BTreeMap<Mat, Handle<StandardMaterial>>);
+/// A scenery material: procedural where the material has a look, plain
+/// `StandardMaterial` otherwise.
+#[derive(Clone)]
+enum LabHandle {
+    Plain(Handle<StandardMaterial>),
+    Surface(Handle<LabMaterial>),
+}
 
-fn material_handle(
-    cache: &mut LabMaterials,
-    materials: &mut Assets<StandardMaterial>,
-    mat: Mat,
-) -> Handle<StandardMaterial> {
-    cache
-        .0
-        .entry(mat)
-        .or_insert_with(|| {
-            let mut m = palette::material(mat);
+/// One material per (scenery material, on the table or in the hall).
+#[derive(Resource, Default)]
+struct LabMaterials(BTreeMap<(Mat, bool), LabHandle>);
+
+#[derive(bevy::ecs::system::SystemParam)]
+struct MaterialMaker<'w> {
+    plain: ResMut<'w, Assets<StandardMaterial>>,
+    surfaces: ResMut<'w, Assets<LabMaterial>>,
+    settings: Res<'w, LabSettings>,
+    water: Res<'w, LabWater>,
+}
+
+impl MaterialMaker<'_> {
+    fn handle(&mut self, cache: &mut LabMaterials, mat: Mat, on_table: bool) -> LabHandle {
+        if let Some(h) = cache.0.get(&(mat, on_table)) {
+            return h.clone();
+        }
+        let double_sided = |m: &mut StandardMaterial| {
             if !palette::blended(mat) {
                 // Scenery quads are not wound consistently on purpose: it
                 // is cheaper to draw both sides than to care.
                 m.double_sided = true;
                 m.cull_mode = None;
             }
-            materials.add(m)
-        })
-        .clone()
+        };
+        let h = match surface::kind_of(mat) {
+            Some(kind) => {
+                let mut m = surface::lab_material(mat, kind, on_table, &self.settings, &self.water);
+                double_sided(&mut m.base);
+                LabHandle::Surface(self.surfaces.add(m))
+            }
+            None => {
+                let mut m = palette::material(mat);
+                double_sided(&mut m);
+                LabHandle::Plain(self.plain.add(m))
+            }
+        };
+        cache.0.insert((mat, on_table), h.clone());
+        h
+    }
+}
+
+fn insert_material(e: &mut EntityCommands, h: LabHandle) {
+    match h {
+        LabHandle::Plain(h) => e.insert(MeshMaterial3d(h)),
+        LabHandle::Surface(h) => e.insert(MeshMaterial3d(h)),
+    };
 }
 
 /// The hall and its dressing, in lab metres.
@@ -184,7 +249,7 @@ fn spawn_hall(
     mut commands: Commands,
     settings: Res<LabSettings>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut maker: MaterialMaker,
     mut stats: ResMut<LabStats>,
 ) {
     let t0 = Instant::now();
@@ -200,7 +265,7 @@ fn spawn_hall(
             .collect(),
     ));
 
-    let mut cache = LabMaterials(BTreeMap::new());
+    let mut cache = LabMaterials::default();
     let k = settings.model_scale;
     let root = Transform {
         translation: -settings.lab_origin() * k,
@@ -211,60 +276,19 @@ fn spawn_hall(
         if buf.is_empty() {
             continue;
         }
-        commands.spawn((
+        let material = maker.handle(&mut cache, mat, false);
+        let mut e = commands.spawn((
             Mesh3d(meshes.add(buf.into_mesh())),
-            MeshMaterial3d(material_handle(&mut cache, &mut materials, mat)),
             root,
-            NotShadowCaster,
+            // Seen by lab cameras, and it casts in the lamps' shadow maps
+            // but not in the daylight's (see `look::HALL_LAYER`).
+            RenderLayers::layer(HALL_LAYER),
             HallPart,
             Name::new(format!("lab {mat:?}")),
         ));
+        insert_material(&mut e, material);
     }
     commands.insert_resource(cache);
-
-    // Daylight through the roof lights: the one shadowed light, its
-    // cascades sized for the table, not the hall.
-    commands.spawn((
-        DirectionalLight {
-            color: Color::srgb(0.95, 0.97, 1.0),
-            illuminance: 2_500.0,
-            shadow_maps_enabled: true,
-            ..default()
-        },
-        CascadeShadowConfigBuilder {
-            num_cascades: 3,
-            minimum_distance: 0.5,
-            first_cascade_far_bound: 25.0,
-            maximum_distance: 140.0,
-            ..default()
-        }
-        .build(),
-        Transform::from_xyz(-3.0, 10.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
-        HallPart,
-    ));
-
-    // High-bay lamps. Intensities are those of real 20 klm fittings,
-    // scaled with the square of the model scale so the hall is lit as a
-    // hall would be.
-    let mut lights = 0;
-    if settings.lamp_lights {
-        for p in settings.hall.lamp_positions() {
-            commands.spawn((
-                PointLight {
-                    color: Color::srgb(1.0, 0.95, 0.88),
-                    intensity: 20_000.0 * k * k * 8.0,
-                    range: 30.0 * k,
-                    radius: 0.3 * k,
-                    shadow_maps_enabled: false,
-                    ..default()
-                },
-                Transform::from_translation(settings.lab_to_world(p - Vec3::Y * 0.05)),
-                HallPart,
-            ));
-            lights += 1;
-        }
-    }
-    stats.point_lights = lights;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -274,7 +298,7 @@ fn rebuild_table(
     settings: Res<LabSettings>,
     parts: Query<Entity, With<TablePart>>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut maker: MaterialMaker,
     cache: Option<ResMut<LabMaterials>>,
     mut stats: ResMut<LabStats>,
 ) {
@@ -297,66 +321,16 @@ fn rebuild_table(
         if buf.is_empty() {
             continue;
         }
+        let material = maker.handle(&mut cache, mat, true);
         let mut e = commands.spawn((
             Mesh3d(meshes.add(buf.into_mesh())),
-            MeshMaterial3d(material_handle(&mut cache, &mut materials, mat)),
             Transform::IDENTITY,
             TablePart,
             Name::new(format!("table {mat:?}")),
         ));
+        insert_material(&mut e, material);
         if palette::blended(mat) {
             e.insert(NotShadowCaster);
-        }
-    }
-}
-
-/// Applies the lab lens to new lab cameras and keeps the focus on target.
-fn lab_lens(
-    mut commands: Commands,
-    settings: Res<LabSettings>,
-    mut cams: Query<(Entity, &LabCamera, Option<&mut DepthOfField>, Has<Bloom>)>,
-) {
-    let k = settings.model_scale;
-    for (e, cam, dof, has_bloom) in &mut cams {
-        if !has_bloom {
-            commands.entity(e).insert((
-                Bloom::NATURAL,
-                Tonemapping::TonyMcMapface,
-                Projection::Perspective(PerspectiveProjection {
-                    far: 6.0 * settings.hall.length() * k,
-                    ..default()
-                }),
-                DistanceFog {
-                    color: Color::srgba(0.55, 0.6, 0.66, 0.4),
-                    falloff: FogFalloff::Linear {
-                        start: 12.0 * k,
-                        end: 70.0 * k,
-                    },
-                    ..default()
-                },
-            ));
-        }
-        match (settings.dof, dof) {
-            (None, Some(_)) => {
-                commands.entity(e).remove::<DepthOfField>();
-            }
-            (Some(mode), Some(mut d)) => {
-                d.mode = mode;
-                d.focal_distance = cam.focus_distance;
-                d.aperture_f_stops = settings.f_stops;
-                d.sensor_height = SENSOR_HEIGHT * k;
-            }
-            (Some(mode), None) => {
-                commands.entity(e).insert(DepthOfField {
-                    mode,
-                    focal_distance: cam.focus_distance,
-                    sensor_height: SENSOR_HEIGHT * k,
-                    aperture_f_stops: settings.f_stops,
-                    max_depth: 200.0 * k,
-                    ..default()
-                });
-            }
-            (None, None) => {}
         }
     }
 }
