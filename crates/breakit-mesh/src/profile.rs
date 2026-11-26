@@ -9,7 +9,7 @@
 
 use std::f32::consts::TAU;
 
-use breakit_core::Section;
+use breakit_core::{Section, Shape};
 use glam::Vec2;
 
 /// A cross-section shape. All dimensions in metres.
@@ -131,6 +131,101 @@ impl Profile {
         }
     }
 
+    /// Outline loops with flat faces split into `segments` pieces each, for
+    /// the detailed template that fracture faces are drawn with: a jagged
+    /// break needs vertices along the faces, not only at the corners.
+    /// I-beams keep their plain outline (twelve corners are detail enough,
+    /// and their cap is not ring-shaped).
+    pub fn outline_dense(&self, segments: usize) -> Vec<Vec<OutlineVertex>> {
+        let loops = self.outline();
+        if segments <= 1 || matches!(self, Profile::IBeam { .. }) {
+            return loops;
+        }
+        loops
+            .into_iter()
+            .map(|lp| {
+                let mut out = Vec::with_capacity(lp.len() * segments);
+                for k in 0..lp.len() {
+                    let v = lp[k];
+                    out.push(v);
+                    let Some(w) = lp.get(k + 1) else { break };
+                    // Only flat faces (a hard-edge pair sharing a normal).
+                    if v.n.dot(w.n) < 0.9999 || (v.p - w.p).length_squared() < 1e-14 {
+                        continue;
+                    }
+                    for i in 1..segments {
+                        let t = i as f32 / segments as f32;
+                        out.push(OutlineVertex {
+                            p: v.p.lerp(w.p, t),
+                            n: v.n,
+                            u: v.u + (w.u - v.u) * t,
+                        });
+                    }
+                }
+                out
+            })
+            .collect()
+    }
+
+    /// End cap matching [`Profile::outline_dense`], with interior vertices:
+    /// `rings` rings shrinking to the centre (solid sections) or blending
+    /// from the outer to the inner wall (hollow ones). The boundary vertices
+    /// coincide with the dense outline, so a displaced fracture face stays
+    /// watertight against the member's sides.
+    pub fn cap_dense(&self, segments: usize, rings: usize) -> Cap {
+        if segments <= 1 || rings == 0 || matches!(self, Profile::IBeam { .. }) {
+            return self.cap();
+        }
+        let unique = |lp: &[OutlineVertex]| {
+            let mut pts: Vec<Vec2> = Vec::with_capacity(lp.len());
+            for v in lp {
+                if pts.last().map_or(true, |q| (*q - v.p).length_squared() > 1e-14) {
+                    pts.push(v.p);
+                }
+            }
+            if pts.len() > 1 && (pts[0] - pts[pts.len() - 1]).length_squared() < 1e-14 {
+                pts.pop();
+            }
+            pts
+        };
+        let loops = self.outline_dense(segments);
+        let outer = unique(&loops[0]);
+        let n = outer.len();
+        let inner = loops.get(1).map(|l| unique(l));
+        if inner.as_ref().is_some_and(|i| i.len() != n) {
+            return self.cap();
+        }
+        let mut cap = Cap {
+            points: Vec::new(),
+            triangles: Vec::new(),
+        };
+        let levels = if inner.is_some() { rings + 1 } else { rings };
+        for k in 0..levels {
+            let t = k as f32 / rings as f32;
+            for (i, p) in outer.iter().enumerate() {
+                cap.points.push(match &inner {
+                    Some(inner) => p.lerp(inner[i], t),
+                    None => *p * (1.0 - t),
+                });
+            }
+        }
+        let at = |k: usize, i: usize| (k * n + i % n) as u32;
+        for k in 0..levels - 1 {
+            for i in 0..n {
+                cap.triangles.push([at(k, i), at(k, i + 1), at(k + 1, i + 1)]);
+                cap.triangles.push([at(k, i), at(k + 1, i + 1), at(k + 1, i)]);
+            }
+        }
+        if inner.is_none() {
+            let centre = cap.points.len() as u32;
+            cap.points.push(Vec2::ZERO);
+            for i in 0..n {
+                cap.triangles.push([at(levels - 1, i), at(levels - 1, i + 1), centre]);
+            }
+        }
+        cap
+    }
+
     /// Section properties for the solver, computed from the same dimensions.
     pub fn section(&self) -> Section {
         let f = |x: f32| x as f64;
@@ -141,12 +236,15 @@ impl Profile {
                 let r = f(r);
                 let i = std::f64::consts::PI * r.powi(4) / 4.0;
                 Section {
+                    shape: Shape::Tube { ro: r, t: r },
                     area: std::f64::consts::PI * r * r,
                     iy: i,
                     iz: i,
                     j: 2.0 * i,
                     zy: 4.0 / 3.0 * r.powi(3),
                     zz: 4.0 / 3.0 * r.powi(3),
+                    wy: i / r,
+                    wz: i / r,
                 }
             }
             Profile::BoxSection { b, h, t } => {
@@ -154,10 +252,18 @@ impl Profile {
                 let (bi, hi) = (b - 2.0 * t, h - 2.0 * t);
                 // Bredt-Batho thin-walled torsion constant.
                 let (bm, hm) = (b - t, h - t);
+                let iz = (b * h.powi(3) - bi * hi.powi(3)) / 12.0;
+                let iy = (h * b.powi(3) - hi * bi.powi(3)) / 12.0;
                 Section {
+                    // The solver's shape-aware models (concrete bar layout,
+                    // shear factor) only know rectangles and tubes; the
+                    // bounding rectangle is the closest stand-in.
+                    shape: Shape::Rect { b, h },
+                    wz: iz / (0.5 * h),
+                    wy: iy / (0.5 * b),
                     area: b * h - bi * hi,
-                    iz: (b * h.powi(3) - bi * hi.powi(3)) / 12.0,
-                    iy: (h * b.powi(3) - hi * bi.powi(3)) / 12.0,
+                    iz,
+                    iy,
                     j: 2.0 * t * bm * bm * hm * hm / (bm + hm),
                     zz: (b * h * h - bi * hi * hi) / 4.0,
                     zy: (h * b * b - hi * bi * bi) / 4.0,
@@ -166,10 +272,15 @@ impl Profile {
             Profile::IBeam { h, b, tw, tf } => {
                 let (h, b, tw, tf) = (f(h), f(b), f(tw), f(tf));
                 let hw = h - 2.0 * tf;
+                let iz = (b * h.powi(3) - (b - tw) * hw.powi(3)) / 12.0;
+                let iy = 2.0 * tf * b.powi(3) / 12.0 + hw * tw.powi(3) / 12.0;
                 Section {
+                    shape: Shape::Rect { b, h },
+                    wz: iz / (0.5 * h),
+                    wy: iy / (0.5 * b),
                     area: 2.0 * b * tf + hw * tw,
-                    iz: (b * h.powi(3) - (b - tw) * hw.powi(3)) / 12.0,
-                    iy: 2.0 * tf * b.powi(3) / 12.0 + hw * tw.powi(3) / 12.0,
+                    iz,
+                    iy,
                     j: (2.0 * b * tf.powi(3) + (h - tf) * tw.powi(3)) / 3.0,
                     zz: b * tf * (h - tf) + tw * hw * hw / 4.0,
                     zy: tf * b * b / 2.0 + hw * tw * tw / 4.0,

@@ -50,6 +50,11 @@ pub struct DebrisBody {
     pub radius: f32,
     pub age: f32,
     rest_time: f32,
+    /// Where the piece was when it last started resting. Sleep is decided by
+    /// how far it has drifted from here, not by its instantaneous velocity,
+    /// which jitters under corner-by-corner contact impulses.
+    rest_position: Vec3,
+    rest_rotation: Quat,
     pub asleep: bool,
 }
 
@@ -84,6 +89,8 @@ impl DebrisWorld {
             radius: piece.radius,
             age: 0.0,
             rest_time: 0.0,
+            rest_position: piece.position,
+            rest_rotation: piece.rotation,
             asleep: false,
         });
         let max = self.config.max_pieces;
@@ -168,9 +175,9 @@ impl DebrisWorld {
                     b.angular_velocity *= k;
                 }
             }
-            let slow = touching
-                && b.velocity.length_squared() < 0.02
-                && b.angular_velocity.length_squared() < 0.36;
+            let drift = (b.position - b.rest_position).length();
+            let turn = b.rotation.angle_between(b.rest_rotation);
+            let slow = touching && drift < 0.01 + 0.05 * b.radius && turn < 0.12;
             if slow {
                 b.rest_time += dt;
                 if b.rest_time > c.sleep_after {
@@ -180,6 +187,8 @@ impl DebrisWorld {
                 }
             } else {
                 b.rest_time = 0.0;
+                b.rest_position = b.position;
+                b.rest_rotation = b.rotation;
             }
         }
     }

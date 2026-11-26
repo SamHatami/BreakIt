@@ -269,12 +269,6 @@ impl DynamicSim {
     pub fn damage_all(&self) -> impl ExactSizeIterator<Item = &MemberDamage> + '_ {
         self.beams.iter().map(|b| &b.damage)
     }
-    /// Plastic hinge rotations `[axis][end]` (axis 0 = local y, 1 = local z;
-    /// end 0 = a, 1 = b), rad. The beam's elastic end rotation is the node's
-    /// rotation minus this.
-    pub fn plastic_hinges(&self, member: usize) -> [[f64; 2]; 2] {
-        self.beams[member].hinge
-    }
     pub fn break_events(&self) -> &[BreakEvent] {
         &self.events
     }

@@ -90,6 +90,11 @@ pub struct TemplateOptions {
     pub rings: usize,
     /// Add end caps (members whose ends are hidden inside joints can skip them).
     pub caps: bool,
+    /// Split each flat face into this many strips, and give the caps interior
+    /// vertices to match. 1 = corners only.
+    pub face_segments: usize,
+    /// Interior rings in each cap when `face_segments > 1`.
+    pub cap_rings: usize,
 }
 
 impl Default for TemplateOptions {
@@ -97,6 +102,22 @@ impl Default for TemplateOptions {
         Self {
             rings: 17,
             caps: true,
+            face_segments: 1,
+            cap_rings: 0,
+        }
+    }
+}
+
+impl TemplateOptions {
+    /// The template broken members switch to: enough vertices across the
+    /// section and along the member for jagged, necked or splayed fracture
+    /// ends. Intact members keep the lean default.
+    pub fn detailed() -> Self {
+        Self {
+            rings: 25,
+            caps: true,
+            face_segments: 6,
+            cap_rings: 3,
         }
     }
 }
@@ -119,7 +140,7 @@ pub fn ring_params(rings: usize) -> Vec<f32> {
 pub fn member_template(profile: &Profile, opts: TemplateOptions) -> MeshData {
     let mut m = MeshData::default();
     let rings = ring_params(opts.rings);
-    for lp in profile.outline() {
+    for lp in profile.outline_dense(opts.face_segments) {
         let n = lp.len();
         let base = m.positions.len() as u32;
         for &s in &rings {
@@ -153,7 +174,7 @@ pub fn member_template(profile: &Profile, opts: TemplateOptions) -> MeshData {
         }
     }
     if opts.caps {
-        let cap = profile.cap();
+        let cap = profile.cap_dense(opts.face_segments, opts.cap_rings);
         for (s, nx) in [(0.0f32, -1.0f32), (1.0, 1.0)] {
             let base = m.positions.len() as u32;
             for p in &cap.points {
@@ -199,6 +220,26 @@ mod tests {
                 ((v - a) / a).abs() < 1e-3,
                 "{p:?}: volume {v} vs area {a} (bad winding or holes)"
             );
+        }
+    }
+
+    #[test]
+    fn detailed_template_is_closed_too() {
+        for p in [
+            Profile::Rect { b: 0.1, h: 0.2 },
+            Profile::Round { r: 0.05 },
+            Profile::Tube { r: 0.05, t: 0.005 },
+            Profile::BoxSection {
+                b: 0.1,
+                h: 0.15,
+                t: 0.008,
+            },
+        ] {
+            let lean = member_template(&p, TemplateOptions::default());
+            let m = member_template(&p, TemplateOptions::detailed());
+            assert!(m.vertex_count() > lean.vertex_count());
+            let (v, a) = (m.volume(), lean.volume());
+            assert!(((v - a) / a).abs() < 1e-3, "{p:?}: volume {v} vs {a}");
         }
     }
 

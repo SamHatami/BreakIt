@@ -2102,6 +2102,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "breakit-mesh"
+version = "0.1.0"
+dependencies = [
+ "breakit-core",
+ "bytemuck",
+ "glam",
+]
+
+[[package]]
+name = "breakit-render"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "breakit-core",
+ "breakit-mesh",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

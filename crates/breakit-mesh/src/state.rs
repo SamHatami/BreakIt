@@ -26,19 +26,15 @@ pub enum MaterialKind {
 }
 
 impl MaterialKind {
-    /// Best guess from the solver's material name.
-    pub fn from_name(name: &str) -> Self {
-        let n = name.to_ascii_lowercase();
-        if n.contains("timber") || n.contains("wood") || n.contains("glulam") {
-            MaterialKind::Timber
-        } else if n.contains("concrete") && (n.contains("reinforced") || n.contains("rc")) {
-            MaterialKind::ReinforcedConcrete
-        } else if n.contains("concrete") {
-            MaterialKind::Concrete
-        } else if n.contains("composite") || n.contains("carbon") || n.contains("cfrp") {
-            MaterialKind::Composite
-        } else {
-            MaterialKind::Steel
+    /// From the solver's material: its family, plus whether concrete has bars.
+    pub fn from_material(m: &breakit_core::Material) -> Self {
+        use breakit_core::MaterialKind as K;
+        match m.kind {
+            K::Steel => MaterialKind::Steel,
+            K::Timber => MaterialKind::Timber,
+            K::Concrete if m.reinforced() => MaterialKind::ReinforcedConcrete,
+            K::Concrete => MaterialKind::Concrete,
+            K::Composite => MaterialKind::Composite,
         }
     }
 
@@ -162,18 +158,13 @@ impl VisualStructure {
             .iter()
             .map(|m| MemberStyle {
                 profile,
-                kind: MaterialKind::from_name(m.material.name),
+                kind: MaterialKind::from_material(&m.material),
             })
             .collect();
         Self::new(s, &styles)
     }
 
     /// Read this frame's state from the dynamic solver.
-    ///
-    /// Fills what today's `DynamicSim` exposes (positions, rotations,
-    /// utilisation, plastic hinges, breaks). Cracking, crushing and
-    /// delamination are estimated from utilisation and hinge rotation until
-    /// the solver reports them itself.
     pub fn capture(&mut self, sim: &DynamicSim, structure: &Structure) -> VisualFrame {
         let n = structure.nodes.len();
         let mut f = VisualFrame {
@@ -188,61 +179,50 @@ impl VisualStructure {
             members: Vec::with_capacity(self.members.len()),
             breaks: Vec::new(),
         };
-        for (i, vm) in self.members.iter().enumerate() {
-            let mat = &structure.members[i].material;
-            let util = sim.utilization(i) as f32;
-            let h = sim.plastic_hinges(i);
+        for (i, d) in sim.damage_all().enumerate() {
             let hinge = [
-                [h[0][0] as f32, h[0][1] as f32],
-                [h[1][0] as f32, h[1][1] as f32],
+                [d.hinge[0][0] as f32, d.hinge[0][1] as f32],
+                [d.hinge[1][0] as f32, d.hinge[1][1] as f32],
             ];
-            let cap = mat.hinge_rotation_capacity.max(1e-6) as f32;
             let end_mag = |e: usize| (hinge[0][e].powi(2) + hinge[1][e].powi(2)).sqrt();
-            let hinge_damage = [(end_mag(0) / cap).min(1.0), (end_mag(1) / cap).min(1.0)];
-            // Estimated cracking for brittle materials: visible once the
-            // member is past ~60% of its strength.
-            let crack_est = match vm.style.kind {
-                MaterialKind::Concrete
-                | MaterialKind::ReinforcedConcrete
-                | MaterialKind::Timber
-                | MaterialKind::Composite => ((util - 0.6) / 0.4).clamp(0.0, 1.0),
-                MaterialKind::Steel => 0.0,
+            let (ma, mb) = (end_mag(0), end_mag(1));
+            // Ductile members report damage 0.5..1 for the plastic rotation
+            // they have used up; share it between the ends by hinge size.
+            let plastic = ((d.damage as f32 - 0.5) * 2.0).clamp(0.0, 1.0);
+            let top = ma.max(mb).max(1e-9);
+            let hinge_damage = if ma + mb > 0.0 {
+                [plastic * ma / top, plastic * mb / top]
+            } else {
+                [0.0; 2]
             };
             f.members.push(MemberVisualState {
-                utilization: util,
+                utilization: d.utilization as f32,
                 hinge,
                 hinge_damage,
-                crack: [
-                    crack_est.max(hinge_damage[0]),
-                    crack_est.max(hinge_damage[1]),
-                ],
-                crack_span: crack_est * 0.5,
-                crush: [0.0; 2],
-                delamination: if vm.style.kind == MaterialKind::Composite {
-                    crack_est * 0.5
-                } else {
-                    0.0
-                },
-                yielded: util >= 0.999 || end_mag(0) + end_mag(1) > 0.0,
+                crack: [d.crack[0] as f32, d.crack[1] as f32],
+                crack_span: d.tension_crack as f32,
+                crush: [d.crush[0] as f32, d.crush[1] as f32],
+                delamination: d.delamination as f32,
+                yielded: d.state >= breakit_core::DamageState::Yielded
+                    || ma + mb > 0.0
+                    || d.plastic_strain.abs() > 0.0,
                 broken: sim.is_broken(i),
             });
         }
-        // Velocities from the solver are not public; estimate from nothing
-        // (debris gets its launch from the break itself).
         let events = sim.break_events();
         for e in &events[self.consumed_breaks.min(events.len())..] {
-            let st = &f.members[e.member];
-            // Without a reported position, fail at the more damaged end for
-            // hinge failures, mid-span otherwise.
-            let position = match e.cause {
-                BreakCause::Hinge => {
-                    if st.hinge_damage[0] >= st.hinge_damage[1] {
-                        0.08
-                    } else {
-                        0.92
-                    }
-                }
-                _ => 0.35 + 0.3 * self.members[e.member].seed,
+            // The solver reports 0, 1 or 0.5. Keep end failures a section
+            // depth or so inside the member and spread mid-span ones out, so
+            // neighbouring breaks do not all look alike.
+            let vm = &self.members[e.member];
+            let inset = (1.5 * vm.style.profile.half_depth() / vm.rest_length.max(1e-3)).min(0.3);
+            let p = e.position as f32;
+            let position = if p < 0.25 {
+                inset
+            } else if p > 0.75 {
+                1.0 - inset
+            } else {
+                0.35 + 0.3 * vm.seed
             };
             f.breaks.push(VisualBreak {
                 member: e.member,
@@ -320,6 +300,13 @@ impl VisualStructure {
                 vm.seed,
                 vm.style.kind.index() as f32,
                 fl as f32,
+            ),
+            clip: glam::Vec4::new(0.0, 1.0, 0.0, 0.0),
+            size: glam::Vec4::new(
+                2.0 * vm.style.profile.half_depth(),
+                2.0 * vm.style.profile.half_width(),
+                0.0,
+                0.0,
             ),
         }
     }

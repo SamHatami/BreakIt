@@ -8,4 +8,5 @@ repository.workspace = true
 
 [dependencies]
 breakit-core = { path = "../breakit-core" }
-glam = "0.33"
+glam = { version = "0.33", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }

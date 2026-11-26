@@ -163,6 +163,43 @@ impl MemberPose {
         (c + q * Vec3::new(0.0, local.y, local.z), q * normal)
     }
 
+    /// The same pose moved rigidly: rotated by `q` about the origin, then
+    /// translated by `t`.
+    pub fn transformed(&self, q: Quat, t: Vec3) -> Self {
+        Self {
+            pa: q * self.pa + t,
+            pb: q * self.pb + t,
+            qa: (q * self.qa).normalize(),
+            qb: (q * self.qb).normalize(),
+            ta: q * self.ta,
+            tb: q * self.tb,
+            ..*self
+        }
+    }
+
+    /// Blend towards `other` (positions and tangents linearly, frames by
+    /// slerp). `t` may overshoot 0..1, which the spring-back of freshly
+    /// broken members uses.
+    pub fn blend(&self, other: &Self, t: f32) -> Self {
+        let mix = |a: Vec3, b: Vec3| a + (b - a) * t;
+        let dir = |a: Vec3, b: Vec3| mix(a, b).try_normalize().unwrap_or(a);
+        let rot = |a: Quat, b: Quat| {
+            let b = if a.dot(b) < 0.0 { -b } else { b };
+            (a + (b - a) * t).normalize()
+        };
+        Self {
+            pa: mix(self.pa, other.pa),
+            pb: mix(self.pb, other.pb),
+            qa: rot(self.qa, other.qa),
+            qb: rot(self.qb, other.qb),
+            ta: dir(self.ta, other.ta),
+            tb: dir(self.tb, other.tb),
+            stub_a: self.stub_a + (other.stub_a - self.stub_a) * t,
+            stub_b: self.stub_b + (other.stub_b - self.stub_b) * t,
+            rest_length: self.rest_length,
+        }
+    }
+
     /// World-space bounds of the deformed member, padded by `radius` (the
     /// section's bounding radius). Uses the Bézier hull of the curve, which
     /// always contains it.
@@ -194,10 +231,11 @@ pub fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// Per-member shader input: 9 × vec4, 144 bytes. Layout mirrors the
-/// `Member` struct in `member.wesl`.
+/// Per-member shader input: 11 × vec4, 176 bytes. Layout mirrors the
+/// `Member` struct in `member.wesl`. This is all the CPU writes per member
+/// per frame, however detailed the member's mesh is.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuMember {
     /// xyz end a, w hinge stub length at a.
     pub pa: Vec4,
@@ -216,6 +254,12 @@ pub struct GpuMember {
     pub damage1: Vec4,
     /// rest length, random seed, material kind, flags.
     pub info: Vec4,
+    /// Drawn window along the member (`s` from x to y) and whether each end
+    /// of the window is a fracture face (z for the low end, w for the high
+    /// end, 0 or 1). An intact member is `(0, 1, 0, 0)`.
+    pub clip: Vec4,
+    /// section depth, section width, seconds since the member broke, unused.
+    pub size: Vec4,
 }
 
 /// Flags in `GpuMember::info.w`.
@@ -226,6 +270,8 @@ pub mod flags {
     pub const STRESS_VIEW: u32 = 2;
     /// Highlight (selection / hover).
     pub const HIGHLIGHT: u32 = 4;
+    /// A reinforcing bar exposed by a concrete break (ribbed steel look).
+    pub const REBAR: u32 = 8;
 }
 
 #[cfg(test)]
