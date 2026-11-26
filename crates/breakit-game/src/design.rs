@@ -56,11 +56,18 @@ impl BeamKind {
         }
     }
 
-    pub fn next(self) -> Self {
-        match self {
-            BeamKind::SteelTube => BeamKind::Timber,
-            BeamKind::Timber => BeamKind::SteelTube,
-        }
+    /// Every kind, in the order the parts drawer lists them (keys 1, 2, ...).
+    pub const ALL: [BeamKind; 2] = [BeamKind::SteelTube, BeamKind::Timber];
+
+    /// Mass per metre of member, kg/m.
+    pub fn mass_per_metre(self) -> f32 {
+        (self.section().area * self.material().density) as f32
+    }
+
+    /// Price per metre of member under a scenario cost model (joints not
+    /// included).
+    pub fn cost_per_metre(self, costs: &breakit_scenario::CostModel) -> f32 {
+        self.mass_per_metre() * costs.price_per_kg(self.material().kind.into()) as f32
     }
 }
 
@@ -95,6 +102,11 @@ pub struct Design {
     pub supports: Vec<Option<SupportKind>>,
     /// Applied point load per node, in newtons (world frame).
     pub loads: Vec<Vec3>,
+    /// Nodes the scenario placed (payload points). They can't be
+    /// moved, deleted or have their support changed.
+    pub locked: Vec<bool>,
+    /// The sheet's foundations: a node placed on one gets its support.
+    pub anchors: Vec<(Vec3, SupportKind)>,
     /// Bumped on every edit so systems can react to changes cheaply.
     pub revision: u64,
 }
@@ -140,10 +152,25 @@ impl Design {
             return i;
         }
         self.nodes.push(p);
-        self.supports.push(None);
+        let anchor = self.anchors.iter().find(|(a, _)| a.distance(p) <= 0.05);
+        self.supports.push(anchor.map(|(_, k)| *k));
         self.loads.push(Vec3::ZERO);
+        self.locked.push(false);
         self.touch();
         self.nodes.len() - 1
+    }
+
+    /// Adds a node the player can't move or delete, with an optional
+    /// support.
+    pub fn add_locked_node(&mut self, p: Vec3, support: Option<SupportKind>) -> usize {
+        let i = self.add_node(p);
+        self.locked[i] = true;
+        self.supports[i] = support;
+        i
+    }
+
+    pub fn is_locked(&self, node: usize) -> bool {
+        self.locked.get(node).copied().unwrap_or(false)
     }
 
     pub fn node_at(&self, p: Vec3, tol: f32) -> Option<usize> {
@@ -173,8 +200,12 @@ impl Design {
         self.touch();
     }
 
-    /// Cycles a node's support: none, pinned, fixed, none.
+    /// Cycles a node's support: none, pinned, fixed, none. Locked nodes keep
+    /// theirs.
     pub fn cycle_support(&mut self, node: usize) {
+        if self.is_locked(node) {
+            return;
+        }
         let next = match self.supports[node] {
             None => Some(SupportKind::Pinned),
             Some(SupportKind::Pinned) => Some(SupportKind::Fixed),
@@ -196,10 +227,15 @@ impl Design {
     }
 
     /// Removes a node and every beam touching it, keeping indices dense.
-    pub fn remove_node(&mut self, node: usize) {
+    /// Returns false, and changes nothing, for a locked node.
+    pub fn remove_node(&mut self, node: usize) -> bool {
+        if self.is_locked(node) || node >= self.nodes.len() {
+            return false;
+        }
         self.nodes.remove(node);
         self.supports.remove(node);
         self.loads.remove(node);
+        self.locked.remove(node);
         self.beams.retain(|m| m.a != node && m.b != node);
         for m in &mut self.beams {
             if m.a > node {
@@ -210,6 +246,28 @@ impl Design {
             }
         }
         self.touch();
+        true
+    }
+
+    pub fn remove_beam(&mut self, beam: usize) {
+        if beam < self.beams.len() {
+            self.beams.remove(beam);
+            self.touch();
+        }
+    }
+
+    pub fn set_beam_kind(&mut self, beam: usize, kind: BeamKind) {
+        if let Some(b) = self.beams.get_mut(beam) {
+            if b.kind != kind {
+                b.kind = kind;
+                self.touch();
+            }
+        }
+    }
+
+    pub fn beam_length(&self, beam: usize) -> f32 {
+        let m = &self.beams[beam];
+        self.nodes[m.a].distance(self.nodes[m.b])
     }
 
     pub fn total_length(&self) -> f32 {
@@ -286,6 +344,29 @@ mod tests {
         assert!(d.add_beam(a, b, BeamKind::SteelTube).is_some());
         assert!(d.add_beam(b, a, BeamKind::SteelTube).is_none());
         assert!(d.add_beam(a, a, BeamKind::SteelTube).is_none());
+    }
+
+    #[test]
+    fn locked_nodes_survive_delete_and_keep_their_support() {
+        let mut d = Design::default();
+        let a = d.add_locked_node(Vec3::ZERO, Some(SupportKind::Pinned));
+        let b = d.add_node(Vec3::X);
+        d.add_beam(a, b, BeamKind::SteelTube);
+        assert!(!d.remove_node(a));
+        d.cycle_support(a);
+        assert_eq!(d.supports[a], Some(SupportKind::Pinned));
+        assert!(d.remove_node(b));
+        assert_eq!(d.nodes.len(), 1);
+        assert!(d.beams.is_empty());
+    }
+
+    #[test]
+    fn member_mass_and_price_per_metre() {
+        let steel = BeamKind::SteelTube;
+        // Tube 50 mm radius, 5 mm wall: about 11.7 kg/m.
+        assert!((steel.mass_per_metre() - 11.7).abs() < 0.1);
+        let costs = breakit_scenario::CostModel::default();
+        assert!(BeamKind::Timber.cost_per_metre(&costs) < steel.cost_per_metre(&costs));
     }
 
     #[test]
