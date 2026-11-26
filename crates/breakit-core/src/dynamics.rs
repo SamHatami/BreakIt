@@ -30,6 +30,7 @@
 use nalgebra::{Quaternion, UnitQuaternion};
 use rayon::prelude::*;
 
+use crate::contact::{ContactEvent, Ground, NodeContact};
 use crate::damage::{self, Committed, Law, LawCache, MatState, Mech, MemberDamage};
 use crate::frame::member_axes;
 use crate::joint::{bending_stiffness, Joint};
@@ -106,6 +107,8 @@ pub struct SimConfig {
     pub damping: f64,
     /// Enables yield, plastic hinges and fracture.
     pub plasticity: bool,
+    /// Ground plane the structure lands on, or `None` for free fall.
+    pub ground: Option<Ground>,
 }
 
 impl Default for SimConfig {
@@ -126,6 +129,7 @@ impl Default for SimConfig {
             gravity: Vec3::new(0.0, -9.81, 0.0),
             damping: 0.5,
             plasticity: true,
+            ground: None,
         }
     }
 }
@@ -249,6 +253,8 @@ pub struct DynamicSim {
     bodies: Vec<Body>,
     beams: Vec<Beam>,
     events: Vec<BreakEvent>,
+    contacts: Vec<NodeContact>,
+    contact_events: Vec<ContactEvent>,
     time: f64,
     direct: Option<DirectSystem>,
     stats: SolverStats,
@@ -416,12 +422,20 @@ impl DynamicSim {
         let mut inertia = vec![0.0; s.nodes.len()];
         let mut beams = Vec::with_capacity(s.members.len());
         let mut laws = LawCache::default();
+        let mut contacts = vec![NodeContact::default(); s.nodes.len()];
         for (i, m) in s.members.iter().enumerate() {
             let l = s.member_length(i);
             let mm = m.material.density * m.section.area * l;
             for n in [m.a, m.b] {
                 mass[n] += 0.5 * mm;
                 inertia[n] += mm * l * l / 24.0;
+            }
+            let half = match m.section.shape {
+                crate::Shape::Rect { b, h } => 0.25 * (b + h),
+                crate::Shape::Tube { ro, .. } => ro,
+            };
+            for n in [m.a, m.b] {
+                contacts[n].radius = contacts[n].radius.max(half);
             }
             let (x, y, _z) = member_axes(&s.nodes[m.a], &s.nodes[m.b]);
             let (e, g) = (m.material.youngs_modulus, m.material.shear_modulus);
@@ -492,6 +506,8 @@ impl DynamicSim {
             bodies,
             beams,
             events: Vec::new(),
+            contacts,
+            contact_events: Vec::new(),
             time: 0.0,
             direct: None,
             stats: SolverStats::default(),
@@ -581,6 +597,21 @@ impl DynamicSim {
     pub fn break_events(&self) -> &[BreakEvent] {
         &self.events
     }
+    /// Touch-downs on the ground since the start, oldest first.
+    pub fn contact_events(&self) -> &[ContactEvent] {
+        &self.contact_events
+    }
+    /// Ground normal force on a node at the end of the last substep, N.
+    pub fn contact_force(&self, node: usize) -> f64 {
+        self.contacts[node].normal_force
+    }
+    /// Gap between a node's contact sphere and the nearest ground surface, m
+    /// (negative while pressed in), if there is a ground.
+    pub fn clearance(&self, node: usize) -> Option<f64> {
+        let g = self.config.ground.as_ref()?;
+        let b = &self.bodies[node];
+        Some(g.clearance(&self.contacts[node], b.x0, b.x))
+    }
     pub fn max_speed(&self) -> f64 {
         self.bodies.iter().map(|b| b.v.norm()).fold(0.0, f64::max)
     }
@@ -611,7 +642,8 @@ impl DynamicSim {
         let damp = (-self.config.damping * h).exp();
         let g = self.config.gravity;
         let direct = self.config.solver == Solver::Direct;
-        for b in &mut self.bodies {
+        let ground = self.config.ground.take();
+        for (bi, b) in self.bodies.iter_mut().enumerate() {
             b.x_prev = b.x;
             b.q_prev = b.q;
             if b.inv_mass > 0.0 {
@@ -624,6 +656,9 @@ impl DynamicSim {
                 // would otherwise throw x̃ a whole member length away, too far
                 // for one Gauss-Newton step to recover.
                 b.x = if direct { b.x + h * coast } else { b.x_tilde };
+                if let (Some(gr), true) = (&ground, direct) {
+                    gr.clamp_start(&self.contacts[bi], b.x0, &mut b.x);
+                }
             } else {
                 b.x_tilde = b.x;
             }
@@ -633,6 +668,8 @@ impl DynamicSim {
             }
             b.q_tilde = b.q;
         }
+        // Back in place for the solve, which reads it from the config.
+        self.config.ground = ground;
         match self.config.solver {
             Solver::GaussSeidel => {
                 for bm in &mut self.beams {
@@ -642,6 +679,13 @@ impl DynamicSim {
                     for i in 0..self.beams.len() {
                         if !self.beams[i].broken {
                             self.solve_beam(i, h);
+                        }
+                    }
+                }
+                if let Some(gr) = &self.config.ground {
+                    for (bi, b) in self.bodies.iter_mut().enumerate() {
+                        if b.inv_mass > 0.0 {
+                            gr.project(&self.contacts[bi], b.x0, &mut b.x, b.x_prev);
                         }
                     }
                 }
@@ -659,6 +703,10 @@ impl DynamicSim {
             b.w = dq.imag() * s / h;
         }
         self.time += h;
+        if let Some(gr) = self.config.ground.take() {
+            self.commit_contacts(&gr, h);
+            self.config.ground = Some(gr);
+        }
         for i in 0..self.beams.len() {
             if !self.beams[i].broken {
                 self.update_material(i, h);
@@ -874,6 +922,13 @@ impl DynamicSim {
                 phi += 0.5 * ih2 / b.inv_inertia * 4.0 * dq.imag().norm_squared();
             }
         }
+        if let Some(gr) = &self.config.ground {
+            for bi in 0..self.bodies.len() {
+                if let Some(t) = self.contact_terms(gr, bi, h) {
+                    phi += t.energy;
+                }
+            }
+        }
         let r = self.plastic_ratio(h).0;
         let energy = |i: usize| {
             if self.beams[i].broken {
@@ -899,6 +954,49 @@ impl DynamicSim {
             phi += (0..self.beams.len()).map(energy).sum::<f64>();
         }
         phi
+    }
+
+    /// Contact terms of a free node, if it touches the ground or is held by
+    /// friction.
+    fn contact_terms(&self, gr: &Ground, bi: usize, h: f64) -> Option<crate::contact::Terms> {
+        let b = &self.bodies[bi];
+        if b.inv_mass <= 0.0 {
+            return None;
+        }
+        let c = &self.contacts[bi];
+        gr.terms(c, b.x0, b.x, contact_mass(b), h)
+    }
+
+    fn commit_contacts(&mut self, gr: &Ground, h: f64) {
+        for (bi, b) in self.bodies.iter_mut().enumerate() {
+            if b.inv_mass <= 0.0 {
+                continue;
+            }
+            let c = &mut self.contacts[bi];
+            // Pushing a node out of the ground must not launch it: the
+            // outward velocity that only undoes last substep's penetration is
+            // removed, so landings do not bounce off the penalty.
+            if let Some((depth, n)) = gr.deepest(c, b.x0, b.x_prev) {
+                let vn = b.v.dot(&n);
+                if vn > 0.0 {
+                    b.v -= n * vn.min(depth / h);
+                }
+            }
+            // Approach speed: the velocity this substep started with, into
+            // the surface it is now touching.
+            let speed = gr
+                .deepest(c, b.x0, b.x)
+                .map_or(0.0, |(_, n)| -(b.x_tilde - b.x_prev).dot(&n) / h);
+            let m = contact_mass(b);
+            if gr.commit(c, b.x0, b.x, m, h) && speed > MIN_IMPACT_SPEED {
+                self.contact_events.push(ContactEvent {
+                    node: bi,
+                    time: self.time,
+                    speed,
+                    mass: 1.0 / b.inv_mass,
+                });
+            }
+        }
     }
 
     fn runs_parallel(&self) -> bool {
@@ -930,6 +1028,19 @@ impl DynamicSim {
                 for k in 0..3 {
                     sys.lin.add_diagonal(d + k, m);
                     sys.rhs[d + k] = -m * r[k];
+                }
+            }
+        }
+        if let Some(gr) = &self.config.ground {
+            // Ground contact: diagonal, non-negative, translation DOFs only,
+            // so it needs no change to the sparsity pattern.
+            for bi in 0..self.bodies.len() {
+                if let (Some(d), Some(t)) = (sys.trans[bi], self.contact_terms(gr, bi, h)) {
+                    phi += t.energy;
+                    for k in 0..3 {
+                        sys.lin.add_diagonal(d + k, t.hess[k]);
+                        sys.rhs[d + k] -= t.grad[k];
+                    }
                 }
             }
         }
@@ -1306,6 +1417,19 @@ impl DirectSystem {
             ],
         })
     }
+}
+
+/// Touch-downs slower than this (m/s) are not reported as contact events.
+const MIN_IMPACT_SPEED: f64 = 0.05;
+
+/// Mass that sets a node's ground penalty stiffness: its own mass plus the
+/// mass equivalent of the load on it, so a heavily loaded light node does not
+/// sink into the floor. Weight carried through the members is not included:
+/// a lagged stiffness that follows it costs 2 to 4 times the CG iterations
+/// for a resting tower, and the column bases of a 3x3x8 steel tower standing
+/// on the floor only sink 4 mm without it.
+fn contact_mass(b: &Body) -> f64 {
+    1.0 / b.inv_mass + b.force.norm() / 9.81
 }
 
 fn rotate(q: UnitQuaternion<f64>, phi: Vec3) -> UnitQuaternion<f64> {

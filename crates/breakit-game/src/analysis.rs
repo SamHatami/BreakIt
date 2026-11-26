@@ -7,7 +7,8 @@
 //! render code.
 
 use bevy::prelude::*;
-use breakit_core::{solve_static, BreakCause, DynamicSim, SimConfig};
+use breakit_core::{solve_static, Block, BreakCause, DynamicSim, Ground, SimConfig};
+use breakit_lab::PlayTable;
 use breakit_scenario::TestRun;
 
 use crate::design::{from_core, to_core, Design};
@@ -176,9 +177,25 @@ pub fn compute_static(design: &Design, scale: f32) -> FrameState {
     state
 }
 
+/// What collapsing parts land on: the play table's contact boxes (banks,
+/// slabs, channel beds), over a floor at the basin bottom so nothing falls
+/// forever if an insert leaves a hole.
+pub fn table_ground(table: &PlayTable) -> Ground {
+    Ground {
+        height: -breakit_lab::table::BASIN_DEPTH as f64,
+        blocks: table
+            .contact_boxes()
+            .into_iter()
+            .map(|(lo, hi)| Block::new(to_core(lo), to_core(hi)))
+            .collect(),
+        ..Default::default()
+    }
+}
+
 fn start_simulation(
     mut commands: Commands,
     design: Res<Design>,
+    table: Res<PlayTable>,
     active: Res<ActiveScenario>,
     mut report: ResMut<LastReport>,
     mut state: ResMut<FrameState>,
@@ -186,6 +203,7 @@ fn start_simulation(
     let structure = design.to_structure();
     let config = SimConfig {
         gravity: to_core(Vec3::new(0.0, -GRAVITY, 0.0)),
+        ground: Some(table_ground(&table)),
         ..Default::default()
     };
     report.0 = None;
@@ -294,6 +312,28 @@ fn cause_label(c: &BreakCause) -> String {
 mod tests {
     use super::*;
     use crate::design::{BeamKind, SupportKind};
+
+    #[test]
+    fn starter_bridge_spans_the_default_table_gap() {
+        let d = Design::starter_bridge();
+        let mut sim = DynamicSim::new(
+            &d.to_structure(),
+            SimConfig {
+                ground: Some(table_ground(&PlayTable::default())),
+                ..Default::default()
+            },
+        );
+        sim.step(1.0 / 60.0);
+        // Only the supported ends sit on the banks; the span is over the gap.
+        for n in 0..d.nodes.len() {
+            if d.supports[n].is_none() {
+                assert!(
+                    sim.clearance(n).unwrap() > 0.1,
+                    "node {n} touches the table"
+                );
+            }
+        }
+    }
 
     #[test]
     fn static_state_reports_utilization_and_sag() {
