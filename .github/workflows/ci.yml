@@ -6,6 +6,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Bevy's debug build with full debuginfo fills the runner's disk.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: 0
 
 jobs:
   core:
@@ -18,12 +21,15 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo test --release -p breakit-core
       - run: cargo test --release -p breakit-mesh
+      - run: cargo test --release -p breakit-scenario
 
   # Bevy app: needs system libs for windowing/input (audio is off, so no ALSA).
   game:
     name: breakit-game check and tests
     runs-on: ubuntu-latest
     steps:
+      - name: Free runner disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - uses: actions/checkout@v4
       - name: Install Linux deps for Bevy
         run: |
