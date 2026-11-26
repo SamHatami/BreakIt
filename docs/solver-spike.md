@@ -229,7 +229,13 @@ Whole frames on 1 / 4 threads: bridge 60 6.1 / 5.6 ms elastic, tower 8x8x16 11.9
 
 What caps the thread gain now: waking a worker still costs the calling thread tens of microseconds per loop, and `update_material` and the linear solve of bridges are serial. Tried and dropped: an algebraic `eigen2` (no faster than `atan2`), a parallel gather scatter, computing a wave of beams ahead of the scatter (slowed the factorisation by a quarter), plain `par_chunks_mut`.
 
-Not done yet: AVX-512 (`pulp` 0.21 needs nightly for it), threads for `update_material` and for the block Cholesky factorisation, per-island solves for debris, and contact and load models (not yet measured as hot). NEON is compiled from the same source but has only been run on x86-64 so far.
+### The material update reuses the step check
+
+The step check (`objective`) already evaluates every live member's response at the accepted state, and the end-of-substep material update evaluated the same thing again. The check now keeps each member's length and response, and the update commits those when the check was the last thing to look at the state and the viscoplastic ratio is the same (`checked_for`); otherwise it computes as before. The numbers are the same bit for bit, so the serial `update_material` pass is gone from an ordinary substep. Whole frames, 4 threads: tower 5x5x12 about 3.4 ms, bridge 60 4.7 (was 5.6), tower 8x8x16 9.4, bridge 120 11.8 elastic and 14.4 in collapse (was 16.2).
+
+Measured shares of other owners' code on a standing structure: ground contact 1 to 5% of a frame; a steady wind `LoadSet` about 10% (0.35 ms of 3.5 on tower 5x5x12, 0.6 of 5.7 on bridge 60), so the load models now count as a hot path.
+
+Not done yet: AVX-512 (`pulp` 0.21 needs nightly for it), threads for the block Cholesky factorisation, per-island solves for debris, and SIMD or threads in the load models. NEON is compiled from the same source but has only been run on x86-64 so far.
 
 ## Next
 

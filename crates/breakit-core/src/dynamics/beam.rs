@@ -153,9 +153,10 @@ impl DynamicSim {
         (out, resp.energy)
     }
 
-    /// Energy of a beam alone, for the step check.
-    pub(super) fn beam_energy(&self, i: usize, r: Option<f64>) -> f64 {
+    /// Length and response of a beam alone, for the step check (which
+    /// needs the energy) and the material update after it.
+    pub(super) fn beam_response(&self, i: usize, r: Option<f64>) -> (f64, Response) {
         let gm = self.geom(i);
-        self.response(i, &self.strains(i, &gm), r).energy
+        (gm.len, self.response(i, &self.strains(i, &gm), r))
     }
 }
