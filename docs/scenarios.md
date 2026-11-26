@@ -48,14 +48,14 @@ The "Simulate wind, quake and wave loads" work is adding richer load models in `
 
 ## Cost
 
-`CostModel`: price per kg per material (steel 2.5, timber 1.2, concrete 0.25, composite 30) plus a price per member end by joint kind (pinned 20, dowelled 30, bolted 40, monolithic 60, welded 80, rigid 80; from the components design). `estimate_with_joints` takes the joint kind per member end; `estimate` prices every end as bolted. Joints dominate small structures at these prices.
+`CostModel`, in kronor at real installed rates (Sam's choice, 2026-11-26): price per kg per material (steel 50, timber 24, concrete 5, composite 600) plus a price per member end by joint kind (pinned 400, dowelled 600, bolted 800, monolithic 1 200, welded 1 600, rigid 1 600; ratios from the components design, kept in step with `breakit-parts` prices). `estimate_with_joints` takes the joint kind per member end; `estimate` prices every end as bolted. Joints dominate small structures at these prices.
 
 ## Shipped scenarios (tuned with `cargo run --release -p breakit-scenario --example probe`)
 
 | Sheet | Scenario | Sample design | Result |
 | --- | --- | --- | --- |
-| B-01 | Culvert road bridge, 6 m, two 7.5 t trucks then an 18 t tipper | Warren truss, steel tube 50x5 (the game's starter bridge) | pass, 1 star, margin 9.7 (overbuilt) |
-| | | 30x3 tube | pass, 2 stars, 786, margin 1.65 |
+| B-01 | Culvert road bridge, 6 m, two 7.5 t trucks then an 18 t tipper | Warren truss, steel tube 50x5 (the game's starter bridge) | pass, 1 star, 588 (overbuilt) |
+| | | 30x3 tube | pass, 3 stars, 917 |
 | | | 25x2.5 tube | pass, yields (margin 0.95), sag 118 mm |
 | | | 20x2 tube | collapses at 8.7 s (tipper) |
 | Q-01 | Water tower on the shake table: 4 t tank at 6 m, 0.4 g at 1.5 Hz | 2-level braced mast, 25x2.5 tube | pass, 2 stars, 783, tank sway 12 mm |
