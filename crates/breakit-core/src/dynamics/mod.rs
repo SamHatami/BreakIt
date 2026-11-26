@@ -267,6 +267,13 @@ pub struct DynamicSim {
     contact_events: Vec<ContactEvent>,
     time: f64,
     direct: Option<DirectSystem>,
+    /// Per member, its length and response at the state the last step check
+    /// accepted, for the material update that follows (which would compute
+    /// exactly this again).
+    checked: Vec<(f64, Response)>,
+    /// The plastic ratio `checked` was computed with; `None` when the state
+    /// has moved since, or no step check ran.
+    checked_for: Option<Option<f64>>,
     stats: SolverStats,
 }
 
@@ -280,6 +287,7 @@ struct Strains {
 
 /// Internal forces of a beam for given strains, after the plastic return of
 /// this substep, with their tangent stiffness and incremental energy.
+#[derive(Clone, Copy, Default)]
 struct Response {
     n: f64,
     kt_axial: f64,
@@ -402,6 +410,8 @@ impl DynamicSim {
             contacts,
             contact_events: Vec::new(),
             time: 0.0,
+            checked: Vec::new(),
+            checked_for: None,
             stats: SolverStats::default(),
         }
     }
@@ -614,9 +624,18 @@ impl DynamicSim {
             self.commit_contacts(&gr, h);
             self.config.ground = Some(gr);
         }
+        // The step check has already computed every member's response at
+        // this state, with the same plastic return, unless it did not run.
+        let plastic = self.config.plasticity;
+        let reuse = self.checked_for.take() == Some(plastic.then_some(self.plastic_ratio(h).1));
         for i in 0..self.beams.len() {
             if !self.beams[i].broken {
-                self.update_material(i, h);
+                if reuse {
+                    let (len, resp) = self.checked[i];
+                    self.commit_material(i, len, &resp);
+                } else {
+                    self.update_material(i, h);
+                }
             }
         }
     }

@@ -130,7 +130,6 @@ impl DynamicSim {
         }
     }
 
-    #[allow(clippy::needless_range_loop)]
     pub(super) fn update_material(&mut self, i: usize, h: f64) {
         let gm = self.geom(i);
         let st = self.strains(i, &gm);
@@ -138,6 +137,14 @@ impl DynamicSim {
         // The same plastic return the solve used, now committed.
         let r = self.plastic_ratio(h).1;
         let resp = self.response(i, &st, plastic.then_some(r));
+        self.commit_material(i, gm.len, &resp);
+    }
+
+    /// Commit the response `resp` of member `i` at its current length `len`:
+    /// plastic strains, damage, joint utilisation and failure.
+    #[allow(clippy::needless_range_loop)]
+    pub(super) fn commit_material(&mut self, i: usize, len: f64, resp: &Response) {
+        let plastic = self.config.plasticity;
         let bm = &mut self.beams[i];
         bm.plastic_elongation += resp.dp_axial;
         // Rotation at an end where the joint is weaker than the member is the
@@ -171,7 +178,7 @@ impl DynamicSim {
             dp: member_dp,
             hinge: member_hinge,
             l0: bm.l0,
-            len: gm.len,
+            len,
         };
         let failure = damage::update(
             &bm.law,
@@ -191,8 +198,8 @@ impl DynamicSim {
         // plastic rotation at each end against the joint's rotation capacity.
         let mut failure = failure;
         let v = [
-            (resp.m[0][0] + resp.m[0][1]) / gm.len,
-            (resp.m[1][0] + resp.m[1][1]) / gm.len,
+            (resp.m[0][0] + resp.m[0][1]) / len,
+            (resp.m[1][0] + resp.m[1][1]) / len,
         ];
         for end in 0..2 {
             let j = &bm.joints[end];

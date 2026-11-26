@@ -98,7 +98,9 @@ impl DirectSystem {
 impl DynamicSim {
     /// The substep objective Φ = ½|x − x̃|²_M / h² + Σ beam energy at the
     /// current state (same residual definitions as `assemble_direct`).
-    pub(super) fn objective(&self, h: f64) -> f64 {
+    ///
+    /// Leaves every live member's length and response in `checked`.
+    pub(super) fn objective(&self, h: f64, checked: &mut [(f64, Response)]) -> f64 {
         let ih2 = 1.0 / (h * h);
         let mut phi = 0.0;
         for b in &self.bodies {
@@ -118,34 +120,37 @@ impl DynamicSim {
             }
         }
         let r = self.plastic_ratio(h).0;
-        let energy = |i: usize| {
-            if self.beams[i].broken {
-                0.0
-            } else {
-                self.beam_energy(i, r)
-            }
-        };
         // Summed per fixed-size chunk, then in chunk order, on one thread or
         // many: the same result on any number of threads.
         let n = self.beams.len();
-        let chunk = |c: usize| {
-            (c * PAR_CHUNK..((c + 1) * PAR_CHUNK).min(n))
-                .map(energy)
-                .sum::<f64>()
+        let chunk = |c: usize, out: &mut [(f64, Response)]| {
+            let mut sum = 0.0;
+            for (k, slot) in out.iter_mut().enumerate() {
+                let i = c * PAR_CHUNK + k;
+                if !self.beams[i].broken {
+                    *slot = self.beam_response(i, r);
+                    sum += slot.1.energy;
+                }
+            }
+            sum
         };
-        let chunks = n.div_ceil(PAR_CHUNK);
         if self.runs_parallel() {
-            let mut parts = vec![0.0; chunks];
+            let mut parts: Vec<_> = checked
+                .chunks_mut(PAR_CHUNK)
+                .map(|out| (0.0, out))
+                .collect();
             let mut sum = 0.0;
             ordered_chunks(
                 &mut parts,
                 n / OBJECTIVE_PER_HELPER,
-                |c, part| *part = chunk(c),
-                |_, part| sum += *part,
+                |c, part| part.0 = chunk(c, part.1),
+                |_, part| sum += part.0,
             );
             phi += sum;
         } else {
-            phi += (0..chunks).map(chunk).sum::<f64>();
+            phi += (checked.chunks_mut(PAR_CHUNK).enumerate())
+                .map(|(c, out)| chunk(c, out))
+                .sum::<f64>();
         }
         phi
     }
@@ -280,6 +285,11 @@ impl DynamicSim {
             max_age: self.config.refactor_every,
         };
         let mut base = std::mem::take(&mut sys.base);
+        // Responses at the last state the step check evaluated; current
+        // only while nothing has moved since.
+        let mut checked = std::mem::take(&mut self.checked);
+        checked.resize(self.beams.len(), (0.0, Response::default()));
+        let mut checked_current = false;
         let mut relinearised = 0;
         loop {
             if check {
@@ -291,6 +301,7 @@ impl DynamicSim {
                 break;
             }
             self.apply_delta(&sys, 1.0, None);
+            checked_current = false;
             if !check {
                 break;
             }
@@ -300,7 +311,9 @@ impl DynamicSim {
             // of divergence.
             let slope: f64 = sys.rhs.iter().zip(&sys.delta).map(|(r, d)| r * d).sum();
             let ok = |phi1: f64, t: f64| phi1 <= phi0 - ARMIJO * t * slope + 1e-10 * phi0.abs();
-            if ok(self.objective(h), 1.0) {
+            let phi1 = self.objective(h, &mut checked);
+            checked_current = true;
+            if ok(phi1, 1.0) {
                 break;
             }
             // Φ is not quadratic enough over this step (typically a yielding
@@ -313,7 +326,7 @@ impl DynamicSim {
                 t *= 0.5;
                 self.stats.backtracks += 1;
                 self.apply_delta(&sys, t, Some(&base));
-                if ok(self.objective(h), t) {
+                if ok(self.objective(h, &mut checked), t) {
                     break;
                 }
             }
@@ -324,6 +337,8 @@ impl DynamicSim {
             self.stats.extra_iterations += 1;
         }
         sys.base = base;
+        self.checked = checked;
+        self.checked_for = checked_current.then(|| self.plastic_ratio(h).0);
         self.direct = Some(sys);
     }
 }
