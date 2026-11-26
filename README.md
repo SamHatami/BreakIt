@@ -20,6 +20,7 @@ Plan: https://claude.ai/artifact/LE9dveFS17PTMrkqGWwSvT
 ```
 cargo test --release
 cargo run --release --example bench -- --sizes s,m,l --static   # speed and accuracy on game-sized structures
+cargo run --release --example gate                               # the SIMD / threads / work gate CI runs
 cargo run --release --example probe -- 8 1        # direct solver, 8 substeps, 1 iteration
 cargo run --release --example probe -- 40 1 gs    # plain XPBD Gauss-Seidel, for comparison
 ```

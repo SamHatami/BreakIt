@@ -202,7 +202,7 @@ fn bridge_trusses_either_side_of_the_lane_share_the_traffic() {
     let b = Binding::new(&s, &st);
     let deck = b.deck.as_ref().unwrap();
     assert_eq!(deck.stations.len(), 7);
-    assert!(deck.stations.iter().all(|st| st.nodes.len() == 2));
+    assert!(deck.stations.iter().all(|st| st.others.len() == 1));
     let cost = CostModel::default().estimate(&st);
     let s_free = Scenario {
         limits: Limits {
@@ -404,4 +404,43 @@ fn weak_bolts_tear_out_under_the_shaking() {
         .timeline
         .iter()
         .any(|e| matches!(e.what, Happening::BoltsFailed { payload: 1, .. })));
+}
+
+fn scenario(id: &str) -> Scenario {
+    builtin().into_iter().find(|s| s.id == id).unwrap()
+}
+
+#[test]
+fn the_fan_wall_loads_the_billboard_and_a_slim_tower_blows_over() {
+    let s = scenario("sign_wind");
+    let b = Binding::load_set(&s, s.settle);
+    assert!(b
+        .cases
+        .iter()
+        .any(|c| matches!(c.kind, breakit_core::loads::LoadKind::Wind(_))));
+    let good = grade(&s, &common::sign_tower(0.035, 0.0035, 2));
+    print!("{}", good.summary());
+    assert!(good.passed, "{:?}", good.failure);
+    // ½ ρ C_d A U² on the 18 m² board at 40 m/s is about 32 kN: the
+    // tower's members must feel it.
+    assert!(good.peak_utilization > 0.3, "{}", good.peak_utilization);
+    let bad = grade(&s, &common::sign_tower(0.02, 0.002, 2));
+    assert!(!bad.passed);
+}
+
+#[test]
+fn the_surge_pushes_the_jetty_legs() {
+    let s = scenario("flood_jetty");
+    let braced = grade(&s, &common::jetty(0.03, 0.003, true));
+    print!("{}", braced.summary());
+    assert!(braced.passed, "{:?}", braced.failure);
+    // Unbraced legs sway far more under the same surge.
+    let sway = grade(&s, &common::jetty(0.06, 0.005, false));
+    let drift = |r: &Report| r.payloads[0].1.drift;
+    assert!(
+        drift(&sway) > 1.5 * drift(&braced),
+        "{} vs {}",
+        drift(&sway),
+        drift(&braced)
+    );
 }

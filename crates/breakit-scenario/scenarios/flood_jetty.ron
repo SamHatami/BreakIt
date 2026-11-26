@@ -1,0 +1,62 @@
+// Test sheet F-01: a pump jetty in the wave flume.
+//
+// The legs stand on the flume bed in a strong current; then the paddle
+// sends a surge down the flume. Water pushes on every submerged member
+// (drag and inertia), so slim, open legs help and a deck low enough for
+// the crest to reach catches far more.
+(
+    id: "flood_jetty",
+    sheet: "F-01",
+    group: "Water",
+    title: "Pump jetty in the flume",
+    brief: "Hold a 3 t pump house on a jetty deck 1 m above the table while the flume runs a 1.5 m/s flood current and the paddle sends a 1.8 m surge down the channel: its crest reaches the deck. The pump house just stands on its feet at x = ±1 m, z = ±0.5 m: rock the deck too hard and it slides off. Four fixed footings on the flume bed, 3.2 m down, at the corners of a 3 m square. Water flows along +x.",
+    limits: (
+        volume: (min: (-2.0, -3.2, -2.0), max: (2.0, 1.5, 2.0)),
+        budget: Some(130000.0),
+        max_mass: Some(3000.0),
+        materials: None,
+    ),
+    anchors: [
+        (name: "A", position: (-1.5, -3.2, -1.5), kind: Fixed),
+        (name: "B", position: (1.5, -3.2, -1.5), kind: Fixed),
+        (name: "C", position: (1.5, -3.2, 1.5), kind: Fixed),
+        (name: "D", position: (-1.5, -3.2, 1.5), kind: Fixed),
+    ],
+    payloads: [
+        (
+            name: "pump house",
+            at: (0.0, 1.0, 0.0),
+            tolerance: 0.1,
+            mass: 3000.0,
+            feet: [(-1.0, 0.0, -0.5), (1.0, 0.0, -0.5), (1.0, 0.0, 0.5), (-1.0, 0.0, 0.5)],
+            height: 1.0,
+            size: Some((2.4, 2.2, 1.4)),
+            mount: Resting(friction: 0.35),
+            limits: (tilt_deg: Some(0.5), drift: Some(0.05)),
+            critical: true,
+        ),
+    ],
+    events: [
+        Water(
+            name: "Surge 1.8 m",
+            start: 0.0,
+            ramp: 2.0,
+            bed: -3.2,
+            level: -0.6,
+            current: (1.5, 0.0, 0.0),
+            wave: Some(Surge(height: 1.8, direction: (1.0, 0.0, 0.0))),
+        ),
+    ],
+    duration: 10.0,
+    settle: 1.0,
+    collapse: (displacement: 0.5, max_broken_fraction: 0.25),
+    overload: None,
+    objectives: [NoBreaks],
+    scoring: (
+        target_cost: 80000.0,
+        target_mass: 450.0,
+        margin_band: (1.25, 2.0),
+        weights: (cost: 0.3, mass: 0.15, margin: 0.25, objectives: 0.3),
+        stars: (0.6, 0.85),
+    ),
+)
