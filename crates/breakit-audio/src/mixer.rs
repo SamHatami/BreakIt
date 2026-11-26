@@ -217,6 +217,8 @@ pub struct Mixer {
 impl Mixer {
     pub fn new(sample_rate: f32) -> Self {
         let sr = sample_rate;
+        // Decode the recordings before the audio thread needs them.
+        crate::timbre::preload();
         Self {
             sr,
             listener: Listener::default(),

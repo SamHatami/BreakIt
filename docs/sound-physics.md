@@ -15,6 +15,19 @@ break cause, position,     -> Command::Break  ----------->     |
 debris speed, size (game)  -> Command::Impact ----------->  modal.rs   modes driven by the force -> sound
 ```
 
+## Recorded timbre (`timbre.rs`)
+
+The first version computed everything, and it sounded like glass. Two reasons. A member was an ideal bar on its own, which rings at a few clean pitches for seconds, exactly as a glass does. And the solver steps tens of times a second, so it cannot say what the milliseconds of a crack are like; short computed clicks stood in for them, and the ear heard clinks.
+
+So now:
+
+- What an event sounds like comes from a recording of that kind of event (`samples/`, one folder each: a bar snapping, a beam creaking, a single crack, a plank landing).
+- The simulation still decides everything that happens: which events, when, how many (the same avalanche statistics, aftershock law, stick-slip and contact model as below), how loud (energy released), and at what pitch (a slice plays slower for a bigger section; half of the 1/size law, an octave at most).
+- The recorded slice is also the force that rings the member's modes, so the member's length and section still colour it. The modes carry the joint loss of a member built into a frame (loss factor 0.012 for steel up to 0.04 for concrete), not the far smaller loss of the bare material, so they thud and die away instead of ringing.
+- Recordings are cut into single events where the level jumps, so one recording of a splitting beam gives many different cracks.
+
+Wind tones are not affected: they are continuous and fully computed.
+
 ## The body: modes from beam theory (`body.rs`)
 
 | What | Formula | What it gives |

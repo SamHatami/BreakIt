@@ -34,6 +34,7 @@ pub mod modal;
 pub mod output;
 pub mod reverb;
 pub mod rigs;
+pub mod timbre;
 pub mod ui;
 pub mod wav;
 pub mod wind;

@@ -14,6 +14,7 @@
 
 use crate::body::ModeSpec;
 use crate::dsp::OnePole;
+use crate::timbre::Slice;
 use crate::Voice;
 use std::f32::consts::TAU;
 
@@ -209,6 +210,113 @@ impl Pulses {
     }
 }
 
+/// One recorded event in a score: a slice of a recording, heard as it is
+/// and fed to a bank as the force that rings it.
+#[derive(Clone, Debug)]
+pub struct GrainHit {
+    /// Start, samples from the start of the voice.
+    pub at: u32,
+    /// Which bank it drives.
+    pub to: u8,
+    pub slice: Slice,
+    /// Playback speed (and so pitch) against the recording's own.
+    pub rate: f32,
+    /// Level of the recording itself (its peak plays at this).
+    pub gain: f32,
+    /// Impulse it gives the bank, in the units of [`Hit::amp`].
+    pub body: f32,
+    /// Longest it may play, s; it is faded out there.
+    pub limit: f32,
+}
+
+#[derive(Clone, Debug)]
+struct LiveGrain {
+    hit: GrainHit,
+    delay: u32,
+    /// Position in the slice, source samples.
+    pos: f64,
+    step: f64,
+    /// Output samples played and to play.
+    age: u32,
+    total: u32,
+}
+
+/// Recorded events being played.
+#[derive(Clone, Debug, Default)]
+pub struct Grains {
+    live: Vec<LiveGrain>,
+}
+
+impl Grains {
+    /// Starts a recorded event `delay` samples into the next block.
+    pub fn start(&mut self, hit: GrainHit, delay: u32, sr: f32) {
+        let step = (hit.slice.rate * hit.rate.clamp(0.25, 4.0) / sr) as f64;
+        if step <= 0.0 || hit.slice.len < 2 {
+            return;
+        }
+        let whole = (hit.slice.len as f64 / step) as u32;
+        let total = whole.min((hit.limit.max(0.005) * sr) as u32).max(8);
+        self.live.push(LiveGrain {
+            hit,
+            delay,
+            pos: 0.0,
+            step,
+            age: 0,
+            total,
+        });
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.live.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.live.len()
+    }
+
+    /// Writes the next `n` samples of every live event: the recording into
+    /// `heard`, and the same signal as a force into `imp[to]`.
+    pub fn render(&mut self, n: usize, imp: &mut [Vec<f32>], heard: &mut [f32]) {
+        for l in &mut self.live {
+            let begin = (l.delay as usize).min(n);
+            l.delay -= begin as u32;
+            let to = l.hit.to as usize;
+            let data = &l.hit.slice.data;
+            let first = l.hit.slice.start as usize;
+            let last = l.hit.slice.len as usize - 1;
+            let direct = l.hit.gain * l.hit.slice.peak;
+            let force = l.hit.body * l.hit.slice.norm * (l.step as f32).sqrt();
+            // Fades: half a millisecond in, the last fifth out.
+            let fade_in = 24.0f32;
+            let fade_out = (l.total as f32 * 0.2).max(8.0);
+            let feed = imp.get_mut(to);
+            let mut feed = feed.map(|b| &mut b[..]);
+            for j in begin..n {
+                if l.age >= l.total {
+                    break;
+                }
+                let i = l.pos as usize;
+                if i >= last {
+                    l.age = l.total;
+                    break;
+                }
+                let f = (l.pos - i as f64) as f32;
+                let x = data[first + i] + (data[first + i + 1] - data[first + i]) * f;
+                let left = (l.total - l.age) as f32;
+                let env = (l.age as f32 / fade_in).min(1.0) * (left / fade_out).min(1.0);
+                let x = x * env;
+                heard[j] += direct * x;
+                if let Some(b) = feed.as_deref_mut() {
+                    b[j] += force * x;
+                }
+                l.pos += l.step;
+                l.age += 1;
+            }
+        }
+        self.live.retain(|l| l.age < l.total);
+    }
+}
+
 /// A one-shot: a score of force events played into up to four banks.
 pub struct ModalVoice {
     banks: Vec<Bank>,
@@ -220,6 +328,12 @@ pub struct ModalVoice {
     hits: Vec<Hit>,
     next: usize,
     pulses: Pulses,
+    /// Recorded events, their playback and what is heard of them directly.
+    recorded: Vec<GrainHit>,
+    next_recorded: usize,
+    grains: Grains,
+    heard: Vec<f32>,
+    sr: f32,
     clock: u32,
     gain: f32,
     direct: Vec<f32>,
@@ -258,6 +372,11 @@ impl ModalVoice {
             hits,
             next: 0,
             pulses: Pulses::default(),
+            recorded: Vec::new(),
+            next_recorded: 0,
+            grains: Grains::default(),
+            heard: Vec::new(),
+            sr,
             clock: 0,
             gain,
             direct: Vec::new(),
@@ -267,6 +386,13 @@ impl ModalVoice {
             max_samples: (10.0 * sr) as u32,
             floor: 1e-4 / gain.max(1e-3),
         }
+    }
+
+    /// Adds recorded events to the score (need not be sorted).
+    pub fn with_recorded(mut self, mut recorded: Vec<GrainHit>) -> Self {
+        recorded.sort_by_key(|g| g.at);
+        self.recorded = recorded;
+        self
     }
 
     pub fn mode_count(&self) -> usize {
@@ -295,11 +421,21 @@ impl Voice for ModalVoice {
         }
         self.pulses
             .render(n, &mut self.imp, &mut self.step, &mut self.direct);
+        self.heard.clear();
+        self.heard.resize(n, 0.0);
+        while self.next_recorded < self.recorded.len() && self.recorded[self.next_recorded].at < end
+        {
+            let g = self.recorded[self.next_recorded].clone();
+            self.next_recorded += 1;
+            let delay = g.at.saturating_sub(self.clock);
+            self.grains.start(g, delay, self.sr);
+        }
+        self.grains.render(n, &mut self.imp, &mut self.heard);
 
         // The events' own sound first, then the banks ring on top of it.
         let dg = self.direct_gain;
-        for d in &mut self.direct {
-            *d = dg * self.direct_lp.lp(*d + 1e-18);
+        for (d, h) in self.direct.iter_mut().zip(&self.heard) {
+            *d = dg * self.direct_lp.lp(*d + 1e-18) + h;
         }
         let mut ringing = false;
         for (i, bank) in self.banks.iter_mut().enumerate() {
@@ -322,7 +458,11 @@ impl Voice for ModalVoice {
             *o += d * self.gain;
         }
         self.clock = end;
-        (self.next < self.hits.len() || !self.pulses.is_empty() || ringing)
+        (self.next < self.hits.len()
+            || !self.pulses.is_empty()
+            || self.next_recorded < self.recorded.len()
+            || !self.grains.is_empty()
+            || ringing)
             && self.clock < self.max_samples
     }
 }
