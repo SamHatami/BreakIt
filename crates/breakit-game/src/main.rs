@@ -11,6 +11,7 @@ mod capture;
 mod design;
 mod hud;
 mod render;
+mod visuals;
 
 use bevy::prelude::*;
 
@@ -38,6 +39,7 @@ fn main() {
             build::BuildPlugin,
             analysis::AnalysisPlugin,
             render::FrameRenderPlugin,
+            visuals::VisualsPlugin,
             hud::HudPlugin,
             capture::CapturePlugin,
         ))

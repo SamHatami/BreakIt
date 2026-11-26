@@ -7,6 +7,7 @@
 use bevy::math::Vec3;
 use bevy::prelude::Resource;
 use breakit_core::{Material, NodeLoad, Section, Structure, Support};
+use breakit_render::breakit_mesh::{MaterialKind, MemberStyle, Profile};
 
 /// What the player is building with. Each kind maps to a core material and
 /// cross-section.
@@ -27,18 +28,24 @@ impl BeamKind {
         }
     }
 
-    pub fn section(self) -> Section {
+    /// The cross-section, the one description both the solver's section
+    /// properties and the drawn mesh come from.
+    pub fn profile(self) -> Profile {
         match self {
-            BeamKind::SteelTube => Section::tube(0.05, 0.005),
-            BeamKind::Timber => Section::rect(0.1, 0.15),
+            BeamKind::SteelTube => Profile::Tube { r: 0.05, t: 0.005 },
+            BeamKind::Timber => Profile::Rect { b: 0.1, h: 0.15 },
         }
     }
 
-    /// Visual radius of the beam, in metres.
-    pub fn radius(self) -> f32 {
-        match self {
-            BeamKind::SteelTube => 0.05,
-            BeamKind::Timber => 0.07,
+    pub fn section(self) -> Section {
+        self.profile().section()
+    }
+
+    /// How the renderer draws this kind of beam.
+    pub fn style(self) -> MemberStyle {
+        MemberStyle {
+            profile: self.profile(),
+            kind: MaterialKind::from_material(&self.material()),
         }
     }
 
