@@ -9,6 +9,9 @@
 //! * [`dynamics::DynamicSim`]: a real-time, substepped XPBD solver with
 //!   corotational beams, plastic hinges, axial yield and fracture.
 //!
+//! Member ends connect through a [`Joint`]: rigid, pinned or semi-rigid,
+//! with its own strength, so a connection can fail before its member.
+//!
 //! Members fail by material: steel yields and tears, timber splinters, splits
 //! and crushes, concrete cracks and crushes (rebar holds it together after
 //! cracking), composites break suddenly or delaminate. [`damage`] has the
@@ -26,6 +29,7 @@ pub mod concrete;
 pub mod damage;
 pub mod dynamics;
 pub mod frame;
+pub mod joint;
 pub mod linsolve;
 pub mod loads;
 pub mod material;
@@ -35,6 +39,7 @@ pub mod statics;
 
 pub use damage::{DamageState, MemberDamage};
 pub use dynamics::{BreakCause, BreakEvent, DynamicSim, SimConfig, Solver, SolverStats};
+pub use joint::{Joint, JointKind};
 pub use loads::{LoadCase, LoadKind, LoadSet, RigState, Window};
 pub use material::{Material, MaterialKind};
 pub use model::{Member, NodeLoad, Structure, Support};
