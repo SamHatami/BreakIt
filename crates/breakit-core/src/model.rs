@@ -1,14 +1,16 @@
 //! The structure model shared by both solvers.
 
-use crate::{Material, Section, Vec3};
+use crate::{Joint, Material, Section, Vec3};
 
-/// A straight beam member between two nodes, rigidly connected at both ends.
+/// A straight beam member between two nodes.
 #[derive(Clone, Debug)]
 pub struct Member {
     pub a: usize,
     pub b: usize,
     pub material: Material,
     pub section: Section,
+    /// Connections at end a and end b. Rigid unless set.
+    pub ends: [Joint; 2],
 }
 
 /// Restrained degrees of freedom at a node: [ux, uy, uz, rx, ry, rz].
@@ -90,8 +92,14 @@ impl Structure {
             b,
             material,
             section,
+            ends: [Joint::RIGID; 2],
         });
         self.members.len() - 1
+    }
+
+    /// Set the connections at a member's two ends.
+    pub fn set_ends(&mut self, m: usize, a: Joint, b: Joint) {
+        self.members[m].ends = [a, b];
     }
 
     pub fn add_support(&mut self, s: Support) {
