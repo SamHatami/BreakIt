@@ -26,6 +26,6 @@ One folder per kind of event. Put 16-bit WAV files (mono, any sample rate, one c
 | `carbon_crackle` | laminate delaminating, fast dry crackle |
 | `carbon_drop` | carbon tube landing |
 
-The clips in the timbre folders were generated with Stable Audio Open Small (Stability AI Community License) by `tools/generate_samples.py`, screened by measurement (clearly pitched or very bright takes were dropped) and converted to 32 kHz mono. Nobody has yet checked each clip by ear; replace any that sound wrong.
+A first set generated with Stable Audio Open Small (`tools/generate_samples.py`) was tried on 2026-11-27 and sounded worse than the free recordings, so the folders are empty again and the stand-ins play. The clips are in git history (commit before this one) if they are wanted for comparison.
 
 `cc0/` holds public-domain recordings from OpenGameArt; sources in `cc0/SOURCES.md`.
