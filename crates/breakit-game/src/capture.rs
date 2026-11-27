@@ -8,6 +8,7 @@
 //! `BREAKIT_THEME=<n>` starts with theme preset n, for comparing
 //! looks. `BREAKIT_TRUSS=steel` builds the web in steel instead of timber;
 //! `BREAKIT_TRUSS=weak` lays a bare timber plank instead, which breaks;
+//! `BREAKIT_TRUSS=sides` builds a truss each side of the road;
 //! `BREAKIT_TRUSS=faulty` leaves the truss with problems that block the
 //! test (a deck gap, a node out of bounds, a loose bar) and stops after
 //! the build shot.
@@ -140,6 +141,8 @@ fn capture_script(
             };
             if std::env::var("BREAKIT_SHEET").as_deref() == Ok("F-01") {
                 build_jetty(&mut design, chord);
+            } else if std::env::var("BREAKIT_TRUSS").as_deref() == Ok("sides") {
+                build_side_trusses(&mut design, chord, web);
             } else if std::env::var("BREAKIT_TRUSS").as_deref() == Ok("weak") {
                 build_plank(&mut design);
             } else if faulty() {
@@ -227,6 +230,34 @@ fn build_truss(d: &mut Design, chord: BeamKind, web: BeamKind) {
     for (i, &t) in top.iter().enumerate() {
         d.add_beam(bottom[i], t, web);
         d.add_beam(t, bottom[i + 1], web);
+    }
+}
+
+/// A Warren truss each side of B-01's road, at z = -1 and 1, with cross
+/// beams under the road at every bottom node.
+fn build_side_trusses(d: &mut Design, chord: BeamKind, web: BeamKind) {
+    let mut bottoms = Vec::new();
+    for z in [-1.0, 1.0] {
+        let bottom: Vec<usize> = (-3..=3)
+            .map(|x| d.add_node(Vec3::new(x as f32, 0.0, z)))
+            .collect();
+        let top: Vec<usize> = (-3..3)
+            .map(|x| d.add_node(Vec3::new(x as f32 + 0.5, 1.0, z)))
+            .collect();
+        for w in bottom.windows(2) {
+            d.add_beam(w[0], w[1], chord);
+        }
+        for w in top.windows(2) {
+            d.add_beam(w[0], w[1], web);
+        }
+        for (i, &t) in top.iter().enumerate() {
+            d.add_beam(bottom[i], t, web);
+            d.add_beam(t, bottom[i + 1], web);
+        }
+        bottoms.push(bottom);
+    }
+    for (&a, &b) in bottoms[0].iter().zip(&bottoms[1]) {
+        d.add_beam(a, b, web);
     }
 }
 

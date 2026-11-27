@@ -25,17 +25,25 @@ pub use breakit_scenario::Report;
 pub enum Rig {
     Bridges,
     Towers,
+    Wind,
     Water,
     Sandbox,
 }
 
 impl Rig {
-    pub const ALL: [Rig; 4] = [Rig::Bridges, Rig::Towers, Rig::Water, Rig::Sandbox];
+    pub const ALL: [Rig; 5] = [
+        Rig::Bridges,
+        Rig::Towers,
+        Rig::Wind,
+        Rig::Water,
+        Rig::Sandbox,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Rig::Bridges => "Bridges",
             Rig::Towers => "Towers",
+            Rig::Wind => "Wind",
             Rig::Water => "Water",
             Rig::Sandbox => "Sandbox",
         }
@@ -46,14 +54,19 @@ impl Rig {
         match self {
             Rig::Bridges => 0,
             Rig::Towers => 3,
+            Rig::Wind => 1,
             Rig::Water => 2,
             Rig::Sandbox => 1,
         }
     }
 
+    /// The tab for a scenario's group. Sheets that shake (towers,
+    /// equipment) sit on the shake table, wind sheets on open ground in
+    /// front of the fan wall; only bridges get the ravine.
     fn from_group(group: &str) -> Self {
         match group {
-            "Towers" => Rig::Towers,
+            "Towers" | "Equipment" => Rig::Towers,
+            "Wind" => Rig::Wind,
             "Water" => Rig::Water,
             _ => Rig::Bridges,
         }
@@ -84,7 +97,8 @@ pub struct Scenario {
     /// Length of the deck, or the width of the build area, metres.
     pub span: f32,
     pub anchors: Vec<(Vec3, SupportKind)>,
-    /// Payload positions; locked nodes at the start of the design.
+    /// Payload feet (or the payload point, for one without feet); locked
+    /// nodes at the start of the design.
     pub load_points: Vec<Vec3>,
     /// Scenario events in time order, then the proof test if any.
     pub load_cases: Vec<LoadCase>,
@@ -231,7 +245,14 @@ impl Scenario {
                     (v3(a.position), s)
                 })
                 .collect(),
-            load_points: def.payloads.iter().map(|p| v3(p.at)).collect(),
+            // Where each payload stands: one node per foot, so the player
+            // sees exactly which points to carry.
+            load_points: def
+                .payloads
+                .iter()
+                .flat_map(|p| p.foot_positions())
+                .map(v3)
+                .collect(),
             load_cases,
             budget: def.limits.budget.filter(|_| !sandbox).map(|b| b as f32),
             bonus_budget: (!sandbox).then_some(def.scoring.target_cost as f32),
@@ -671,6 +692,47 @@ mod tests {
         d.add_beam(base, 0, BeamKind::part("steel-tube-m"));
         let loads = s.static_loads(&d);
         assert!(loads.iter().any(|l| l.node == 0 && l.force.y < -30_000.0));
+    }
+
+    #[test]
+    fn every_foundation_stands_on_its_sheets_table() {
+        for s in catalogue().iter().filter(|s| !s.sandbox) {
+            let table = breakit_lab::PlayTable::builtin(s.rig.table());
+            let boxes = table.contact_boxes();
+            for (p, _) in &s.anchors {
+                let solid = boxes.iter().any(|(lo, hi)| {
+                    p.x >= lo.x
+                        && p.x <= hi.x
+                        && p.z >= lo.z
+                        && p.z <= hi.z
+                        && (p.y - hi.y).abs() < 0.05
+                });
+                assert!(solid, "{}: foundation at {p} is in the air", s.id);
+            }
+        }
+    }
+
+    #[test]
+    fn equipment_feet_are_the_locked_nodes() {
+        let s = catalogue().into_iter().find(|s| s.id == "F-01").unwrap();
+        let d = s.initial_design();
+        assert_eq!(d.nodes.len(), 4);
+        assert!((0..4).all(|i| d.is_locked(i)));
+        let structure = d.to_structure();
+        let b = Binding::new(&s.def, &structure);
+        assert_eq!(b.payload_feet[0], Some(vec![0, 1, 2, 3]));
+    }
+
+    #[test]
+    fn every_sheet_says_what_to_build() {
+        for s in catalogue().iter().filter(|s| !s.sandbox) {
+            assert!(!s.def.steps.is_empty(), "{} has no steps", s.id);
+            assert!(
+                !s.def.brief.contains("x ="),
+                "{}: coordinates in the brief",
+                s.id
+            );
+        }
     }
 
     #[test]

@@ -220,6 +220,10 @@ pub fn static_analysis(
 
 /// Pure static analysis: self weight, the player's loads and `extra`, with
 /// `springs` as extra elastic supports (floats).
+/// A static displacement beyond this, m, means nothing really holds the
+/// structure (a part only water carries), not that it bends that far.
+const MAX_STATIC_DISPLACEMENT: f64 = 5.0;
+
 pub fn compute_static(
     design: &Design,
     scale: f32,
@@ -240,6 +244,20 @@ pub fn compute_static(
     loads.extend(design.node_loads());
     loads.extend_from_slice(extra);
     match solve_static_with_springs(&structure, &loads, springs) {
+        // Only water holds it (or nearly nothing does): the springs that
+        // stand in for buoyancy make it solvable, but it would drift or sink
+        // away. Showing that "solution" throws the parts kilometres off
+        // screen, so call it what it is.
+        Ok(r)
+            if r.displacements
+                .iter()
+                .any(|d| !d.norm().is_finite() || d.norm() > MAX_STATIC_DISPLACEMENT) =>
+        {
+            state.error = Some(
+                "The structure is not held: it would drift or sink away. Rest it on the foundations."
+                    .into(),
+            );
+        }
         Ok(r) => {
             state.displacements = r.displacements.iter().map(|&d| from_core(d)).collect();
             for (i, p) in state.positions.iter_mut().enumerate() {
