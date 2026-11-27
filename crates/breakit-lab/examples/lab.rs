@@ -29,7 +29,7 @@ use breakit_lab::{
 };
 
 /// (focus, distance, yaw, pitch, label)
-const VIEWS: [(Vec3, f32, f32, f32, &str); 8] = [
+const VIEWS: [(Vec3, f32, f32, f32, &str); 10] = [
     (Vec3::new(0.0, 0.8, 0.0), 13.0, 0.6, 0.32, "play"),
     (Vec3::new(0.0, 0.5, 0.0), 9.0, -0.5, 0.12, "low"),
     (Vec3::new(0.0, 0.0, 0.0), 30.0, 0.9, 0.45, "table"),
@@ -38,6 +38,8 @@ const VIEWS: [(Vec3, f32, f32, f32, &str); 8] = [
     (Vec3::new(-3.0, 1.5, 0.0), 24.0, 0.75, 0.3, "rig"),
     (Vec3::new(-6.0, 0.0, -4.0), 52.0, 0.55, 0.38, "rigs"),
     (Vec3::new(-31.0, -10.0, -24.0), 40.0, 2.5, 0.5, "park"),
+    (Vec3::new(-28.0, -6.0, -24.0), 75.0, 0.7, 0.75, "bay"),
+    (Vec3::new(-460.0, 30.0, -100.0), 420.0, 1.15, 0.12, "crane"),
 ];
 
 /// A load rig run by the example, with made-up signals.
@@ -129,7 +131,18 @@ fn main() {
             }),
             ..default()
         }))
-        .insert_resource(LabSettings::default().with_quality(quality))
+        .insert_resource({
+            let mut settings = LabSettings::default().with_quality(quality);
+            // `--scale 10`: the hall drawn 10 times the table's scale.
+            if let Some(k) = value("--scale").and_then(|k| k.parse().ok()) {
+                settings.model_scale = k;
+            }
+            settings
+        })
+        // `--procedural`: the rigs without the hero models.
+        .insert_resource(breakit_lab::rigs::hero::HeroProps(
+            !args.iter().any(|a| a == "--procedural"),
+        ))
         .add_plugins(LabPlugin)
         .insert_resource(Script {
             capture,
@@ -320,8 +333,17 @@ fn script(
     }
 }
 
-fn place_camera(script: Res<Script>, mut cam: Single<(&mut Transform, &mut LabCamera)>) {
-    let (focus, dist, yaw, pitch, _) = VIEWS[script.view];
+fn place_camera(
+    script: Res<Script>,
+    settings: Res<LabSettings>,
+    mut cam: Single<(&mut Transform, &mut LabCamera)>,
+) {
+    let (mut focus, mut dist, yaw, pitch, name) = VIEWS[script.view];
+    // Views of the hall are given for a hall drawn 20 times larger.
+    if matches!(name, "hall" | "crane") {
+        focus *= settings.model_scale / 20.0;
+        dist *= settings.model_scale / 20.0;
+    }
     let rot = Quat::from_euler(EulerRot::YXZ, yaw, -pitch, 0.0);
     *cam.0 = Transform::from_translation(focus + rot * Vec3::new(0.0, 0.0, dist))
         .looking_at(focus, Vec3::Y);
@@ -392,7 +414,7 @@ fn run_rigs(demo: Res<Demo>, time: Res<Time>, mut rigs: ResMut<LabRigs>) {
             ];
             for (k, (name, axles)) in convoy.into_iter().enumerate() {
                 let speed = 2.5;
-                let front = (10.0 + speed * t - 8.5 * k as f32).rem_euclid(34.0) - 14.0;
+                let front = (10.0 + speed * t - 11.0 * k as f32).rem_euclid(44.0) - 16.0;
                 let braking = (4.0..7.0).contains(&front);
                 live.vehicles.push(VehicleDrive {
                     name: name.to_string(),

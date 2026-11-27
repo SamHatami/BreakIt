@@ -203,7 +203,8 @@ pub(crate) fn call(
                 &models,
                 RigSlot::WavePaddle,
                 park,
-                || model(&shape),
+                &[],
+                |_| model(&shape),
             );
             (root, park)
         }

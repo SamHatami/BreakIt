@@ -29,33 +29,51 @@ The state comes straight from the run: `TestRun::rig_state()` reports every load
 
 ## Sizes
 
-The structure is full size and the hall is drawn 20 times larger (`docs/lab.md`). The rigs are real hardware next to a 1:20 model, so they are built directly in world units at 20 units to the metre: the fan wall is 0.7 m wide with 14 cm fans, the instrument cart is 0.5 m wide. The vehicles are models like the structure: a truck with a 3.4 m wheelbase is 3.4 world units long.
+The structure is full size and the hall is drawn `LabSettings::model_scale` times larger (`docs/lab.md`). The procedural rigs are built directly in world units, sized by what they act on: the fan array by the jet a wind scenario needs, the paddle by the flume, the actuators by the shake platform. They take the hall floor from `LabSettings::floor_y()`. The rig park needs the floor within 30 world units of the table kept clear. The vehicles are models like the structure: a truck with a 3.4 m wheelbase is 3.4 world units long.
 
-## Replacing a rig with a hero model
+## Hero models
 
-Each rig is a root entity with one child per moving part. A part's `Role` says what moves it. To replace the procedural geometry, put a glTF binary in `assets/props/` under the slot's file name. The game loads whatever is there at startup (`RigModels::from_folder`); a slot without a file keeps its procedural rig.
+The models in `assets/props/` (made by Sam, metres, +y up, standing on y = 0) replace the procedural geometry. They are built into `breakit-lab` (`rigs/hero.rs`), so a release needs no asset folder. To change one, overwrite its file with the same name, node names and frame, and rebuild. `HeroProps(false)` inserted before the lab starts (`--procedural` in the lab example) gives the procedural rigs back.
 
-| Slot | File | Frame (world units, y up) | Nodes that are driven |
+| File | Used as | Size | Moving nodes |
 | --- | --- | --- | --- |
-| Fan wall | `fan_wall.glb` | Origin at table-top level under the middle of the outlet face, +x downstream. The hall floor is 17.2 below. Fan `i` is at `fan::fan_centre(i)` | `rotor.0` .. `rotor.19` spin about their x, `tuft.0` .. `tuft.12` swing about their z, `lamp_on`, `lamp_off` |
-| Instrument cart | `instrument_cart.glb` | Origin at table-top level under the cart, screen facing +z, centred 5.6 up, 9 by 5.4 | none (the trace is drawn over the screen) |
-| Shake actuators | `shake_actuators.glb` | The world's: origin in the middle of the platform. Push axes in `shake::actuator_axes` | `rod.0` .. `rod.3` slide along their x, `platform` rides the table |
-| Wave paddle | `wave_paddle.glb` | Origin in the middle of the table top, +x the wave direction, plate face at x = -13.6 | `plate` slides along x, `lamp_on`, `lamp_off` |
-| Vehicles | `truck_box.glb`, `truck_dump.glb`, `truck_coil.glb`, `truck_crane.glb` | Origin on the ground under the front axle, +x forward | `body` rides the bounce, `wheel.0` .. `wheel.n` (front first) follow the contacts and roll about their z, `brake_light` |
+| `industrial_fan_wall.glb` | Fan wall. Blows along its +z | Real lab hardware: `model_scale` times its metres, standing on the hall floor. At 1:10 it is 27 high and 26 wide beside the 28 x 16 table | `fan_rotor_1` .. `fan_rotor_9` spin about their z |
+| `hydraulic_actuator.glb` | The four shake actuators. Barrel along +y from the base pin | Fitted to the 3.2 from reaction bracket to platform edge | `piston_rod` slides along y with the platform |
+| `shake_table.glb` | Platform of the shake table insert (the insert's own platform is hidden) | Platen edge fitted to `ShakeTable::size`, top flush with the table | `table_platen` rides the table motion |
+| `model_dump_truck.glb`, `model_coil_hauler.glb`, `model_mobile_crane.glb` | Vehicles whose scenario name contains "tipper" or "dump", "coil", "crane". +x forward | Fitted so the first and last axle of the model stand on the first and last axle load | `chassis` rides the bounce; the wheels (children of the chassis) stand on the deck and roll about z |
+| `overhead_gantry_crane.glb` | A second crane in the hall, at `hero::GANTRY_AT` (lab metres), spanning the hall | `model_scale` times its metres | none yet (`trolley`, `hook` are there) |
 
-Node names are matched without case, and anything after a second dot is ignored (`Wheel.1.L` and `Wheel.1.R` both roll with axle 1). A model's driven nodes keep their rest pose from the file; the drive is applied on top. The smoke, the blade blur and the seismograph trace are effects and stay with a hero model.
+What the code relies on in each file (axle positions, rotor positions, node names) is in `rigs/hero.rs` and checked against the files by its tests, so a re-exported model that moved an axle fails a test instead of drawing wrongly.
 
-This path has unit tests for the name matching only: no hero model has been loaded through it yet. A model truck has the axle spacing it was made with, so its scenario must use those axles.
+A truck model keeps its proportions: it is about twice as long as it is wide, 6 times its file size for a 2.5 m wheelbase. Scenarios should give convoys the models' axle spacing and a deck wide enough (tyres are 0.44 of the model's 0.42 to 0.61 wheelbase). A middle axle of the model keeps its place on the model and follows the deck between the loads. There is no box truck model: other vehicles are the procedural box truck.
+
+The smoke, the blade blur and the seismograph trace are effects and stay with a hero model; the fan wall's tufts and beacon and the vehicles' brake lamps are only on the procedural rigs.
+
+### Adding another model
+
+Each rig is a root entity with one child per moving part. A part's `Role` says what moves it. A new file goes in `assets/props/`, in `hero::FILES`, and under its slot's `RigSlot::file_stem`; the caller of `spawn_rig` gives the model's frame in the rig's frame. Nodes are bound by name, either the names below or the aliases in `hero::alias`. A node that does not turn or slide about the role's usual axis gets an `Axis`.
+
+| Rig | Frame | Driven nodes |
+| --- | --- | --- |
+| Fan wall | Origin at table-top level under the middle of the outlet face, +x downstream | `rotor.N` spin about their x, `tuft.N` swing about their z, `lamp_on`, `lamp_off` |
+| Shake actuators | Table frame | `rod.N` slide along their x, `platform` rides the table |
+| Wave paddle | Table frame | `plate` slides along x |
+| Vehicles | Origin on the ground under the front axle, +x forward | `body` rides the bounce, `wheel.0` .. `wheel.n` (front first) follow the contacts and roll about their z, `brake_light` |
+
+Node names are matched without case, and anything after a second dot is ignored (`Wheel.1.L` and `Wheel.1.R` both roll with axle 1). A model's driven nodes keep their rest pose from the file; the drive is applied on top.
 
 ## Running it
 
-`cargo run --release -p breakit-lab --example lab -- --rig wind` (or `quake`, `flume`, `trucks`) calls a rig and runs it on made-up signals; R steps through them, V changes the view (`rig`, `rigs` and `park` look at the rigs). Add `--capture <dir> --views rig,play` for screenshots.
+`cargo run --release -p breakit-lab --example lab -- --rig wind` (or `quake`, `flume`, `trucks`) calls a rig and runs it on made-up signals; R steps through them, V changes the view (`rig`, `rigs`, `park` and `bay` look at the rigs, `crane` at the gantry crane). Add `--capture <dir> --views rig,play` for screenshots, `--scale 10` to draw the hall at another scale, `--procedural` to leave the hero models out.
 
 ## Open points
 
 - Smoke streamers go straight through the structure: they do not know it is there. Bending them round members needs the structure's shape passed to the lab.
 - Table motion is true to the solver: a 0.4 g, 2 Hz shake moves the table 25 mm at full size, which is a small movement on screen. The seismograph carries the read-out.
-- Vehicles are a fixed 1.3 wide. Scenarios with a wider lane could pass a width.
+- The procedural box truck is a fixed 1.3 wide and there is no hero model for it; beside the hero trucks it looks small.
+- The spare vehicles in the park are still the procedural ones.
+- The instrument cart and the paddle have no hero model.
+- The gantry crane stands still: its `trolley` and `hook` nodes are not driven.
 - No drawn impactors yet (loose equipment falling, `RigState::impactors`).
 - Displacement sensors under bridge nodes, wind tufts on the structure and mass blocks on a tower need the structure's nodes and belong with the scenarios.
 - The crane hook does not carry the paddle when it is lifted over.

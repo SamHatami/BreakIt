@@ -12,8 +12,9 @@ use bevy::light::NotShadowCaster;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
+use super::hero::FanSpec;
 use super::{
-    park, send, spawn_rig, yaw_to, FanSetup, LabRigs, Owner, Part, Rest, Rig, RigClock,
+    park, send, spawn_rig, yaw_to, Axis, FanSetup, LabRigs, Owner, Part, Rest, Rig, RigClock,
     RigMaterials, RigModel, RigModels, RigSlot, Role, Site,
 };
 use crate::palette::Mat;
@@ -30,6 +31,60 @@ pub const BASE: f32 = -0.3;
 pub const STANDOFF: f32 = 2.6;
 /// Number of tufts on the wire.
 pub const TUFTS: usize = 13;
+
+/// Where the effects of a fan wall go, rig frame: they are the same for
+/// the procedural wall and a hero model, only placed differently.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Layout {
+    /// Middle of each rotor's blur disc.
+    pub discs: Vec<Vec3>,
+    /// Radius of the blur discs.
+    pub radius: f32,
+    /// Nozzle tips of the smoke rake.
+    pub smoke: Vec<Vec3>,
+}
+
+impl Layout {
+    pub fn procedural() -> Self {
+        Self {
+            discs: (0..COLS * ROWS)
+                .map(|i| fan_centre(i) - Vec3::X * 0.3)
+                .collect(),
+            radius: CELL * 0.5 - 0.2,
+            smoke: streamer_starts(),
+        }
+    }
+
+    /// For the hero fan wall placed by [`FanSpec::fit`].
+    pub fn hero(scale: f32, floor: f32) -> Self {
+        let fit = FanSpec::fit(scale, floor);
+        let mut discs = Vec::new();
+        for y in FanSpec::ROWS {
+            for x in FanSpec::COLS {
+                discs.push(fit.transform_point(Vec3::new(x, y, FanSpec::ROTOR_Z + 0.06)));
+            }
+        }
+        // Smoke only where it can be seen: from the table top up to the
+        // top row of fans.
+        let top = floor + (FanSpec::ROWS[2] + 0.2) * scale;
+        let half = FanSpec::HALF_WIDTH * scale * 0.85;
+        let mut smoke = Vec::new();
+        for r in 0..4 {
+            let y = 1.0 + (top - 1.0).max(1.0) * r as f32 / 3.0;
+            let n = 9;
+            for k in 0..n {
+                let z = (k as f32 / (n as f32 - 1.0) - 0.5) * 2.0 * half
+                    + if r % 2 == 1 { 0.4 } else { 0.0 };
+                smoke.push(Vec3::new(0.4, y, z));
+            }
+        }
+        Self {
+            discs,
+            radius: FanSpec::RADIUS * scale,
+            smoke,
+        }
+    }
+}
 
 /// Centre of fan `i` on the outlet plane.
 pub fn fan_centre(i: usize) -> Vec3 {
@@ -442,12 +497,18 @@ pub(crate) fn call(
 ) {
     let Some(mut cache) = cache else { return };
     let half = site.table_half();
-    let park = park::fan_pose();
+    let park = if models.has(RigSlot::FanWall) {
+        park::hero_fan_pose(site.settings.model_scale)
+    } else {
+        park::fan_pose()
+    };
     let found = existing.iter().find(|(_, r, _)| r.0 == RigSlot::FanWall);
     let (root, at) = match found {
         Some((e, _, t)) => (e, *t),
         None => {
             let floor = site.floor();
+            let scale = site.settings.model_scale;
+            let hero = models.has(RigSlot::FanWall);
             let root = spawn_rig(
                 &mut commands,
                 &mut meshes,
@@ -456,9 +517,21 @@ pub(crate) fn call(
                 &models,
                 RigSlot::FanWall,
                 park,
-                || model(floor),
+                &[FanSpec::fit(scale, floor)],
+                |hero| {
+                    if hero {
+                        RigModel::default()
+                    } else {
+                        model(floor)
+                    }
+                },
             );
-            spawn_effects(&mut commands, &mut meshes, &extra, root);
+            let layout = if hero {
+                Layout::hero(scale, floor)
+            } else {
+                Layout::procedural()
+            };
+            spawn_effects(&mut commands, &mut meshes, &extra, root, &layout);
             *placed = Some((None, half));
             (root, park)
         }
@@ -482,11 +555,12 @@ fn spawn_effects(
     meshes: &mut Assets<Mesh>,
     extra: &RigMaterials,
     root: Entity,
+    layout: &Layout,
 ) {
-    let disc = meshes.add(Circle::new(CELL * 0.5 - 0.2));
-    for i in 0..COLS * ROWS {
-        let at = Transform::from_translation(fan_centre(i) - Vec3::X * 0.3)
-            .with_rotation(Quat::from_rotation_y(FRAC_PI_2));
+    let disc = meshes.add(Circle::new(layout.radius));
+    for (i, centre) in layout.discs.iter().enumerate() {
+        let at =
+            Transform::from_translation(*centre).with_rotation(Quat::from_rotation_y(FRAC_PI_2));
         commands.spawn((
             Mesh3d(disc.clone()),
             MeshMaterial3d(extra.blur.clone()),
@@ -497,7 +571,7 @@ fn spawn_effects(
             ChildOf(root),
         ));
     }
-    let starts = streamer_starts();
+    let starts = layout.smoke.clone();
     let mut rng = Rng::new(0x51DE_CA57);
     let phases = starts
         .iter()
@@ -558,7 +632,14 @@ pub(crate) fn drive(
     extra: Res<RigMaterials>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     owners: Query<&Rig>,
-    mut parts: Query<(&Role, &Rest, &Owner, &mut Transform, &mut Visibility)>,
+    mut parts: Query<(
+        &Role,
+        &Rest,
+        &Owner,
+        Option<&Axis>,
+        &mut Transform,
+        &mut Visibility,
+    )>,
     mut motion: Local<FanMotion>,
 ) {
     let wind = rigs.live.wind.unwrap_or_default();
@@ -575,7 +656,7 @@ pub(crate) fn drive(
     }
     let running = drive > 0.02;
     let t = rigs.live.time;
-    for (role, rest, owner, mut at, mut vis) in &mut parts {
+    for (role, rest, owner, axis, mut at, mut vis) in &mut parts {
         if owners.get(owner.0).map(|r| r.0) != Ok(RigSlot::FanWall) {
             continue;
         }
@@ -583,7 +664,8 @@ pub(crate) fn drive(
             Role::Rotor(i) => {
                 // Alternate fans are a touch out of step, as real ones are.
                 let a = motion.angle * (1.0 + 0.013 * (i % 4) as f32);
-                at.rotation = rest.0.rotation * Quat::from_rotation_x(a);
+                let axis = axis.map_or(Vec3::X, |a| a.0);
+                at.rotation = rest.0.rotation * Quat::from_axis_angle(axis, a);
             }
             Role::Tuft(i) => {
                 let k = i as f32;

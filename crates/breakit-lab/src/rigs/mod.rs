@@ -15,9 +15,11 @@
 //! wheel, rod, ...). The geometry here is procedural; a hero model can
 //! replace a rig's geometry through [`RigModels`], and its nodes are driven
 //! by the same systems when they carry the role's name (see
-//! [`Role::from_node_name`] and `docs/rigs.md`).
+//! [`Role::from_node_name`] and `docs/rigs.md`). The models in
+//! `assets/props/` are built in and placed by [`hero`].
 
 pub mod fan;
+pub mod hero;
 pub mod paddle;
 pub mod park;
 pub mod shake;
@@ -240,12 +242,20 @@ impl Role {
 #[derive(Component, Clone, Copy, Debug)]
 pub struct Rest(pub Transform);
 
+/// The axis a driven part turns about or slides along, in its own frame,
+/// when it is not the role's usual one (a hero model's nodes keep the
+/// axes they were modelled with).
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub struct Axis(pub Vec3);
+
 /// The rigs a hero model can replace.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum RigSlot {
     FanWall,
     InstrumentCart,
     ShakeActuators,
+    /// The platform of the shake table and the frame it rides in.
+    ShakeTable,
     WavePaddle,
     Truck(VehicleKind),
 }
@@ -254,21 +264,23 @@ impl RigSlot {
     /// File stem of the slot's model under `assets/props/`.
     pub fn file_stem(self) -> &'static str {
         match self {
-            RigSlot::FanWall => "fan_wall",
+            RigSlot::FanWall => "industrial_fan_wall",
             RigSlot::InstrumentCart => "instrument_cart",
-            RigSlot::ShakeActuators => "shake_actuators",
+            RigSlot::ShakeActuators => "hydraulic_actuator",
+            RigSlot::ShakeTable => "shake_table",
             RigSlot::WavePaddle => "wave_paddle",
-            RigSlot::Truck(VehicleKind::Box) => "truck_box",
-            RigSlot::Truck(VehicleKind::Dump) => "truck_dump",
-            RigSlot::Truck(VehicleKind::CoilHauler) => "truck_coil",
-            RigSlot::Truck(VehicleKind::Crane) => "truck_crane",
+            RigSlot::Truck(VehicleKind::Box) => "model_box_truck",
+            RigSlot::Truck(VehicleKind::Dump) => "model_dump_truck",
+            RigSlot::Truck(VehicleKind::CoilHauler) => "model_coil_hauler",
+            RigSlot::Truck(VehicleKind::Crane) => "model_mobile_crane",
         }
     }
 
-    pub const ALL: [RigSlot; 8] = [
+    pub const ALL: [RigSlot; 9] = [
         RigSlot::FanWall,
         RigSlot::InstrumentCart,
         RigSlot::ShakeActuators,
+        RigSlot::ShakeTable,
         RigSlot::WavePaddle,
         RigSlot::Truck(VehicleKind::Box),
         RigSlot::Truck(VehicleKind::Dump),
@@ -279,23 +291,16 @@ impl RigSlot {
 
 /// Hero models that replace the procedural geometry of a rig. A slot with
 /// a model spawns the model's scene under the rig root instead; its nodes
-/// are driven by name (see [`Role::from_node_name`]). The model is
-/// authored in the rig's frame, in world units (`docs/rigs.md` lists the
-/// frames).
+/// are driven by name (see [`Role::from_node_name`] and [`hero::alias`]).
+/// Filled at startup with the models built into the crate from
+/// `assets/props/` (see [`hero`]); clear it, or a slot of it, to get the
+/// procedural rig back.
 #[derive(Resource, Clone, Debug, Default)]
 pub struct RigModels(pub BTreeMap<RigSlot, Handle<WorldAsset>>);
 
 impl RigModels {
-    /// Loads `assets/<folder>/<slot>.glb` for every slot whose file exists.
-    pub fn from_folder(assets: &AssetServer, folder: &str) -> Self {
-        let mut out = BTreeMap::new();
-        for slot in RigSlot::ALL {
-            let file = format!("{folder}/{}.glb", slot.file_stem());
-            if std::path::Path::new("assets").join(&file).exists() {
-                out.insert(slot, assets.load(format!("{file}#Scene0")));
-            }
-        }
-        Self(out)
+    pub fn has(&self, slot: RigSlot) -> bool {
+        self.0.contains_key(&slot)
     }
 }
 
@@ -474,8 +479,14 @@ fn emissive(mat: Mat) -> bool {
     )
 }
 
-/// Spawns a rig root at `pose` with the slot's hero model if there is one,
-/// its procedural `model` otherwise.
+/// Spawns a rig root at `pose`. With a hero model for the slot and
+/// somewhere to put it, the model's scene is spawned once per entry of
+/// `fits` (its frame in the rig's frame) and `model(true)` adds whatever
+/// procedural parts go with the hero; otherwise the rig is `model(false)`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the lab's mesh and material stores, passed through"
+)]
 pub(crate) fn spawn_rig(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -484,7 +495,8 @@ pub(crate) fn spawn_rig(
     models: &RigModels,
     slot: RigSlot,
     pose: Transform,
-    model: impl FnOnce() -> RigModel,
+    fits: &[Transform],
+    model: impl FnOnce(bool) -> RigModel,
 ) -> Entity {
     let root = commands
         .spawn((
@@ -494,11 +506,18 @@ pub(crate) fn spawn_rig(
             Name::new(format!("rig {}", slot.file_stem())),
         ))
         .id();
-    if let Some(scene) = models.0.get(&slot) {
-        commands.spawn((WorldAssetRoot(scene.clone()), ChildOf(root)));
-        return root;
+    let scene = models.0.get(&slot).filter(|_| !fits.is_empty());
+    if let Some(scene) = scene {
+        for fit in fits {
+            commands.spawn((
+                WorldAssetRoot(scene.clone()),
+                *fit,
+                Visibility::Inherited,
+                ChildOf(root),
+            ));
+        }
     }
-    for part in model().parts {
+    for part in model(scene.is_some()).parts {
         let mut e = commands.spawn((part.at, Visibility::Inherited, ChildOf(root)));
         if let Some(role) = part.role {
             e.insert((role, Rest(part.at), Owner(root)));
@@ -515,16 +534,45 @@ fn bind_model_nodes(
     mut commands: Commands,
     named: Query<(Entity, &Name, &Transform), (Added<Name>, Without<Role>, Without<Rig>)>,
     parents: Query<&ChildOf>,
-    rigs: Query<(), With<Rig>>,
+    rigs: Query<&Rig>,
 ) {
     for (e, name, at) in &named {
-        let Some(role) = Role::from_node_name(name.as_str()) else {
+        let Some((rig, slot)) = parents
+            .iter_ancestors(e)
+            .find_map(|a| rigs.get(a).ok().map(|r| (a, r.0)))
+        else {
             continue;
         };
-        if let Some(rig) = parents.iter_ancestors(e).find(|&a| rigs.contains(a)) {
-            commands.entity(e).insert((role, Rest(*at), Owner(rig)));
+        let role = Role::from_node_name(name.as_str())
+            .map(|r| (r, None))
+            .or_else(|| hero::alias(slot, name.as_str()).map(|(r, axis)| (r, Some(axis))));
+        let Some((role, axis)) = role else {
+            continue;
+        };
+        let mut part = commands.entity(e);
+        part.insert((role, Rest(*at), Owner(rig)));
+        if let Some(axis) = axis {
+            part.insert(Axis(axis));
         }
     }
+}
+
+/// A world displacement `v` in the frame of `e`'s parent: what to add to
+/// `e`'s translation to move it by `v`. Hero nodes sit under a scaled and
+/// turned scene root, procedural parts straight under their rig.
+pub(crate) fn in_parent(
+    parents: &Query<&ChildOf>,
+    globals: &Query<&GlobalTransform>,
+    e: Entity,
+    v: Vec3,
+) -> Vec3 {
+    parents
+        .get(e)
+        .ok()
+        .and_then(|p| globals.get(p.parent()).ok())
+        .map(|g| g.affine().matrix3)
+        .filter(|m| m.determinant().abs() > 1e-9)
+        .map_or(v, |m| Vec3::from(m.inverse() * bevy::math::Vec3A::from(v)))
 }
 
 fn travel(
@@ -583,6 +631,9 @@ pub(crate) fn build(app: &mut App) {
         .init_resource::<RigModels>()
         .init_resource::<RigMaterials>()
         .init_resource::<RigClock>()
+        .init_resource::<hero::HeroProps>();
+    hero::embed(app);
+    app.add_systems(Startup, (hero::load, hero::spawn_gantry).chain())
         .add_systems(
             Update,
             (
@@ -590,7 +641,7 @@ pub(crate) fn build(app: &mut App) {
                 park::spawn_park,
                 (fan::call, shake::call, paddle::call),
                 travel,
-                bind_model_nodes,
+                (bind_model_nodes, hero::light_hall_props),
                 (
                     fan::drive,
                     fan::streamers,
