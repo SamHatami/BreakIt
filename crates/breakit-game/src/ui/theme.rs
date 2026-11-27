@@ -99,15 +99,21 @@ pub struct UiTheme {
     pub edge: Option<Color>,
     /// Text shadow colour, for text that sits on the scene.
     pub shadow: Option<Color>,
+    /// Laid over the blurred scene behind every panel (`frost.rs`);
+    /// alpha is how much it darkens.
+    pub backdrop: Color,
+    /// The hairline along a panel's edge.
+    pub backdrop_edge: Color,
     /// The UI font (a variable-weight face). `None` uses Bevy's built-in
     /// font; [`Themes`] fills it with the bundled Inter Tight.
     pub font: Option<Handle<Font>>,
 }
 
 impl UiTheme {
-    /// "Hairline": no panels. Type sits straight on the scene over soft
-    /// top and bottom scrims, values in light weights, a single warm
-    /// accent for the active tool, the primary action and the playhead.
+    /// "Hairline": light type, a single warm accent for the active tool,
+    /// the primary action and the playhead. Each group of read-outs sits on
+    /// a frosted backdrop that darkens and blurs the scene behind it, so it
+    /// reads over the bright hall.
     pub fn hairline() -> Self {
         let paper = Color::srgb_u8(0xF4, 0xF2, 0xEE);
         Self {
@@ -115,8 +121,8 @@ impl UiTheme {
             panel: Color::NONE,
             raised: paper.with_alpha(0.08),
             ink: paper,
-            muted: paper.with_alpha(0.58),
-            rule: paper.with_alpha(0.18),
+            muted: paper.with_alpha(0.70),
+            rule: paper.with_alpha(0.22),
             accent: hex(0xFF8A3D),
             on_accent: hex(0x17120E),
             fail: hex(0xFF7A66),
@@ -124,16 +130,18 @@ impl UiTheme {
             instrument: Color::NONE,
             chart: Color::NONE,
             instrument_ink: paper,
-            instrument_muted: paper.with_alpha(0.55),
+            instrument_muted: paper.with_alpha(0.68),
             scene_text: paper,
-            scrim: Color::srgba(0.03, 0.035, 0.045, 0.80),
+            scrim: Color::srgba(0.03, 0.035, 0.045, 0.55),
             ramp: RAMP,
             thin: 1.0,
-            radius: 6.0,
-            sizes: [26.0, 16.0, 14.0, 11.0, 13.0, 56.0, 30.0],
-            weights: [400, 500, 400, 500, 400, 300, 500],
-            edge: Some(Color::srgba(0.03, 0.035, 0.045, 0.6)),
+            radius: 10.0,
+            sizes: [26.0, 17.0, 15.0, 12.0, 14.0, 56.0, 30.0],
+            weights: [400, 500, 400, 600, 400, 300, 500],
+            edge: Some(Color::srgba(0.03, 0.035, 0.045, 0.35)),
             shadow: Some(Color::srgba(0.0, 0.0, 0.0, 0.45)),
+            backdrop: Color::srgba(0.045, 0.05, 0.06, 0.62),
+            backdrop_edge: paper.with_alpha(0.14),
             font: None,
         }
     }
@@ -165,6 +173,8 @@ impl UiTheme {
             weights: [600, 600, 400, 500, 400, 400, 700],
             edge: None,
             shadow: None,
+            backdrop: hex(0x1E2329).with_alpha(0.86),
+            backdrop_edge: hex(0x343C45).with_alpha(1.0),
             font: None,
         }
     }

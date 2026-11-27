@@ -835,6 +835,7 @@ pub fn build_report(p: &mut ChildSpawnerCommands, v: &GameView) {
                         t.spawn((
                             Node {
                                 justify_content: JustifyContent::SpaceBetween,
+                                column_gap: Val::Px(10.0),
                                 padding: UiRect::axes(Val::Px(8.0), Val::Px(5.0)),
                                 ..default()
                             },
@@ -1138,17 +1139,22 @@ pub fn build_overlay(p: &mut ChildSpawnerCommands, v: &GameView) {
 }
 
 /// The controls card. Keep in step with `flow::keyboard_actions`.
-const CONTROLS: [(&str, &str); 16] = [
+const CONTROLS: [(&str, &str); 18] = [
     ("RMB drag", "orbit"),
     ("MMB / Shift+RMB", "pan"),
     ("Wheel", "zoom"),
     ("F", "frame selection, or everything"),
     ("LMB", "use the tool: place, chain, select"),
+    ("RMB click", "cancel: end the chain, deselect, back to draw"),
+    ("Shift (drawing)", "lock the next beam to x, y (up) or z"),
     ("B S X L", "draw, support, delete, load (sandbox)"),
     ("1 2", "steel, timber (also the selected beam)"),
     ("Del", "delete selected beam / hovered node"),
     ("Ctrl+Z / Ctrl+Y", "undo / redo"),
-    ("Tab, Q / E", "drawing plane, plane down / up"),
+    (
+        "Tab, Q / E",
+        "work plane: auto, floor, front, side; move it",
+    ),
     ("D", "exaggerate deflection"),
     ("C", "clear to the sheet's start"),
     ("T / F3", "next play table / frame time"),

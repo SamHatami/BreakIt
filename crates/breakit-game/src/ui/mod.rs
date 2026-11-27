@@ -6,8 +6,11 @@
 //! Fast-changing read-outs (test time, chart bars, world tags) update in
 //! place instead, see [`hud`].
 
+pub mod frost;
 pub mod hud;
+pub mod icons;
 pub mod pointer;
+pub mod problems;
 pub mod screens;
 pub mod theme;
 pub mod widgets;
@@ -28,8 +31,10 @@ pub struct GameUiPlugin;
 
 impl Plugin for GameUiPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<theme::Themes>()
+        app.add_plugins(frost::FrostPlugin)
+            .init_resource::<theme::Themes>()
             .init_resource::<pointer::Pointer>()
+            .init_resource::<icons::PartIcons>()
             .add_systems(
                 PreUpdate,
                 pointer::pointer_system.after(crate::flow::keyboard_actions),
@@ -46,6 +51,7 @@ impl Plugin for GameUiPlugin {
             .add_systems(
                 PostUpdate,
                 (
+                    icons::ensure_icons,
                     refresh_views,
                     hud::update_test_readouts,
                     hud::place_world_tags,
@@ -76,6 +82,7 @@ pub struct GameView<'w> {
     pub scale: Res<'w, DeflectionScale>,
     pub theme: Res<'w, theme::Themes>,
     pub check: Res<'w, crate::scenario::ScenarioCheck>,
+    pub icons: Res<'w, icons::PartIcons>,
 }
 
 impl GameView<'_> {
@@ -129,9 +136,10 @@ impl View {
             View::BuildSheet => hud::build_sheet_key(v),
             View::BuildReadouts => hud::readouts_key(v),
             View::BuildTools => format!(
-                "{:?} {:?} {} {} {}",
+                "{:?} {:?} {:?} {} {} {}",
                 v.tool.tool,
                 v.tool.plane,
+                v.tool.plane_mode,
                 v.tool.loads_allowed,
                 v.history.can_undo(),
                 v.history.can_redo()
@@ -139,9 +147,11 @@ impl View {
             View::BuildInspector => hud::inspector_key(v),
             View::BuildDrawer => hud::drawer_key(v),
             View::BuildFooter => format!(
-                "{:?} {:?} {} {} {}",
+                "{:?} {:?} {:?} {:?} {} {} {}",
                 v.tool.tool,
+                v.tool.guide,
                 v.tool.plane,
+                v.tool.plane_mode,
                 v.tool.level,
                 v.scale.0,
                 v.revisions.of(v.sheets.current().id).len()

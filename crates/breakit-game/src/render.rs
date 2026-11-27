@@ -7,7 +7,9 @@
 use bevy::prelude::*;
 
 use crate::analysis::FrameState;
+use crate::build::BuildTool;
 use crate::design::{Design, SupportKind};
+use crate::Mode;
 
 pub struct FrameRenderPlugin;
 
@@ -15,7 +17,12 @@ impl Plugin for FrameRenderPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup_assets).add_systems(
             PostUpdate,
-            (rebuild_visuals, update_visuals, draw_supports_and_loads)
+            (
+                rebuild_visuals,
+                update_visuals,
+                highlight_nodes,
+                draw_supports_and_loads,
+            )
                 .chain()
                 .before(TransformSystems::Propagate),
         );
@@ -26,7 +33,14 @@ impl Plugin for FrameRenderPlugin {
 struct FrameAssets {
     node_mesh: Handle<Mesh>,
     node_material: Handle<StandardMaterial>,
+    /// The node the cursor is on.
+    node_hover: Handle<StandardMaterial>,
+    /// The chain's last node in build mode.
+    node_selected: Handle<StandardMaterial>,
 }
+
+/// Radius of a node sphere, metres.
+const NODE_R: f32 = 0.08;
 
 #[derive(Component)]
 struct NodeVisual(usize);
@@ -45,6 +59,16 @@ fn setup_assets(
         node_material: materials.add(StandardMaterial {
             base_color: Color::srgb(0.85, 0.85, 0.88),
             metallic: 0.6,
+            ..default()
+        }),
+        node_hover: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.35, 0.85, 1.0),
+            emissive: LinearRgba::rgb(0.3, 1.2, 1.8),
+            ..default()
+        }),
+        node_selected: materials.add(StandardMaterial {
+            base_color: Color::srgb(1.0, 0.54, 0.24),
+            emissive: LinearRgba::rgb(2.5, 0.9, 0.25),
             ..default()
         }),
     });
@@ -70,7 +94,7 @@ fn rebuild_visuals(
         commands.spawn((
             Mesh3d(assets.node_mesh.clone()),
             MeshMaterial3d(assets.node_material.clone()),
-            Transform::from_translation(p).with_scale(Vec3::splat(0.08)),
+            Transform::from_translation(p).with_scale(Vec3::splat(NODE_R)),
             NodeVisual(i),
         ));
     }
@@ -86,6 +110,32 @@ fn update_visuals(
         if let Some(&rest) = design.nodes.get(n.0) {
             tf.translation = state.positions.get(n.0).copied().unwrap_or(rest);
         }
+    }
+}
+
+/// Build mode: the chain's last node glows in the accent, the hovered node
+/// in the hover colour, both a little larger.
+fn highlight_nodes(
+    assets: Res<FrameAssets>,
+    tool: Res<BuildTool>,
+    mode: Res<State<Mode>>,
+    mut nodes: Query<(
+        &NodeVisual,
+        &mut MeshMaterial3d<StandardMaterial>,
+        &mut Transform,
+    )>,
+) {
+    let building = *mode.get() == Mode::Build;
+    for (n, mut mat, mut tf) in &mut nodes {
+        let (want, r) = match (tool.selected, tool.hovered) {
+            (Some(s), _) if building && s == n.0 => (&assets.node_selected, 1.7),
+            (_, Some(h)) if building && h == n.0 => (&assets.node_hover, 1.5),
+            _ => (&assets.node_material, 1.0),
+        };
+        if mat.0 != *want {
+            mat.0 = want.clone();
+        }
+        tf.scale = Vec3::splat(NODE_R * r);
     }
 }
 

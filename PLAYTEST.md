@@ -11,11 +11,30 @@ Builds are on the [Releases page](https://github.com/SamHatami/BreakIt/releases)
 - **Tagged releases** (`v0.1.0`, `v0.2.0`, ...) are the ones to test against.
 - **nightly** is rebuilt from `main` after every merge. Newer, less tested.
 
-Download the zip for your system, unpack it anywhere you can write to
+### Windows: installer (recommended)
+
+Download `BreakIt-<version>-windows-x64-setup.exe` and run it. It installs
+for your user only (no admin prompt) into `%LOCALAPPDATA%\Programs\BreakIt`
+and adds **BreakIt** to the Start menu, plus shortcuts to this guide and the
+log folder.
+
+To update, run the newer setup. It closes BreakIt if it is open, replaces the
+installed copy and keeps your logs and saved playground setups. Uninstall from
+Windows Settings, Apps; that also leaves the `logs` and `playground` folders.
+
+The installer and the game are not signed, so Windows SmartScreen may say
+"Windows protected your PC": click **More info**, then **Run anyway**.
+
+When a newer build is out, the read-out in the top right of the game says
+**Update available** (nightly builds compare with the latest nightly,
+numbered builds with the latest numbered release).
+
+### Zip
+
+Or download the zip for your system, unpack it anywhere you can write to
 (Desktop or Downloads, not Program Files), and run:
 
-- Windows: `BreakIt.exe`. The build is not signed, so Windows SmartScreen may
-  say "Windows protected your PC": click **More info**, then **Run anyway**.
+- Windows: `BreakIt.exe` (same SmartScreen note as above).
 - Linux: `./BreakIt` (needs Vulkan drivers; under X11 also `libxkbcommon-x11`).
 
 You need a GPU with Vulkan, DirectX 12 or Metal support. Integrated graphics
@@ -77,7 +96,8 @@ Game Bar).
 
 ### Log file
 
-Every run writes `logs/breakit.log` next to `BreakIt.exe`; the run before
+Every run writes `logs/breakit.log` next to `BreakIt.exe` (installed:
+`%LOCALAPPDATA%\Programs\BreakIt\logs`, or Start menu, **BreakIt logs**); the run before
 it is kept as `logs/breakit.prev.log`. After a crash, start the game again
 only after you copied the log, or attach `breakit.prev.log`. If the game
 folder is not writable the log goes to `%TEMP%\BreakIt\logs` on Windows

@@ -125,7 +125,7 @@ fn update_readout(
     let visuals = render.map(|r| r.scene_update_ms).unwrap_or(0.0);
     let s = format!(
         "{}\n{:.1} ms  {:.0} fps  worst {:.1} ms\nphysics {:.2} ms  visuals {:.2} ms\nlab {}k tris  {} meshes  {} lamps  table: {}\nquality: {} (F4)\n{}",
-        crate::release::version_line(),
+        crate::release::readout_line(),
         avg,
         1000.0 / avg.max(1e-3),
         worst,

@@ -82,6 +82,7 @@ minimal and say so in the PR description, or ask that area's owner to do it.
 | Water | `crates/breakit-water/`, `crates/breakit-water-gpu/`, `crates/breakit-water-render/`, `breakit-game/src/water.rs` | `docs/water.md` |
 | Load rigs | `breakit-lab/src/rigs/`, `breakit-game/src/rigs.rs` | `docs/rigs.md` |
 | Game UI and flow | `breakit-game/src/ui/`, `flow.rs`, `history.rs` | `docs/game-ui.md` |
+| Build tools | `breakit-game/src/build.rs`, `breakit-game/src/build/` | `docs/building.md` |
 | Game shell | the rest of `breakit-game/src/` | `README.md` |
 
 ## Shared files: the usual sources of conflicts
