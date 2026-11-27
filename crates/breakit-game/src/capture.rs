@@ -7,7 +7,10 @@
 //! `BREAKIT_NO_UI=1` hides the UI for clean scene shots.
 //! `BREAKIT_THEME=<n>` starts with theme preset n, for comparing
 //! looks. `BREAKIT_TRUSS=steel` builds the web in steel instead of timber;
-//! `BREAKIT_TRUSS=weak` lays a bare timber plank instead, which breaks.
+//! `BREAKIT_TRUSS=weak` lays a bare timber plank instead, which breaks;
+//! `BREAKIT_TRUSS=faulty` leaves the truss with problems that block the
+//! test (a deck gap, a node out of bounds, a loose bar) and stops after
+//! the build shot.
 //! `BREAKIT_SHEET=F-01` walks the flume sheet with a jetty instead.
 
 use std::path::PathBuf;
@@ -139,15 +142,32 @@ fn capture_script(
                 build_jetty(&mut design, chord);
             } else if std::env::var("BREAKIT_TRUSS").as_deref() == Ok("weak") {
                 build_plank(&mut design);
-            } else {
+            } else if faulty() {
                 build_truss(&mut design, chord, web);
+                // A missing deck node leaves a gap the wheels fall
+                // through, one node pokes out of the build area and a
+                // loose bar floats beside the truss.
+                if let Some(mid) = design.node_at(Vec3::ZERO, 1e-3) {
+                    design.remove_node(mid);
+                }
+                let high = design.add_node(Vec3::new(0.5, 9.0, 0.0));
+                let top = design.node_at(Vec3::new(0.5, 1.0, 0.0), 1e-3);
+                if let Some(t) = top {
+                    design.add_beam(t, high, web);
+                }
+                let a = design.add_node(Vec3::new(-1.5, 2.5, 0.0));
+                let b = design.add_node(Vec3::new(1.5, 2.5, 0.0));
+                design.add_beam(a, b, chord);
             }
-            tool.selected_beam = Some(design.beams.len() - 1);
+            tool.selected_beam = (!faulty()).then(|| design.beams.len() - 1);
             advance(&mut s);
         }
         5 if waited >= 40 => {
             shot(&mut commands, "3-build.png");
             advance(&mut s);
+        }
+        6 if waited >= 10 && faulty() => {
+            exit.write(AppExit::Success);
         }
         6 if waited >= 10 => {
             actions.write(UiAction::RunTest);
@@ -183,6 +203,10 @@ fn capture_script(
         }
         _ => {}
     }
+}
+
+fn faulty() -> bool {
+    std::env::var("BREAKIT_TRUSS").as_deref() == Ok("faulty")
 }
 
 /// A Warren truss over sheet B-01's 6 m span: `chord` top and bottom,
