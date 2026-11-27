@@ -12,6 +12,8 @@ use breakit_lab::rigs::{
 use breakit_lab::{LabRigs, RigSet};
 use breakit_scenario as bs;
 use breakit_scenario::Binding;
+use breakit_water::Drive;
+use breakit_water_render::LiveWater;
 
 use crate::analysis::{BreakitSet, Simulation};
 use crate::design::from_core;
@@ -140,6 +142,7 @@ fn call_rigs(
 fn drive_rigs(
     time: Res<Time>,
     sim: Option<Res<Simulation>>,
+    water: Option<Res<LiveWater>>,
     mut rigs: ResMut<LabRigs>,
     mut clock: Local<f32>,
 ) {
@@ -166,12 +169,52 @@ fn drive_rigs(
     if rigs.setup != setup {
         rigs.setup = setup;
     }
-    rigs.live = to_lab(&state, *clock);
+    let mut live = to_lab(&state, *clock);
+    if let Some(water) = water.filter(|w| w.paddle) {
+        follow_water(&mut live, water.sim.drive());
+    }
+    rigs.live = live;
+}
+
+/// Puts the paddle plate where the simulated water's wavemaker is. The
+/// water solver rescales the stroke of regular waves for its own wave
+/// model, and the water's upstream edge follows that stroke: the plate has
+/// to stand on it.
+fn follow_water(live: &mut RigLive, drive: Drive) {
+    if let Some(flume) = &mut live.flume {
+        flume.paddle_position = drive.paddle_position as f32;
+        flume.paddle_velocity = drive.paddle_velocity as f32;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_plate_stands_on_the_simulated_waters_edge() {
+        let drive = Drive {
+            paddle_position: 0.31,
+            paddle_velocity: -0.2,
+            ..Default::default()
+        };
+        let mut live = RigLive {
+            flume: Some(FlumeDrive {
+                paddle_rest: -13.6,
+                paddle_position: 0.25,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        follow_water(&mut live, drive);
+        let flume = live.flume.unwrap();
+        assert_eq!((flume.paddle_position, flume.paddle_velocity), (0.31, -0.2));
+        assert_eq!(flume.paddle_rest, -13.6);
+        // No flume rig: nothing to move.
+        let mut dry = RigLive::default();
+        follow_water(&mut dry, drive);
+        assert!(dry.flume.is_none());
+    }
     use breakit_core::loads::water::FlumeRig;
     use breakit_core::loads::wind::WindRig;
     use breakit_core::Vec3 as V;
