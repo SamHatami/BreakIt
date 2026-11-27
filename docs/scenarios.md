@@ -54,10 +54,10 @@ The load physics is `breakit_core::loads` (see `docs/loads.md`); `breakit-scenar
 
 | Sheet | Scenario | Sample design | Result |
 | --- | --- | --- | --- |
-| B-01 | Culvert road bridge, 6 m, two 7.5 t trucks then an 18 t tipper | Warren truss, steel tube 50x5 (the game's starter bridge) | pass, 1 star, 588 (overbuilt) |
+| B-01 | Culvert road bridge, 6 m, two 7.5 t dump trucks then an 18 t coil hauler (axles as on the truck models, 2.7 m road) | Warren truss, steel tube 50x5 (the game's starter bridge) | pass, 1 star, 588 (overbuilt) |
 | | | 30x3 tube | pass, 3 stars, 917 |
-| | | 25x2.5 tube | collapses at 9.6 s (the bouncing tipper) |
-| | | 20x2 tube | collapses at 8.8 s (tipper) |
+| | | 25x2.5 tube | collapses at 8.8 s (the coil hauler) |
+| | | 20x2 tube | collapses at 8.0 s (coil hauler) |
 | P-01 | Pump platform on the shake table: 2.5 t pump skid resting on friction 0.35 (critical), 400 kg cabinet bolted, 0.3 g at 2.5 Hz | Braced platform, 40x4 tube | pass, 3 stars, 871: pump sag 13.6 mm, tilt 0.1° |
 | | | Unbraced (sway) platform, 60x5 tube | the deck amplifies the shaking, the pump slides off at 2.1 s: fail |
 | Q-01 | Water tower on the shake table: 4 t tank at 6 m, 0.4 g at 1.5 Hz | 2-level braced mast, 25x2.5 tube | pass, 2 stars, 782 |

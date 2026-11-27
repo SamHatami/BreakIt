@@ -330,7 +330,7 @@ fn spawn_site(
         let (what, _) = lane_kind(def);
         // On the far approach, where the road is clear of the structure.
         let (a, b) = (v3(d.from), v3(d.to));
-        let at = b + (b - a).normalize_or(Vec3::X) * 2.5;
+        let at = b + (b - a).normalize_or(Vec3::X) * 3.0;
         spawn_label(&mut commands, at + Vec3::Y * 0.3, what);
     }
 

@@ -7,12 +7,12 @@
     sheet: "B-01",
     group: "Bridges",
     title: "Culvert road bridge",
-    brief: "Build a road bridge over the gap between the two banks. Trucks drive across it: two delivery trucks first, then a heavy tipper.",
+    brief: "Build a road bridge over the gap between the two banks. Trucks drive across it: two dump trucks first, then a coil hauler carrying a steel coil.",
     steps: [
         "The road is the dashed line across the gap. Put nodes along it and join them: the road surface is laid on those nodes, and the wheels push down on them.",
         "Keep road nodes no more than 1.5 m apart, from bank to bank, or a wheel drops through the gap.",
         "Rest the bridge on the six foundations at the edges of the banks. They are pins: they hold the bridge in place but let it turn.",
-        "Anything else is up to you, inside the orange box: an arch below the road, or a truss each side of it. The trucks are about 2 m wide, so keep members above the road out of its middle.",
+        "Anything else is up to you, inside the orange box: a truss, an arch below the road, beams under it. The trucks are about 2.6 m wide over the tyres and the road is 2.7 m, so members above the road go at its edges.",
     ],
     limits: (
         volume: (min: (-3.5, -2.0, -1.5), max: (3.5, 3.0, 1.5)),
@@ -31,31 +31,33 @@
     deck: Some((
         from: (-3.0, 0.0, 0.0),
         to: (3.0, 0.0, 0.0),
-        width: 1.2,
+        // 2.7 m of road: the trucks are 2.64 m over the tyres.
+        width: 1.35,
         height: 0.25,
         max_gap: 1.5,
     )),
     events: [
         Convoy(
-            name: "Two delivery trucks",
+            name: "Two dump trucks",
             start: 0.5,
             speed: 4.0,
             count: 2,
             spacing: 9.0,
-            // 7.5 t: 30 kN front, 44 kN rear.
-            axles: [(offset: 0.0, load: 30000.0), (offset: 3.2, load: 44000.0)],
+            // 7.5 t: 30 kN front, 44 kN rear; axles as on the dump truck model.
+            axles: [(offset: 0.0, load: 30000.0), (offset: 2.52, load: 44000.0)],
         ),
         Convoy(
-            name: "Loaded tipper",
+            name: "Loaded coil hauler",
             start: 6.5,
             speed: 2.5,
             count: 1,
             spacing: 0.0,
-            // 18 t: 60 kN front, two 60 kN rear axles.
+            // 18 t: 60 kN front, two 60 kN rear axles; axles as on the coil
+            // hauler model.
             axles: [
                 (offset: 0.0, load: 60000.0),
-                (offset: 3.4, load: 60000.0),
-                (offset: 4.7, load: 60000.0),
+                (offset: 2.58, load: 60000.0),
+                (offset: 3.66, load: 60000.0),
             ],
         ),
     ],

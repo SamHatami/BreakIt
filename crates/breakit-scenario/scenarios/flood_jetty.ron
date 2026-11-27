@@ -8,7 +8,7 @@
     id: "flood_jetty",
     sheet: "F-01",
     group: "Water",
-    title: "Pump jetty in the flume",
+    title: "Pump jetty in the wave channel",
     brief: "A 3 t pump house has to stay up on a platform in the wave channel while a flood runs through it. Build the jetty that holds it.",
     steps: [
         "Stand legs on the four foundations on the floor of the channel, under the water.",
@@ -44,7 +44,7 @@
     ],
     events: [
         Water(
-            name: "Surge 1.8 m",
+            name: "Flood and a 1.8 m wave",
             start: 0.0,
             ramp: 2.0,
             bed: -3.2,
