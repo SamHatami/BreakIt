@@ -8,8 +8,14 @@
     id: "flood_jetty",
     sheet: "F-01",
     group: "Water",
-    title: "Pump jetty in the flume",
-    brief: "Hold a 3 t pump house on a jetty deck 1 m above the table while the flume runs a 1.5 m/s flood current and the paddle sends a 1.8 m surge down the channel: its crest reaches the deck. The pump house just stands on its feet at x = ±1 m, z = ±0.5 m: rock the deck too hard and it slides off. Four fixed footings on the flume bed, 3.2 m down, at the corners of a 3 m square. Water flows along +x.",
+    title: "Pump jetty in the wave channel",
+    brief: "A 3 t pump house has to stay up on a platform in the wave channel while a flood runs through it. Build the jetty that holds it.",
+    steps: [
+        "Stand legs on the four foundations on the floor of the channel, under the water.",
+        "Bring them up to the four orange foot marks 1 m above the table: the pump house stands on nodes there.",
+        "The flood current pushes on every leg in the water, then a 1.8 m wave runs down the channel and reaches the platform. Slim, braced legs catch less water.",
+        "The pump house only rests on its feet: if the platform rocks or tilts, it slides off and the test fails.",
+    ],
     limits: (
         volume: (min: (-2.0, -3.2, -2.0), max: (2.0, 1.5, 2.0)),
         budget: Some(130000.0),
@@ -38,7 +44,7 @@
     ],
     events: [
         Water(
-            name: "Surge 1.8 m",
+            name: "Flood and a 1.8 m wave",
             start: 0.0,
             ramp: 2.0,
             bed: -3.2,

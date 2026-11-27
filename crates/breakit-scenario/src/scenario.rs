@@ -21,6 +21,10 @@ pub struct Scenario {
     pub title: String,
     /// The brief the player reads before building.
     pub brief: String,
+    /// What to build, as short plain steps in the order a player would do
+    /// them. The brief lists them; the build screen can repeat them.
+    #[serde(default)]
+    pub steps: Vec<String>,
     pub limits: Limits,
     /// The only places the structure may be supported.
     pub anchors: Vec<Anchor>,

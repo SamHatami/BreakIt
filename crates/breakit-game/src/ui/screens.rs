@@ -383,6 +383,24 @@ pub fn build_brief(p: &mut ChildSpawnerCommands, v: &GameView, overlay: bool) {
                 l.spawn(caps("Site", Swatch::Muted));
                 site_drawing(l, s);
                 l.spawn(text(s.def.brief.clone(), TextRole::Body, Swatch::Ink));
+                if !s.def.steps.is_empty() {
+                    l.spawn(caps("What to build", Swatch::Muted));
+                    l.spawn(column(6.0)).with_children(|t| {
+                        for (i, step) in s.def.steps.iter().enumerate() {
+                            t.spawn(row(10.0)).with_children(|r| {
+                                r.spawn((
+                                    text(format!("{}", i + 1), TextRole::Mono, Swatch::Accent),
+                                    Node {
+                                        width: Val::Px(14.0),
+                                        align_self: AlignSelf::FlexStart,
+                                        ..default()
+                                    },
+                                ));
+                                r.spawn(text(step.as_str(), TextRole::Body, Swatch::Ink));
+                            });
+                        }
+                    });
+                }
                 l.spawn(caps("Load cases, in test order", Swatch::Muted));
                 l.spawn(column(0.0)).with_children(|t| {
                     for (i, c) in s.load_cases.iter().enumerate() {

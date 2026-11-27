@@ -4,7 +4,12 @@
     sheet: "Q-01",
     group: "Towers",
     title: "Water tower on the shake table",
-    brief: "Hold a 4 t water tank 6 m up while the table shakes at 0.4 g. Four fixed footings sit at the corners of a 2 m square. The tank should not sway more than 10 cm.",
+    brief: "Hold a 4 t water tank 6 m up while the shake table shakes the ground.",
+    steps: [
+        "Start from the four fixed foundations on the shake table.",
+        "Carry the tank's node, high up in the middle of the orange box.",
+        "The table shakes at 0.4 g: the tank should not sway more than 10 cm.",
+    ],
     limits: (
         volume: (min: (-1.5, 0.0, -1.5), max: (1.5, 6.5, 1.5)),
         budget: Some(44000.0),
