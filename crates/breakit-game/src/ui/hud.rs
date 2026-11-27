@@ -582,7 +582,11 @@ fn bar_separator(p: &mut ChildSpawnerCommands) {
 }
 
 pub fn build_tools(p: &mut ChildSpawnerCommands, v: &GameView) {
-    p.spawn(row(2.0)).with_children(|r| {
+    p.spawn(panel(Node {
+        padding: UiRect::axes(Val::Px(10.0), Val::Px(4.0)),
+        ..row(2.0)
+    }))
+    .with_children(|r| {
         let mut tools = vec![Tool::Draw, Tool::Support, Tool::Delete];
         if v.tool.loads_allowed {
             tools.push(Tool::Load);
@@ -1024,21 +1028,28 @@ pub fn build_footer(p: &mut ChildSpawnerCommands, v: &GameView) {
         ..at(Some(0.0), None, Some(0.0), Some(104.0))
     })
     .with_children(|c| {
-        c.spawn(text(
-            v.tool.guide.clone(),
-            TextRole::Body,
-            Swatch::SceneText,
-        ));
-        let defl = if v.scale.0 > 0.0 {
-            format!("   deflection x{:.0}", v.scale.0)
-        } else {
-            String::new()
-        };
-        c.spawn(text(
-            format!("{}{defl}", v.tool.plane_readout()),
-            TextRole::Label,
-            Swatch::Muted,
-        ));
+        let c = &mut c.spawn(panel(Node {
+            align_items: AlignItems::Center,
+            padding: UiRect::axes(Val::Px(16.0), Val::Px(8.0)),
+            ..column(4.0)
+        }));
+        c.with_children(|c| {
+            c.spawn(text(
+                v.tool.guide.clone(),
+                TextRole::Body,
+                Swatch::SceneText,
+            ));
+            let defl = if v.scale.0 > 0.0 {
+                format!("   deflection x{:.0}", v.scale.0)
+            } else {
+                String::new()
+            };
+            c.spawn(text(
+                format!("{}{defl}", v.tool.plane_readout()),
+                TextRole::Label,
+                Swatch::Muted,
+            ));
+        });
     });
     // Run button, bottom right.
     p.spawn(Node {

@@ -544,7 +544,10 @@ fn spawn_cursor_tag(mut commands: Commands) {
                 padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
                 ..default()
             },
-            crate::ui::theme::Skin::fill(Swatch::Scrim),
+            // A frosted backdrop like the panels, without blocking the
+            // pointer it follows.
+            crate::ui::theme::Skin::fill(Swatch::Panel),
+            MaterialNode(crate::ui::frost::FROST_MATERIAL),
             Visibility::Hidden,
             GlobalZIndex(50),
             DespawnOnExit(Screen::Build),
