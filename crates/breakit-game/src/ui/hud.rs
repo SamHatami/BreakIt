@@ -1031,13 +1031,14 @@ pub fn build_footer(p: &mut ChildSpawnerCommands, v: &GameView) {
         let c = &mut c.spawn(panel(Node {
             align_items: AlignItems::Center,
             padding: UiRect::axes(Val::Px(16.0), Val::Px(8.0)),
+            // Wraps between the parts browser and the sheet.
+            max_width: Val::Px(520.0),
             ..column(4.0)
         }));
         c.with_children(|c| {
-            c.spawn(text(
-                v.tool.guide.clone(),
-                TextRole::Body,
-                Swatch::SceneText,
+            c.spawn((
+                text(v.tool.guide.clone(), TextRole::Body, Swatch::SceneText),
+                TextLayout::justify(Justify::Center),
             ));
             let defl = if v.scale.0 > 0.0 {
                 format!("   deflection x{:.0}", v.scale.0)
