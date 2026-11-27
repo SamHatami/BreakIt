@@ -11,6 +11,8 @@ name: Release
 #   `release_tag` empty it rebuilds nightly; with e.g. `v0.1.0` it creates
 #   that tag on main and publishes the numbered release (same as pushing
 #   the tag, for when pushing tags is not possible).
+# - Windows also gets BreakIt-<tag>-windows-x64-setup.exe (Inno Setup,
+#   packaging/windows/breakit.iss): per-user install, upgrades in place.
 # - Pull requests that change this file build the zips (kept as workflow
 #   artifacts for 7 days) but publish nothing.
 
@@ -105,6 +107,7 @@ jobs:
         shell: bash
         run: |
           dir="BreakIt-${{ steps.name.outputs.tag }}-${{ matrix.name }}"
+          echo "PKG_DIR=$dir" >> "$GITHUB_ENV"
           mkdir -p "dist/$dir"
           cp "target/dist/${{ matrix.exe }}" "dist/$dir/${{ matrix.out }}"
           cp PLAYTEST.md "dist/$dir/PLAYTEST.md"
@@ -117,10 +120,31 @@ jobs:
           fi
           ls -l "$dir.zip"
 
+      # Per-user installer that upgrades in place (packaging/windows/breakit.iss).
+      - name: Installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "could not install Inno Setup" }
+          }
+          & $iscc /Qp `
+            "/DAppVersion=$env:BREAKIT_VERSION ($env:BREAKIT_COMMIT)" `
+            "/DSourceDir=$PWD\dist\$env:PKG_DIR" `
+            "/DOutputDir=$PWD\dist" `
+            "/DOutputName=$env:PKG_DIR-setup" `
+            packaging\windows\breakit.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+          Get-Item "dist\$env:PKG_DIR-setup.exe"
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/*-setup.exe
           retention-days: 7
 
   publish:
@@ -143,15 +167,15 @@ jobs:
           ls -l dist
           short="${GITHUB_SHA::7}"
           if [[ -n "$RELEASE_TAG" ]]; then
-            notes="Playtest build $RELEASE_TAG ($short). Download the zip for your system, unpack it and run BreakIt. How to play, what to test and how to report: PLAYTEST.md in the zip, or https://github.com/$GITHUB_REPOSITORY/blob/$RELEASE_TAG/PLAYTEST.md"
+            notes="Playtest build $RELEASE_TAG ($short). On Windows run the -setup.exe (installs per user, and a newer setup replaces it in place), or unpack the zip and run BreakIt. How to play, what to test and how to report: PLAYTEST.md in the zip, or https://github.com/$GITHUB_REPOSITORY/blob/$RELEASE_TAG/PLAYTEST.md"
             # --target creates the tag at this commit when it does not exist
             # yet (dispatch); a pushed tag already points here.
-            gh release create "$RELEASE_TAG" dist/*.zip --target "$GITHUB_SHA" \
+            gh release create "$RELEASE_TAG" dist/*.zip dist/*-setup.exe --target "$GITHUB_SHA" \
               --title "BreakIt $RELEASE_TAG" --notes "$notes" --generate-notes
           else
-            notes="Rolling build of main at $short, built $(date -u '+%Y-%m-%d %H:%M UTC'). Newer than the latest tagged release, and less tested. See PLAYTEST.md in the zip."
+            notes="Rolling build of main at $short, built $(date -u '+%Y-%m-%d %H:%M UTC'). Newer than the latest tagged release, and less tested. On Windows run the -setup.exe to install or update. See PLAYTEST.md."
             # Recreate it so the tag moves to this commit and old zips go.
             gh release delete nightly --yes --cleanup-tag || true
-            gh release create nightly dist/*.zip --prerelease --target "$GITHUB_SHA" \
+            gh release create nightly dist/*.zip dist/*-setup.exe --prerelease --target "$GITHUB_SHA" \
               --title "BreakIt nightly ($short)" --notes "$notes"
           fi
