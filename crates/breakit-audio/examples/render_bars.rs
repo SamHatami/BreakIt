@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 
 use breakit_audio::body::{Drive, Ends};
-use breakit_audio::material::contact_time;
+use breakit_audio::material::{contact_time, impact_voice};
 use breakit_audio::modal::{Bank, Hit, ModalVoice};
 use breakit_audio::wav::write_wav;
 use breakit_audio::{Body, Voice};
@@ -62,6 +62,26 @@ fn knock(
         out.extend_from_slice(&block);
         if !alive {
             break;
+        }
+    }
+    out.resize((3.0 * SR) as usize, 0.0);
+    out
+}
+
+/// A loose bar of `material` and `section`, `length` m long, landing on the
+/// floor at `speed` m/s, as the game plays it.
+fn drop(material: &Material, section: &Section, length: f64, speed: f32, seed: u32) -> Vec<f32> {
+    let body = Body::member(material, section, length);
+    let mut out = Vec::new();
+    if let Some(mut voice) = impact_voice(&body, speed, body.mass(), 1.0, SR, seed) {
+        let mut block = [0.0f32; 128];
+        while out.len() < (3.0 * SR) as usize {
+            block.fill(0.0);
+            let alive = voice.render(&mut block);
+            out.extend_from_slice(&block);
+            if !alive {
+                break;
+            }
         }
     }
     out.resize((3.0 * SR) as usize, 0.0);
@@ -126,6 +146,31 @@ fn main() {
     for x in &mut audio {
         *x *= 0.7 / peak;
     }
+    // The same bars let go above the floor.
+    let mut drops = Vec::new();
+    for (i, (section, length, speed)) in [
+        (tube.clone(), 1.5, 3.0f32),
+        (tube, 1.0, 5.0),
+        (Section::tube(0.012, 0.002), 0.5, 4.0),
+        (Section::tube(0.05, 0.005), 3.0, 4.0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        drops.extend(drop(&steel, &section, length, speed, 21 + i as u32));
+    }
+    drops.extend(drop(
+        &Material::timber(),
+        &Section::rect(0.08, 0.08),
+        1.5,
+        4.0,
+        31,
+    ));
+    let peak = drops.iter().fold(0.0f32, |m, x| m.max(x.abs())).max(1e-6);
+    for x in &mut drops {
+        *x *= 0.7 / peak;
+    }
+    write_wav(&dir.join("drops.wav"), &drops, 1, SR as u32).expect("write wav");
     let path = dir.join("bars.wav");
     write_wav(&path, &audio, 1, SR as u32).expect("write wav");
     println!(

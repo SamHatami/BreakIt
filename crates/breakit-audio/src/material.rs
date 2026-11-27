@@ -801,7 +801,18 @@ pub fn impact_voice(
         },
         detail,
     );
-    let modes = seated(&resting, drive, budget, seed);
+    // A loose steel piece is a free bar and rings as one: its own modes and
+    // the contact pulse are the whole sound, nothing recorded. The other
+    // materials land with a recorded knock.
+    let rings = material == MaterialKind::Steel;
+    let ringing = |drive: Drive, budget: usize, seed: u32| {
+        if rings {
+            piece.modes(drive, budget, seed)
+        } else {
+            seated(&resting, drive, budget, seed)
+        }
+    };
+    let modes = ringing(drive, budget, seed);
     // The mode gains assume an ideal impulse. A real contact lasts `tau`
     // and leaves the modes above about 1/tau alone, so a soft landing rings
     // less of the piece. Most of that loss is real (a soft landing *is*
@@ -826,8 +837,7 @@ pub fn impact_voice(
         Bank::new(&modes, sr),
         // The same bar, driven at the far end, for when it slaps down.
         Bank::new(
-            &seated(
-                &resting,
+            &ringing(
                 Drive {
                     at: 1.0 - at,
                     ..drive
@@ -850,13 +860,14 @@ pub fn impact_voice(
     let what = timbre::drop_of(material, mass);
     let length = piece.length;
     let land = |s: &mut Score, t: f32, bank: u8, a: f32| {
-        if t <= 0.0 {
+        if rings {
+        } else if t <= 0.0 {
             s.event(t, what, length, a * click, bank);
         } else {
             s.single(t, what, length, a * click, bank);
         }
         s.pulse(t, tau, bank, a, a * click);
-        for _ in 0..3 {
+        for _ in 0..if rings { 0 } else { 3 } {
             let dt = tau * s.rng.range(0.0, 0.8);
             let fine = tau * s.rng.range(0.1, 0.3);
             s.pulse(t + dt, fine, bank, 0.22 * a, 0.3 * a * click);
@@ -1453,20 +1464,24 @@ mod tests {
         // Faster is shorter.
         assert!(contact_time(5.0, 9.0, 0.004, 1e10) < contact_time(5.0, 1.0, 0.004, 1e10));
 
-        let hit = |m, speed: f32, mass: f32| {
-            let body = Body::fragment(m, 0.4);
+        // A steel piece rings as a free bar under the contact pulse alone,
+        // so a harder landing, with its shorter contact, is brighter.
+        let hit = |speed: f32| {
+            let body = Body::typical(MaterialKind::Steel, 1.5);
+            let mass = body.mass();
             render(impact_voice(&body, speed, mass, 1.0, SR, 4).unwrap(), 3.0).0
         };
-        let s = hit(MaterialKind::Steel, 4.0, 6.0);
-        let t = hit(MaterialKind::Timber, 4.0, 6.0);
-        let c = hit(MaterialKind::Concrete, 4.0, 40.0);
+        let (soft, hard) = (hit(0.7), hit(12.0));
         assert!(
-            brightness(&s, 1500.0) > 1.2 * brightness(&t, 1500.0),
-            "steel {} timber {}",
-            brightness(&s, 1500.0),
-            brightness(&t, 1500.0)
+            brightness(&hard, 1500.0) > 1.2 * brightness(&soft, 1500.0),
+            "hard {} soft {}",
+            brightness(&hard, 1500.0),
+            brightness(&soft, 1500.0)
         );
-        let _ = c;
+        // The other materials land with a recorded knock.
+        for (m, mass) in [(MaterialKind::Timber, 6.0), (MaterialKind::Concrete, 40.0)] {
+            assert!(impact_voice(&Body::fragment(m, 0.4), 4.0, mass, 1.0, SR, 4).is_some());
+        }
     }
 
     fn strain(m: MaterialKind, path: impl Fn(f32) -> (f32, f32), seconds: f32) -> Vec<f32> {

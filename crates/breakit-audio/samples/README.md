@@ -10,8 +10,8 @@ One folder per kind of event. Put 16-bit WAV files (mono, any sample rate, one c
 | `steel_groan` | steel beam bending and buckling slowly (sustained) |
 | `steel_knock` | bolt slipping in a joint, single knock |
 | `steel_tear` | welded joint or bolt group tearing |
-| `steel_drop_heavy` | heavy steel member landing on concrete |
-| `steel_drop_light` | short steel piece landing on concrete |
+| `steel_drop_heavy` | heavy steel member landing on concrete (unused: steel landings are computed) |
+| `steel_drop_light` | short steel piece landing on concrete (unused: steel landings are computed) |
 | `timber_creak` | timber beam creaking under load (sustained) |
 | `timber_crack` | single dry cracks of a beam starting to split |
 | `timber_break` | beam snapping and splintering |

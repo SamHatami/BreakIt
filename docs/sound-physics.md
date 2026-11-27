@@ -49,7 +49,7 @@ A long member has hundreds of audible modes. Each voice gets a budget (28 per pi
 
 **Stick-slip.** Joints and crack faces under changing load stick until friction is overcome, then slip in small jumps. Each slip is an impulse into the member. At a steady rate of load change the slips are evenly spaced, and their rate is the pitch of the creak: it rises when the load changes faster. Steel has one large slip per event (a bolt going into bearing); timber has long regular trains; concrete only grinds once cracked.
 
-**Contact.** A piece landing pushes on the floor for the Hertz contact time `τ = 2.87 (m² / (R E*² v))^⅕`. A long piece is not rigid, so the mass is limited to what a bending wave reaches during the contact. Steel on the floor: a fraction of a millisecond, exciting modes up to several kHz. Timber: milliseconds, a dull knock.
+**Contact.** A piece landing pushes on the floor for the Hertz contact time `τ = 2.87 (m² / (R E*² v))^⅕`. A long piece is not rigid, so the mass is limited to what a bending wave reaches during the contact. Steel on the floor: a fraction of a millisecond, exciting modes up to several kHz. Timber: milliseconds, a dull knock. A loose steel piece is the one case computed from end to end: it is a free bar, so its free modes under that one pulse are the whole sound, with no recording and no joint loss (`examples/render_bars.rs` renders it, and two free bars knocked together). The other materials land with a recorded knock.
 
 **Each failure mode** is a short score of those events:
 
