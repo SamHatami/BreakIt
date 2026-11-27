@@ -507,7 +507,9 @@ fn frame_view(
     let min = pts.iter().copied().fold(Vec3::splat(f32::MAX), Vec3::min);
     let max = pts.iter().copied().fold(Vec3::splat(f32::MIN), Vec3::max);
     cam.focus = (min + max) * 0.5;
-    cam.distance = ((max - min).length() * 1.6).clamp(6.0, 120.0);
+    // Close enough that the structure fills the middle of the screen
+    // between the side panels.
+    cam.distance = ((max - min).length() * 1.2).clamp(4.0, 120.0);
 }
 
 fn draw_build_guides(mut gizmos: Gizmos, design: Res<Design>, tool: Res<BuildTool>) {

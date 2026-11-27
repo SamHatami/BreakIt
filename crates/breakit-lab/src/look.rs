@@ -32,10 +32,36 @@ use bevy::prelude::*;
 use bevy::render::view::{ColorGrading, ColorGradingGlobal, ColorGradingSection};
 
 use crate::envmap::{self, HallRadiance};
-use crate::{LabCamera, LabSettings, LabStats};
+use crate::{LabCamera, LabSettings, LabStats, PlayTable};
 
 /// Super 35 sensor height, Bevy's default for depth of field, m.
 const SENSOR_HEIGHT: f32 = 0.018_66;
+
+/// How far above the table top the sharp zone reaches, world units: room
+/// for tall structures, towers and the rigs' gantries.
+const SHARP_ABOVE_TABLE: f32 = 10.0;
+
+/// Margin round the table that stays sharp too (the frame and rim), world
+/// units.
+const SHARP_MARGIN: f32 = 1.5;
+
+/// Swaps Bevy's depth of field shader for the lab's copy (`dof.wesl`),
+/// which blurs nothing nearer than the focus. Bevy embeds its shader at
+/// build time and loads it when the render pipelines start, so replacing
+/// the embedded bytes after the plugins are built is enough. Call it from
+/// `Plugin::finish`.
+pub(crate) fn override_dof_shader(app: &mut App) {
+    use bevy::asset::io::embedded::EmbeddedAssetRegistry;
+    const PATH: &str = "bevy_post_process/dof/dof.wesl";
+    let Some(registry) = app.world().get_resource::<EmbeddedAssetRegistry>() else {
+        return;
+    };
+    registry.insert_asset(
+        std::path::PathBuf::from(PATH),
+        std::path::Path::new(PATH),
+        include_bytes!("dof.wesl").as_slice(),
+    );
+}
 
 /// Render layer of the hall and its dressing. The play table, the structure
 /// and everything else stay on layer 0. Lab cameras see both. The daylight
@@ -365,9 +391,11 @@ pub(crate) fn lab_lens(
     mut commands: Commands,
     settings: Res<LabSettings>,
     env: Res<LabEnvironment>,
+    table: Res<PlayTable>,
     mut cams: Query<(
         Entity,
         &LabCamera,
+        &GlobalTransform,
         Option<&mut DepthOfField>,
         Option<&mut ScreenSpaceAmbientOcclusion>,
         Option<&Fitted>,
@@ -377,7 +405,8 @@ pub(crate) fn lab_lens(
     let k = settings.model_scale;
     let look = settings.look;
     let want = Fitted(look, settings.f_stops);
-    for (e, cam, dof, ao, fitted, has_env) in &mut cams {
+    for (e, cam, at, dof, ao, fitted, has_env) in &mut cams {
+        let focus = sharp_to(at, table.size * 0.5, cam.focus_distance);
         // The maps are baked a frame after the look changes.
         let env_ready = look.reflections == 0 || env.maps.is_some();
         let env_stale = (look.reflections > 0) != has_env;
@@ -432,7 +461,7 @@ pub(crate) fn lab_lens(
                 });
             }
             if let Some(quality_level) = look.ambient_occlusion {
-                let radius = ao_radius(cam.focus_distance);
+                let radius = ao_radius(cam.focus_distance, k);
                 c.insert(ScreenSpaceAmbientOcclusion {
                     quality_level,
                     radius,
@@ -476,16 +505,16 @@ pub(crate) fn lab_lens(
                 });
             }
             if let Some(mode) = look.dof {
-                c.insert(lens(mode, cam.focus_distance, settings.f_stops, k));
+                c.insert(lens(mode, focus, settings.f_stops, k));
             }
         } else {
             if let Some(mut d) = dof {
-                if d.focal_distance != cam.focus_distance {
-                    d.focal_distance = cam.focus_distance;
+                if (d.focal_distance - focus).abs() > 1e-3 * focus {
+                    d.focal_distance = focus;
                 }
             }
             if let Some(mut ao) = ao {
-                let radius = ao_radius(cam.focus_distance);
+                let radius = ao_radius(cam.focus_distance, k);
                 if (ao.radius - radius).abs() > 0.02 * radius {
                     ao.radius = radius;
                     ao.constant_object_thickness = 0.4 * radius;
@@ -497,14 +526,34 @@ pub(crate) fn lab_lens(
 
 /// Ambient occlusion reach, world units, for a camera focused `focus` away.
 ///
-/// The structure is full size and the hall is 20 times that, so no single
+/// The structure is full size and the hall is `model_scale` times that, so no single
 /// reach suits both. It follows what the camera is looking at: about 0.8 m
-/// up close, where it sits in the joints of the structure, growing to 12
-/// (0.6 m of hall) when the camera pulls back, where it grounds machinery on
-/// the floor. A reach that stays small at a distance would also sink below
-/// the precision of the occlusion pass's depth buffer and turn to speckle.
-fn ao_radius(focus: f32) -> f32 {
-    (0.07 * focus).clamp(0.6, 12.0)
+/// up close, where it sits in the joints of the structure, growing to 0.6 m
+/// of hall when the camera pulls back, where it grounds machinery on the
+/// floor. A reach that stays small at a distance would also sink below the
+/// precision of the occlusion pass's depth buffer and turn to speckle.
+fn ao_radius(focus: f32, model_scale: f32) -> f32 {
+    (0.07 * focus).clamp(0.6, (0.6 * model_scale).max(0.6))
+}
+
+/// Where the lens focuses, as view depth (world units): on the far edge of
+/// the play table and the room above it, or further if the camera looks
+/// past that. The lab's depth of field blurs nothing nearer than the focus
+/// (`dof.wesl`), so the whole table and whatever stands on it stays sharp
+/// and only the hall behind goes soft.
+pub fn sharp_to(camera: &GlobalTransform, table_half: Vec2, focus_distance: f32) -> f32 {
+    let eye = camera.translation();
+    let forward = camera.forward();
+    let half = table_half + Vec2::splat(SHARP_MARGIN);
+    let mut far = focus_distance;
+    for x in [-half.x, half.x] {
+        for z in [-half.y, half.y] {
+            for y in [0.0, SHARP_ABOVE_TABLE] {
+                far = far.max((Vec3::new(x, y, z) - eye).dot(*forward));
+            }
+        }
+    }
+    far
 }
 
 fn lens(mode: DepthOfFieldMode, focus: f32, f_stops: f32, k: f32) -> DepthOfField {
@@ -512,7 +561,7 @@ fn lens(mode: DepthOfFieldMode, focus: f32, f_stops: f32, k: f32) -> DepthOfFiel
         mode,
         focal_distance: focus,
         // A sensor scaled with the model: the blur of a real camera
-        // looking at a real 1:20 model.
+        // looking at a real model of that scale.
         sensor_height: SENSOR_HEIGHT * k,
         aperture_f_stops: f_stops,
         max_depth: 200.0 * k,
@@ -578,5 +627,44 @@ mod tests {
             q = q.next();
         }
         assert_eq!(q, LabQuality::Low);
+    }
+
+    #[test]
+    fn the_whole_table_is_in_front_of_the_focus() {
+        let half = Vec2::new(14.0, 8.0);
+        let eye = Vec3::new(6.0, 5.0, 7.0);
+        let cam = GlobalTransform::from(
+            Transform::from_translation(eye).looking_at(Vec3::new(0.0, 0.5, 0.0), Vec3::Y),
+        );
+        let focus = sharp_to(&cam, half, 9.0);
+        // Every corner of the table, top and bottom, is nearer than the
+        // focus, so `dof.wesl` leaves it sharp.
+        for x in [-half.x, half.x] {
+            for z in [-half.y, half.y] {
+                for y in [0.0, SHARP_ABOVE_TABLE] {
+                    let depth = (Vec3::new(x, y, z) - eye).dot(*cam.forward());
+                    assert!(depth <= focus + 1e-4, "{x} {y} {z}: {depth} > {focus}");
+                }
+            }
+        }
+        // Looking at something beyond the table, it focuses there.
+        assert!((sharp_to(&cam, half, 300.0) - 300.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn the_shader_copy_only_changes_the_circle_of_confusion() {
+        let ours = include_str!("dof.wesl");
+        assert!(ours.contains("max(depth - focus, 0.0)"));
+        assert!(!ours.contains("abs(depth - focus)"));
+        // The rest is Bevy's: the bindings and entry points it relies on.
+        for name in [
+            "fn gaussian_horizontal",
+            "fn gaussian_vertical",
+            "fn bokeh_pass_a",
+            "fn bokeh_pass_b",
+            "var<uniform> dof_params",
+        ] {
+            assert!(ours.contains(name), "{name}");
+        }
     }
 }

@@ -28,7 +28,7 @@ impl Default for OrbitCamera {
     fn default() -> Self {
         Self {
             focus: Vec3::new(0.0, 0.5, 0.0),
-            distance: 12.0,
+            distance: 9.0,
             yaw: 0.6,
             pitch: 0.45,
         }
@@ -84,7 +84,7 @@ fn orbit_camera(
         MouseScrollUnit::Pixel => scroll.delta.y / 40.0,
     };
     if lines != 0.0 {
-        orbit.distance = (orbit.distance * 0.9_f32.powf(lines)).clamp(1.0, 400.0);
+        orbit.distance = (orbit.distance * 0.9_f32.powf(lines)).clamp(1.0, 250.0);
     }
 
     // Stay above the hall floor.

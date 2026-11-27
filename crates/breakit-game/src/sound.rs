@@ -527,7 +527,7 @@ mod tests {
             .sources
             .iter()
             .filter(|s| s.position.is_some())
-            .all(|s| (s.metres_per_unit - 0.05).abs() < 1e-6));
+            .all(|s| (s.metres_per_unit - 1.0 / settings.model_scale).abs() < 1e-6));
         // Roof units are above the table.
         assert!(a
             .sources
