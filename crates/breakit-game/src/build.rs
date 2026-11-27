@@ -1,18 +1,35 @@
-//! Build mode: place nodes on a snapping grid, join them with beams, set
-//! supports and loads, select members.
+//! Build mode: place nodes in 3D, join them with beams, set supports and
+//! loads, select members.
 //!
 //! Input arrives as [`UiAction`]s (keys and buttons, see `flow.rs` for the
-//! map) plus left clicks on the scene, which act by the current [`Tool`]:
-//! - Draw (B): click empty grid to add a node, a node to pick it; with a
+//! map) plus mouse clicks on the scene. A left click acts by the current
+//! [`Tool`]:
+//! - Draw (B): click empty space to add a node, a node to pick it; with a
 //!   node picked, each click adds a beam from it, so clicks chain beams.
 //!   Clicking a beam selects it for the inspector.
 //! - Support (S): click a node to cycle none, pinned, fixed.
 //! - Delete (X): click a node or a beam to delete it.
 //! - Load (L, sandbox only): click a node to cycle its load.
 //!
+//! A right click (without dragging, which orbits) always cancels: it ends
+//! the chain, else drops the selection, else goes back to Draw.
+//!
+//! Where a click lands ([`aim`]): an existing node or a foundation under
+//! the cursor wins, in any direction; with Shift held the next node slides
+//! along the x, y or z axis through the chain's last node; otherwise it is
+//! the grid point on the work plane. The work plane passes through the
+//! chain's last node and turns to face the camera (Tab locks it to the
+//! floor, front or side plane; Q / E step it).
+//!
 //! Fixed scenario nodes (anchors, load points) can't be deleted or have
-//! their support changed.
+//! their support changed. [`aids`] draws the previews, the snap feedback
+//! and the hint next to the cursor.
 
+pub mod aids;
+pub mod aim;
+mod demo;
+
+use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
@@ -24,20 +41,24 @@ use crate::history::History;
 use crate::scenario::{Scenario, Sheets};
 use crate::ui::pointer::Pointer;
 
+pub use aim::{snap, Axis, BuildPlane, PlaneMode};
+
 pub struct BuildPlugin;
 
 impl Plugin for BuildPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<BuildTool>()
             .init_resource::<History>()
+            .add_plugins((aids::BuildAidsPlugin, demo::BuildDemoPlugin))
             .add_systems(
                 Update,
                 (
                     update_cursor,
                     build_actions,
+                    right_click_cancel,
                     build_clicks,
                     observe_history,
-                    draw_build_guides,
+                    aids::update_guide,
                 )
                     .chain()
                     .run_if(in_state(Screen::Build)),
@@ -52,44 +73,27 @@ pub const GRID: f32 = 0.5;
 const PICK_RADIUS_PX: f32 = 14.0;
 /// How close, in screen pixels, the cursor must be to pick a beam.
 const BEAM_PICK_PX: f32 = 8.0;
+/// A right press that moves less than this, in pixels, is a click (cancel)
+/// rather than an orbit drag.
+const CLICK_SLOP_PX: f32 = 5.0;
 
+/// What the cursor is aimed at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum BuildPlane {
-    /// Horizontal plane at `y = level`.
-    Ground,
-    /// Vertical plane at `z = level`, the plane a bridge elevation is drawn in.
+pub enum Aim {
+    /// Nothing under the cursor (over the UI, or the plane is edge-on).
     #[default]
-    Wall,
-}
-
-impl BuildPlane {
-    pub fn normal(self) -> Dir3 {
-        match self {
-            BuildPlane::Ground => Dir3::Y,
-            BuildPlane::Wall => Dir3::Z,
-        }
-    }
-
-    pub fn origin(self, level: f32) -> Vec3 {
-        match self {
-            BuildPlane::Ground => Vec3::new(0.0, level, 0.0),
-            BuildPlane::Wall => Vec3::new(0.0, 0.0, level),
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            BuildPlane::Ground => "XZ",
-            BuildPlane::Wall => "XY",
-        }
-    }
-
-    pub fn axis(self) -> &'static str {
-        match self {
-            BuildPlane::Ground => "y",
-            BuildPlane::Wall => "z",
-        }
-    }
+    None,
+    /// An existing node.
+    Node(usize),
+    /// A sheet foundation with no node on it yet (index into the
+    /// design's anchors).
+    Anchor(usize),
+    /// A member, when no node is near.
+    Beam(usize),
+    /// A grid point on the work plane.
+    Grid,
+    /// A point on the axis through the chain's last node (Shift).
+    Axis(Axis),
 }
 
 /// What a left click on the scene does.
@@ -123,7 +127,7 @@ impl Tool {
 
     pub fn hint(self) -> &'static str {
         match self {
-            Tool::Draw => "Click to place a node, clicks chain beams. Click a beam to inspect it. Esc ends the chain.",
+            Tool::Draw => "Click to place a node, clicks chain beams. Click a beam to inspect it. Right-click ends the chain.",
             Tool::Support => "Click a node to cycle its support: pinned, fixed, none.",
             Tool::Delete => "Click a node or a beam to delete it. Fixed sheet nodes stay.",
             Tool::Load => "Click a node to cycle its load: 10, 50, 100, 200 kN, none.",
@@ -135,9 +139,26 @@ impl Tool {
 pub struct BuildTool {
     pub tool: Tool,
     pub kind: BeamKind,
+    /// The work plane in use this frame.
     pub plane: BuildPlane,
-    /// Plane offset along its normal, metres.
+    /// Auto (faces the camera) or locked by Tab.
+    pub plane_mode: PlaneMode,
+    /// The work plane's coordinate along its normal, metres: where it
+    /// meets `base`, plus `offset`.
     pub level: f32,
+    /// Point the work plane passes through: the chain's last node, else
+    /// where the last chain was.
+    pub base: Vec3,
+    /// Q / E steps of the plane away from `base`, metres.
+    pub offset: f32,
+    /// What the cursor is aimed at.
+    pub aim: Aim,
+    /// The aimed point lies outside the sheet's build area.
+    pub outside: bool,
+    /// The sheet's build area (challenge sheets).
+    pub volume: Option<(Vec3, Vec3)>,
+    /// Next step for the player, shown under the scene.
+    pub guide: String,
     /// Start of the beam chain being drawn.
     pub selected: Option<usize>,
     /// Beam shown in the inspector.
@@ -146,7 +167,8 @@ pub struct BuildTool {
     pub hovered: Option<usize>,
     /// Beam under the cursor, if no node is.
     pub hovered_beam: Option<usize>,
-    /// Snapped point on the build plane under the cursor.
+    /// Where a click would put a node: the aimed node, foundation, axis
+    /// or grid point.
     pub cursor: Option<Vec3>,
     /// The sheet allows the load tool.
     pub loads_allowed: bool,
@@ -158,12 +180,79 @@ pub struct BuildTool {
 impl BuildTool {
     /// Fresh tool state for a sheet.
     pub fn reset_for(&mut self, s: &Scenario) {
+        let volume = (s.mode != breakit_scenario::PlayMode::Sandbox).then(|| {
+            let (lo, hi) = (s.def.limits.volume.min, s.def.limits.volume.max);
+            (
+                Vec3::new(lo[0] as f32, lo[1] as f32, lo[2] as f32),
+                Vec3::new(hi[0] as f32, hi[1] as f32, hi[2] as f32),
+            )
+        });
         *self = BuildTool {
             loads_allowed: s.sandbox,
             allowed: s.allowed.clone(),
             kind: s.allowed.first().copied().unwrap_or_default(),
+            // Start the work plane on the first foundation, so the front
+            // plane is the bridge's and the floor plane is its footing.
+            base: central_anchor(s),
+            volume,
             ..Default::default()
         };
+    }
+
+    /// Whether a point is inside the sheet's build area.
+    pub fn inside(&self, p: Vec3) -> bool {
+        self.volume
+            .is_none_or(|(lo, hi)| p.cmpge(lo - 1e-3).all() && p.cmple(hi + 1e-3).all())
+    }
+
+    /// Tool-bar label of the plane button.
+    pub fn plane_button(&self) -> String {
+        match self.plane_mode {
+            PlaneMode::Auto => format!("Plane auto {}", self.plane.label()),
+            PlaneMode::Locked(p) => format!("Plane {}", p.label()),
+        }
+    }
+
+    /// One-line read-out of the work plane.
+    pub fn plane_readout(&self) -> String {
+        let how = match self.plane_mode {
+            PlaneMode::Auto => "turns with the view",
+            PlaneMode::Locked(_) => "locked",
+        };
+        format!(
+            "{} plane {} at {} {:+.1} m, {how}   Tab change, Q / E move   snap {:.1} m",
+            self.plane.name(),
+            self.plane.label(),
+            self.plane.axis(),
+            self.level,
+            GRID
+        )
+    }
+
+    /// Right click: ends the chain, else drops the selected beam, else goes
+    /// back to the draw tool. Returns whether it did anything.
+    pub fn cancel(&mut self) -> bool {
+        if self.deselect() {
+            return true;
+        }
+        if self.tool != Tool::Draw {
+            self.tool = Tool::Draw;
+            return true;
+        }
+        false
+    }
+
+    /// Moves the work plane onto the chain's last node when that changes,
+    /// and works out its level.
+    fn follow_chain(&mut self, design: &Design, last: &mut Option<usize>) {
+        if self.selected != *last {
+            *last = self.selected;
+            if let Some(p) = self.selected.and_then(|s| design.nodes.get(s)) {
+                self.base = *p;
+                self.offset = 0.0;
+            }
+        }
+        self.level = self.plane.level_of(self.base) + self.offset;
     }
 
     /// Whether the sheet allows this member's material.
@@ -203,8 +292,18 @@ impl BuildTool {
     }
 }
 
-pub fn snap(p: Vec3) -> Vec3 {
-    (p / GRID).round() * GRID
+/// The foundation nearest the middle of them all, where the work plane
+/// starts.
+fn central_anchor(s: &Scenario) -> Vec3 {
+    if s.anchors.is_empty() {
+        return Vec3::ZERO;
+    }
+    let mid = s.anchors.iter().map(|a| a.0).sum::<Vec3>() / s.anchors.len() as f32;
+    s.anchors
+        .iter()
+        .map(|a| a.0)
+        .min_by(|a, b| a.distance(mid).total_cmp(&b.distance(mid)))
+        .unwrap_or(Vec3::ZERO)
 }
 
 /// Distance from `p` to segment `a`-`b`, 2D.
@@ -218,42 +317,97 @@ pub fn segment_distance(p: Vec2, a: Vec2, b: Vec2) -> f32 {
     p.distance(a + ab * t)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_cursor(
     window: Single<&Window, With<PrimaryWindow>>,
     camera: Single<(&Camera, &GlobalTransform), With<OrbitCamera>>,
+    keys: Res<ButtonInput<KeyCode>>,
     design: Res<Design>,
     pointer: Res<Pointer>,
+    overlay: Res<Overlay>,
     mut tool: ResMut<BuildTool>,
+    mut last_chain: Local<Option<usize>>,
 ) {
     let (camera, cam_tf) = *camera;
+    let forward = *cam_tf.forward();
+    tool.plane = tool.plane_mode.resolve(forward, tool.plane);
+    tool.follow_chain(&design, &mut last_chain);
+
     tool.hovered = None;
     tool.hovered_beam = None;
     tool.cursor = None;
+    tool.aim = Aim::None;
+    tool.outside = false;
     let Some(px) = window.cursor_position() else {
         return;
     };
-    if pointer.over_ui {
+    if pointer.over_ui || *overlay != Overlay::None {
+        return;
+    }
+    let to_screen = |p: Vec3| camera.world_to_viewport(cam_tf, p).ok();
+
+    let screen: Vec<Option<Vec2>> = design.nodes.iter().map(|&p| to_screen(p)).collect();
+    let nearest = |pts: &mut dyn Iterator<Item = (usize, Option<Vec2>)>, r: f32| {
+        pts.filter_map(|(i, s)| {
+            let d = s?.distance(px);
+            (d <= r).then_some((i, d))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(i, _)| i)
+    };
+
+    // An existing node under the cursor wins, wherever it is in 3D.
+    tool.hovered = nearest(&mut screen.iter().copied().enumerate(), PICK_RADIUS_PX);
+    if let Some(h) = tool.hovered {
+        tool.aim = Aim::Node(h);
+        tool.cursor = Some(design.nodes[h]);
+        return;
+    }
+    // Then a foundation nothing stands on yet.
+    let free_anchor = |&(i, (p, _)): &(usize, &(Vec3, _))| {
+        design
+            .node_at(*p, 0.05)
+            .is_none()
+            .then_some((i, to_screen(*p)))
+    };
+    let anchor = nearest(
+        &mut design
+            .anchors
+            .iter()
+            .enumerate()
+            .filter_map(|e| free_anchor(&e)),
+        PICK_RADIUS_PX * 1.4,
+    );
+    if let Some(a) = anchor {
+        tool.aim = Aim::Anchor(a);
+        tool.cursor = Some(design.anchors[a].0);
         return;
     }
 
-    let screen: Vec<Option<Vec2>> = design
-        .nodes
-        .iter()
-        .map(|&p| camera.world_to_viewport(cam_tf, p).ok())
-        .collect();
+    let Ok(ray) = camera.viewport_to_world(cam_tf, px) else {
+        return;
+    };
+    let (origin, dir) = (ray.origin, *ray.direction);
+    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    let chain = tool
+        .selected
+        .filter(|_| tool.tool == Tool::Draw)
+        .and_then(|s| design.nodes.get(s).copied());
 
-    // Nearest node in screen space wins.
-    tool.hovered = screen
-        .iter()
-        .enumerate()
-        .filter_map(|(i, s)| {
-            let d = s.as_ref()?.distance(px);
-            (d <= PICK_RADIUS_PX).then_some((i, d))
-        })
-        .min_by(|a, b| a.1.total_cmp(&b.1))
-        .map(|(i, _)| i);
+    // Shift with a chain: slide along an axis through its last node, so
+    // columns go straight up and beams straight out of the plane.
+    if let (true, Some(start)) = (shift, chain) {
+        if let Some((axis, p)) = aim::axis_lock(start, origin, dir, px, to_screen) {
+            tool.aim = Aim::Axis(axis);
+            tool.cursor = Some(p);
+            tool.outside = !tool.inside(p);
+            return;
+        }
+    }
 
-    if tool.hovered.is_none() {
+    // A member under the cursor, for the inspector or the delete tool;
+    // while drawing a chain the grid point is the better target.
+    if chain.is_none() {
         tool.hovered_beam = design
             .beams
             .iter()
@@ -264,21 +418,16 @@ fn update_cursor(
             })
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(i, _)| i);
+        if let Some(b) = tool.hovered_beam {
+            tool.aim = Aim::Beam(b);
+            return;
+        }
     }
 
-    let Ok(ray) = camera.viewport_to_world(cam_tf, px) else {
-        return;
-    };
-    let origin = tool.plane.origin(tool.level);
-    let plane = InfinitePlane3d::new(tool.plane.normal());
-    if let Some(t) = ray.intersect_plane(origin, plane) {
-        let mut p = snap(ray.get_point(t));
-        // Keep the point exactly on the plane after snapping.
-        match tool.plane {
-            BuildPlane::Ground => p.y = tool.level,
-            BuildPlane::Wall => p.z = tool.level,
-        }
+    if let Some(p) = aim::on_plane(origin, dir, tool.plane, tool.level) {
+        tool.aim = Aim::Grid;
         tool.cursor = Some(p);
+        tool.outside = !tool.inside(p);
     }
 }
 
@@ -383,14 +532,11 @@ fn build_actions(
                 tool.selected_beam = None;
             }
             UiAction::CyclePlane => {
-                tool.plane = match tool.plane {
-                    BuildPlane::Ground => BuildPlane::Wall,
-                    BuildPlane::Wall => BuildPlane::Ground,
-                };
-                tool.level = 0.0;
+                tool.plane_mode = tool.plane_mode.next();
+                tool.offset = 0.0;
             }
-            UiAction::PlaneUp => tool.level += GRID,
-            UiAction::PlaneDown => tool.level -= GRID,
+            UiAction::PlaneUp => tool.offset += GRID,
+            UiAction::PlaneDown => tool.offset -= GRID,
             UiAction::ToggleDeflection => {
                 scale.0 = if scale.0 > 0.0 { 0.0 } else { 50.0 };
             }
@@ -411,6 +557,33 @@ fn delete_node(design: &mut Design, tool: &mut BuildTool, h: usize) {
     }
 }
 
+/// A right click that did not drag cancels; a drag orbits the camera.
+fn right_click_cancel(
+    buttons: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    motion: Res<AccumulatedMouseMotion>,
+    pointer: Res<Pointer>,
+    overlay: Res<Overlay>,
+    mut tool: ResMut<BuildTool>,
+    mut dragged: Local<f32>,
+) {
+    if buttons.just_pressed(MouseButton::Right) {
+        *dragged = 0.0;
+    }
+    if buttons.pressed(MouseButton::Right) {
+        *dragged += motion.delta.length();
+    }
+    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    if buttons.just_released(MouseButton::Right)
+        && *dragged < CLICK_SLOP_PX
+        && !shift
+        && !pointer.over_ui
+        && *overlay == Overlay::None
+    {
+        tool.cancel();
+    }
+}
+
 fn build_clicks(
     buttons: Res<ButtonInput<MouseButton>>,
     pointer: Res<Pointer>,
@@ -423,32 +596,43 @@ fn build_clicks(
     }
     match tool.tool {
         Tool::Draw => {
-            if let (None, Some(b)) = (tool.hovered, tool.hovered_beam) {
+            if let Aim::Beam(b) = tool.aim {
                 tool.selected = None;
                 tool.selected_beam = Some(b);
                 return;
             }
-            let target = match (tool.hovered, tool.cursor) {
-                (Some(h), _) => Some(h),
-                (None, Some(p)) => Some(design.add_node(p)),
-                (None, None) => None,
+            let target = match (tool.aim, tool.cursor) {
+                (Aim::Node(h), _) => Some(h),
+                (Aim::None | Aim::Beam(_), _) | (_, None) => None,
+                (_, Some(p)) => Some(design.add_node(p)),
             };
-            if let Some(t) = target {
-                if let Some(s) = tool.selected {
-                    if s != t {
-                        if let Some(b) = design.add_beam(s, t, tool.kind) {
-                            tool.selected_beam = Some(b);
+            match target {
+                Some(t) => {
+                    if let Some(s) = tool.selected {
+                        if s != t {
+                            if let Some(b) = design.add_beam(s, t, tool.kind) {
+                                tool.selected_beam = Some(b);
+                            }
                         }
                     }
+                    tool.selected = Some(t);
                 }
-                tool.selected = Some(t);
+                // A click on nothing ends the chain.
+                None if tool.aim == Aim::None => {
+                    tool.selected = None;
+                }
+                None => {}
             }
         }
-        Tool::Support => {
-            if let Some(h) = tool.hovered {
-                design.cycle_support(h);
+        Tool::Support => match (tool.aim, tool.cursor) {
+            (Aim::Node(h), _) if aids::support_allowed(&design, h) => design.cycle_support(h),
+            // A foundation with nothing on it: put a node there, which
+            // takes the foundation's support.
+            (Aim::Anchor(_), Some(p)) => {
+                design.add_node(p);
             }
-        }
+            _ => {}
+        },
         Tool::Delete => {
             if let Some(h) = tool.hovered {
                 let mut t = std::mem::take(&mut *tool);
@@ -510,77 +694,9 @@ fn frame_view(
     cam.distance = ((max - min).length() * 1.6).clamp(6.0, 120.0);
 }
 
-fn draw_build_guides(mut gizmos: Gizmos, design: Res<Design>, tool: Res<BuildTool>) {
-    // On the table top the table's own grid shows the snap points; keep the
-    // build-plane grid faint there so the two don't fight.
-    let on_table = tool.plane == BuildPlane::Ground && tool.level == 0.0;
-    let grid_color = Color::srgba(0.6, 0.65, 0.7, if on_table { 0.08 } else { 0.25 });
-    let rot = match tool.plane {
-        BuildPlane::Ground => Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
-        BuildPlane::Wall => Quat::IDENTITY,
-    };
-    gizmos.grid(
-        Isometry3d::new(tool.plane.origin(tool.level), rot),
-        UVec2::splat(40),
-        Vec2::splat(GRID),
-        grid_color,
-    );
-
-    let accent = Color::srgb(0.88, 0.65, 0.15);
-    // Fixed sheet nodes get a ring so the player sees what to connect.
-    for (i, &p) in design.nodes.iter().enumerate() {
-        if design.is_locked(i) {
-            gizmos.circle(
-                Isometry3d::new(p, Quat::IDENTITY),
-                0.2,
-                Color::srgb(0.85, 0.85, 0.8),
-            );
-        }
-    }
-    if let Some(b) = tool.selected_beam.and_then(|b| design.beams.get(b)) {
-        let (a, c) = (design.nodes[b.a], design.nodes[b.b]);
-        let off = Vec3::new(0.0, 0.0, 0.0);
-        gizmos.line(a + off, c + off, accent);
-        gizmos.sphere(Isometry3d::from_translation(a), 0.12, accent);
-        gizmos.sphere(Isometry3d::from_translation(c), 0.12, accent);
-    }
-    if let Some(s) = tool.selected {
-        let p = design.nodes[s];
-        gizmos.sphere(Isometry3d::from_translation(p), 0.15, accent);
-        let to = tool.hovered.map(|h| design.nodes[h]).or(tool.cursor);
-        if let Some(to) = to {
-            gizmos.line(p, to, accent);
-        }
-    }
-    if let Some(h) = tool.hovered {
-        gizmos.sphere(
-            Isometry3d::from_translation(design.nodes[h]),
-            0.18,
-            Color::srgb(0.3, 0.8, 1.0),
-        );
-    } else if let Some(b) = tool.hovered_beam.and_then(|b| design.beams.get(b)) {
-        gizmos.line(
-            design.nodes[b.a],
-            design.nodes[b.b],
-            Color::srgb(0.3, 0.8, 1.0),
-        );
-    } else if let Some(c) = tool.cursor {
-        gizmos.sphere(
-            Isometry3d::from_translation(c),
-            0.08,
-            Color::srgb(0.8, 0.8, 0.8),
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn snapping_rounds_to_grid() {
-        assert_eq!(snap(Vec3::new(0.26, -0.24, 1.74)), Vec3::new(0.5, 0.0, 1.5));
-    }
 
     #[test]
     fn segment_distance_clamps_to_the_ends() {
@@ -600,5 +716,47 @@ mod tests {
         assert_eq!(t.selected_beam, Some(0));
         assert!(t.deselect());
         assert!(!t.deselect());
+    }
+
+    #[test]
+    fn right_click_cancels_chain_then_selection_then_tool() {
+        let mut t = BuildTool {
+            tool: Tool::Support,
+            selected: Some(2),
+            selected_beam: Some(1),
+            ..Default::default()
+        };
+        assert!(t.cancel());
+        assert_eq!((t.selected, t.selected_beam), (None, Some(1)));
+        assert!(t.cancel());
+        assert_eq!(t.selected_beam, None);
+        assert_eq!(t.tool, Tool::Support);
+        assert!(t.cancel());
+        assert_eq!(t.tool, Tool::Draw);
+        assert!(!t.cancel());
+    }
+
+    #[test]
+    fn work_plane_follows_the_chain() {
+        let mut d = Design::default();
+        let a = d.add_node(Vec3::new(1.0, 2.0, 3.0));
+        let mut t = BuildTool {
+            plane: BuildPlane::Wall,
+            offset: 0.5,
+            ..Default::default()
+        };
+        let mut last = None;
+        t.follow_chain(&d, &mut last);
+        assert_eq!(t.level, 0.5);
+        t.selected = Some(a);
+        t.follow_chain(&d, &mut last);
+        assert_eq!((t.base, t.level), (d.nodes[a], 3.0));
+        t.plane = BuildPlane::Ground;
+        t.follow_chain(&d, &mut last);
+        assert_eq!(t.level, 2.0);
+        // The plane stays where the chain ended.
+        t.selected = None;
+        t.follow_chain(&d, &mut last);
+        assert_eq!(t.level, 2.0);
     }
 }

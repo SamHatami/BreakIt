@@ -505,7 +505,7 @@ pub fn build_tools(p: &mut ChildSpawnerCommands, v: &GameView) {
         bar_separator(r);
         tool_item(
             r,
-            &format!("Plane {}", v.tool.plane.label()),
+            &v.tool.plane_button(),
             "Tab",
             UiAction::CyclePlane,
             false,
@@ -855,20 +855,18 @@ pub fn build_footer(p: &mut ChildSpawnerCommands, v: &GameView) {
         ..at(Some(0.0), None, Some(0.0), Some(104.0))
     })
     .with_children(|c| {
-        c.spawn(text(v.tool.tool.hint(), TextRole::Body, Swatch::SceneText));
+        c.spawn(text(
+            v.tool.guide.clone(),
+            TextRole::Body,
+            Swatch::SceneText,
+        ));
         let defl = if v.scale.0 > 0.0 {
             format!("   deflection x{:.0}", v.scale.0)
         } else {
             String::new()
         };
         c.spawn(text(
-            format!(
-                "plane {} at {} {:+.1} m   snap {:.1} m{defl}",
-                v.tool.plane.label(),
-                v.tool.plane.axis(),
-                v.tool.level,
-                crate::build::GRID
-            ),
+            format!("{}{defl}", v.tool.plane_readout()),
             TextRole::Label,
             Swatch::Muted,
         ));

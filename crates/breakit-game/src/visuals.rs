@@ -94,17 +94,27 @@ fn feed_renderer(
     }
 
     let stress_view = !simulating || heat.0;
-    let highlighted: Vec<usize> = match (tool.hovered, tool.hovered_beam.or(tool.selected_beam)) {
-        (Some(h), _) if !simulating => design
-            .beams
-            .iter()
-            .enumerate()
-            .filter(|(_, b)| b.a == h || b.b == h)
-            .map(|(i, _)| i)
-            .collect(),
-        (None, Some(b)) if !simulating => vec![b],
-        _ => Vec::new(),
-    };
+    // The selected member always glows; so do the members at a hovered
+    // node, or a hovered member. The outlines drawn over the scene
+    // (`build::aids`) tell selection from hover.
+    let mut highlighted: Vec<usize> = Vec::new();
+    if !simulating {
+        highlighted.extend(tool.selected_beam.filter(|&b| b < design.beams.len()));
+        match (tool.hovered, tool.hovered_beam) {
+            (Some(h), _) => highlighted.extend(
+                design
+                    .beams
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, b)| b.a == h || b.b == h)
+                    .map(|(i, _)| i),
+            ),
+            (None, Some(b)) => highlighted.push(b),
+            _ => {}
+        }
+        highlighted.sort_unstable();
+        highlighted.dedup();
+    }
     if settings.stress_view != stress_view || settings.highlighted != highlighted {
         settings.stress_view = stress_view;
         settings.highlighted = highlighted;
