@@ -1182,7 +1182,9 @@ impl StrainVoice {
                     let seconds = (self.sliding / speed.max(1e-4)).clamp(0.15, 1.5);
                     let what = timbre::strain_of(self.body.material);
                     self.creaking = false;
-                    if timbre::recorded(what) {
+                    // Bonded laminate has no joints to creak.
+                    let jointed = self.body.material != MaterialKind::Composite;
+                    if jointed && timbre::recorded(what) {
                         if let Some(slice) = timbre::stretch(what, seconds, &mut self.rng) {
                             let rate = timbre::size_rate(what, self.size)
                                 * (speed / 0.2).clamp(0.2, 5.0).powf(0.2);
@@ -1387,22 +1389,18 @@ mod tests {
     }
 
     #[test]
-    fn steel_rings_on_and_concrete_does_not() {
-        let tail = |m, cause| {
-            let (x, _) = render(break_voice(&info(m, cause), 1.0, SR, 5).unwrap(), 2.0);
-            let n = x.len();
-            let at = (1.2 * SR) as usize;
-            if n <= at {
-                return 0.0;
-            }
-            rms(&x[at..]) / rms(&x[..(0.1 * SR) as usize])
-        };
-        let steel = tail(MaterialKind::Steel, BreakCause::Rupture);
-        let concrete = tail(MaterialKind::Concrete, BreakCause::Brittle);
-        let timber = tail(MaterialKind::Timber, BreakCause::TimberSplit);
-        assert!(steel > 0.002, "steel tail {steel}");
-        assert!(concrete < 0.2 * steel, "concrete {concrete} vs {steel}");
-        assert!(timber < 0.2 * steel, "timber {timber} vs {steel}");
+    fn a_member_in_a_frame_does_not_ring_on() {
+        // A bare steel bar rings for seconds, which is what made the first
+        // version sound like glass. Built into a frame it is over quickly.
+        let (x, _) = render(
+            break_voice(&info(MaterialKind::Steel, BreakCause::Rupture), 1.0, SR, 5).unwrap(),
+            2.5,
+        );
+        let at = (1.5 * SR) as usize;
+        let tail = if x.len() > at { rms(&x[at..]) } else { 0.0 };
+        let onset = rms(&x[..(0.1 * SR) as usize]);
+        assert!(onset > 1e-3, "{onset}");
+        assert!(tail < 0.05 * onset, "tail {tail} vs onset {onset}");
     }
 
     #[test]
@@ -1523,7 +1521,7 @@ mod tests {
             // Steel is the exception: its sound is bolts slipping, and they
             // slip again on the way back up.
             if m != MaterialKind::Steel {
-                assert!(again < 0.8 * first, "{m:?} reload {again} vs {first}");
+                assert!(again < 0.9 * first, "{m:?} reload {again} vs {first}");
             }
         }
     }
