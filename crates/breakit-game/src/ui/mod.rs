@@ -129,9 +129,10 @@ impl View {
             View::BuildSheet => hud::build_sheet_key(v),
             View::BuildReadouts => hud::readouts_key(v),
             View::BuildTools => format!(
-                "{:?} {:?} {} {} {}",
+                "{:?} {:?} {:?} {} {} {}",
                 v.tool.tool,
                 v.tool.plane,
+                v.tool.plane_mode,
                 v.tool.loads_allowed,
                 v.history.can_undo(),
                 v.history.can_redo()
@@ -139,9 +140,11 @@ impl View {
             View::BuildInspector => hud::inspector_key(v),
             View::BuildDrawer => hud::drawer_key(v),
             View::BuildFooter => format!(
-                "{:?} {:?} {} {} {}",
+                "{:?} {:?} {:?} {:?} {} {} {}",
                 v.tool.tool,
+                v.tool.guide,
                 v.tool.plane,
+                v.tool.plane_mode,
                 v.tool.level,
                 v.scale.0,
                 v.revisions.of(v.sheets.current().id).len()
