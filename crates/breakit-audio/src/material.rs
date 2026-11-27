@@ -148,6 +148,37 @@ fn seated(body: &Body, drive: Drive, budget: usize, seed: u32) -> Vec<ModeSpec> 
     modes
 }
 
+/// How strongly a bar shakes what it touches: the share of a blow that is
+/// heard through the floor or frame at 1 kHz, against a bar that radiates
+/// fully by itself. (An estimate.)
+const SOUNDBOARD: f32 = 0.15;
+
+/// The same for a load let go inside a frame: a step, which already leans
+/// on the low modes far more than a blow does.
+const SOUNDBOARD_RELEASE: f32 = 0.004;
+
+/// The modes of a bar that touches something large: a floor it lands on or
+/// the frame it is bolted into. Through the air a mode is heard by its
+/// surface acceleration, which favours the high modes, and a bar narrower
+/// than the wavelength hardly radiates its low ones at all. Through the
+/// contact it pushes with its displacement, and the slab or frame it pushes
+/// on radiates by its velocity over a large area. For the same blow that
+/// path falls with frequency instead of rising, so it carries the low modes:
+/// the rumble of heavy steel landing.
+fn grounded(body: &Body, mut modes: Vec<ModeSpec>, share: f32) -> Vec<ModeSpec> {
+    for m in &mut modes {
+        let f = m.freq.max(1.0);
+        // What the mode was given per unit frequency and radiation.
+        let blow = m.gain / (f * body.radiation(f).max(1e-4));
+        // A slab does not radiate below its own first modes either.
+        let slab = f / (f + 60.0);
+        m.gain += share * blow * 1000.0 * (1000.0 / f) * slab;
+        // What it touches also takes energy out of it.
+        m.decay += 1.5;
+    }
+    modes
+}
+
 /// Above this (Hz) a seated member's modes fall away.
 const RING_CORNER: f32 = 1200.0;
 
@@ -437,10 +468,10 @@ pub fn break_voice(info: &BreakInfo, detail: f32, sr: f32, seed: u32) -> Option<
     let held = |piece: &Body, drive: Drive, seed: u32| {
         if computed {
             let drive = Drive {
-                transverse: drive.transverse.max(0.6),
+                transverse: drive.transverse.max(0.35),
                 ..drive
             };
-            piece.modes(drive, modes, seed)
+            grounded(piece, piece.modes(drive, modes, seed), SOUNDBOARD_RELEASE)
         } else {
             seated(piece, drive, modes, seed)
         }
@@ -484,14 +515,18 @@ pub fn break_voice(info: &BreakInfo, detail: f32, sr: f32, seed: u32) -> Option<
                 ..body
             };
             banks.push(Bank::new(
-                &frame.modes(
-                    Drive {
-                        at: 0.31,
-                        transverse: 1.0,
-                        axial: 0.3,
-                    },
-                    modes,
-                    seed ^ 0xF2A,
+                &grounded(
+                    &frame,
+                    frame.modes(
+                        Drive {
+                            at: 0.31,
+                            transverse: 1.0,
+                            axial: 0.3,
+                        },
+                        modes,
+                        seed ^ 0xF2A,
+                    ),
+                    SOUNDBOARD_RELEASE,
                 ),
                 sr,
             ));
@@ -852,7 +887,7 @@ pub fn impact_voice(
     let rings = matches!(material, MaterialKind::Steel | MaterialKind::Timber);
     let ringing = |drive: Drive, budget: usize, seed: u32| {
         if rings {
-            piece.modes(drive, budget, seed)
+            grounded(&piece, piece.modes(drive, budget, seed), SOUNDBOARD)
         } else {
             seated(&resting, drive, budget, seed)
         }

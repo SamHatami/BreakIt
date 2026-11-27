@@ -51,6 +51,8 @@ A long member has hundreds of audible modes. Each voice gets a budget (28 per pi
 
 **Contact.** A piece landing pushes on the floor for the Hertz contact time `τ = 2.87 (m² / (R E*² v))^⅕`. A long piece is not rigid, so the mass is limited to what a bending wave reaches during the contact. Steel on the floor: a fraction of a millisecond, exciting modes up to several kHz. Timber: milliseconds, a dull knock. A loose steel or timber piece is computed from end to end, as is steel pulled apart in tension (the load let go rings the two halves' own modes with steel's low loss, then the jolt reaches the neighbouring members a wave transit later and they ring lower and longer; the neighbours' size is a guess, twice the member; no recording): it is a free bar, so its free modes under that one pulse are the whole sound, with no recording and no joint loss (`examples/render_bars.rs` renders it, and two free bars knocked together). Concrete and carbon land with a recorded knock.
 
+**Structure-borne sound (`grounded`).** Through the air a mode is heard by its surface acceleration, which rises with frequency, and a bar narrower than the wavelength hardly radiates its low modes at all: taken alone that leaves only the high modes, which is the glassy sound. A bar that touches a floor or is bolted into a frame also pushes on it with its displacement, and the slab or frame radiates by its velocity over a large area, so for the same blow that path falls with frequency and carries the low modes. This is the rumble of heavy steel. The share of that path (`SOUNDBOARD`, `SOUNDBOARD_RELEASE`) is an estimate, not a calculation.
+
 **Each failure mode** is a short score of those events:
 
 | Cause | Score |

@@ -230,7 +230,7 @@ impl Body {
     /// Radiated pressure per unit surface velocity, 0..1. A bar vibrating
     /// sideways is a dipole: below the corner the air just sloshes round it
     /// and the radiated power falls as (ka)³, the amplitude as f^1.5.
-    fn radiation(&self, f: f32) -> f32 {
+    pub fn radiation(&self, f: f32) -> f32 {
         let x = f / self.radiation_corner();
         let a = x * x.sqrt();
         a / (1.0 + a)
