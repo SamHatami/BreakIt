@@ -431,16 +431,16 @@ pub fn break_voice(info: &BreakInfo, detail: f32, sr: f32, seed: u32) -> Option<
     };
     let modes = budget(BREAK_MODES, detail);
     // Steel pulled apart is computed from end to end: the load let go rings
-    // the two halves, which lose their ring to the joints they hang from.
+    // the two halves with steel's own low loss, and they whip sideways as
+    // well as recoiling, since no break is square.
     let computed = material == MaterialKind::Steel && matches!(cause, BreakCause::Rupture);
     let held = |piece: &Body, drive: Drive, seed: u32| {
         if computed {
-            let eta = joint_loss(material);
-            let mut modes = piece.modes(drive, modes, seed);
-            for m in &mut modes {
-                m.decay += std::f32::consts::PI * m.freq * eta;
-            }
-            modes
+            let drive = Drive {
+                transverse: drive.transverse.max(0.6),
+                ..drive
+            };
+            piece.modes(drive, modes, seed)
         } else {
             seated(piece, drive, modes, seed)
         }
@@ -474,6 +474,30 @@ pub fn break_voice(info: &BreakInfo, detail: f32, sr: f32, seed: u32) -> Option<
             s.release(0.0, 0.25e-3, A, 0.8, 1.0);
             s.release(0.0, 0.25e-3, B, 0.8, 0.0);
             s.release(0.0, 1.5e-3, FLOOR, 0.15, 0.0);
+            // The jolt runs on into the frame: the members next to this one
+            // take it a wave transit later, spread out by the joints, and
+            // ring lower and longer. (Their sizes are a guess: twice this
+            // member, held at both ends.)
+            let frame = Body {
+                length: 2.0 * body.length,
+                ends: Ends::Held,
+                ..body
+            };
+            banks.push(Bank::new(
+                &frame.modes(
+                    Drive {
+                        at: 0.31,
+                        transverse: 1.0,
+                        axial: 0.3,
+                    },
+                    modes,
+                    seed ^ 0xF2A,
+                ),
+                sr,
+            ));
+            let transit = body.length / body.wave_speed();
+            s.release(transit, 1.2e-3, EXTRA, 0.6, 0.0);
+            s.release(3.0 * transit, 2.0e-3, EXTRA, 0.3, 0.0);
         }
         BreakCause::Rupture => {
             s.release(0.0, 0.25e-3, A, 0.8, 1.0);

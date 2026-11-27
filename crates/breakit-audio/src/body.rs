@@ -214,8 +214,9 @@ impl Body {
             // Friction in the joints at both ends.
             Ends::Held => 1.0,
             Ends::Cantilever => 0.8,
-            // A loose piece loses the joint friction but lies on the floor.
-            Ends::Free => 0.7,
+            // A loose piece loses the joint friction: what is left is the
+            // metal itself and whatever it touches.
+            Ends::Free => 0.4,
         };
         loss_factor(self.material) * ends * (1.0 + 3.0 * self.damage)
     }

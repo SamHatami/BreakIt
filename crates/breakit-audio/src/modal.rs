@@ -384,7 +384,7 @@ impl ModalVoice {
             direct_gain,
             leak: step_leak(sr),
             max_samples: (10.0 * sr) as u32,
-            floor: 1e-4 / gain.max(1e-3),
+            floor: 2e-5 / gain.max(1e-3),
         }
     }
 
