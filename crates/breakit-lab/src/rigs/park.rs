@@ -215,8 +215,7 @@ mod tests {
     /// The patch of floor the hall keeps free of dressing around the table
     /// (see `table_area_is_clear_of_dressing`), world units.
     fn clear_patch() -> Vec2 {
-        let s = LabSettings::default();
-        PlayTable::default().size * 0.5 + Vec2::splat(1.5 * s.model_scale)
+        LabSettings::default().clear_floor_half(PlayTable::default().size)
     }
 
     #[test]

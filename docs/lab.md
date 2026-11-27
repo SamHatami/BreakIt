@@ -4,11 +4,14 @@
 
 ## Scale: a full-size structure on a model table
 
-The solver works in SI units and the structure is full size: the starter bridge is 6 m long, and 6 world units. The fiction is that it is a 1:20 model on a table in a real hall. So the hall is drawn `LabSettings::model_scale` (20) times larger than its real size: a 60 m hall is 1,200 world units long, a 0.86 m high table stands 17.2 world units above the floor.
+The solver works in SI units and the structure is full size: the starter bridge is 6 m long, and 6 world units. The fiction is that it is a 1:10 model on a large test table in a real hall. So the hall is drawn `LabSettings::model_scale` (10) times larger than its real size: a 60 m hall is 600 world units long, a 0.86 m high table stands 8.6 world units above the floor, and the 28 x 16 table is 2.8 x 1.6 m.
+
+It was 1:20 until Sam's first playtest: the models read as tiny miniatures in a huge hall, and the depth of field (which scales with the model, see below) blurred much of the table. 1:10 makes the test models read twice as large against the hall.
 
 - World origin is the middle of the table top. The table's playing surface is at y = 0, where the solver's ground is.
 - `LabSettings::lab_to_world` maps lab metres to world units; `floor_y()` is the hall floor in world units.
-- Depth of field uses a sensor scaled by the same factor (`sensor_height = 18.66 mm x 20`), so the blur is what a real camera would give looking at a real 1:20 model. That is what makes the table read as a miniature and lets the hall go soft behind it.
+- Depth of field uses a sensor scaled by the same factor (`sensor_height = 18.66 mm x 10`), so the blur behind the table is what a real camera would give looking at a real 1:10 model. The table itself is always sharp: see "Depth of field" below.
+- The rig park and the parked rigs stand on a patch of floor round the table that the dressing keeps clear: `LabSettings::clear_floor_half`, the table plus `CLEAR_FLOOR_MARGIN` (30 world units) on each side. The rigs are sized by the structure, so the margin is in world units and does not change with the model scale.
 
 ## What is in the hall
 
@@ -53,6 +56,14 @@ commands.insert_resource(PlayTable::new(Ravine { gap: 5.0, depth: 3.2 }));
 - **Who shadows what**: the hall is on render layer 1 (`HALL_LAYER`), the table and structure on layer 0, and lab cameras see both. The daylight only takes shadows from layer 0, because the roof would otherwise shade everything; the lamps take them from both. Anything you add to the hall should go on layer 1, anything on the table on layer 0.
 - **Ambient occlusion** reaches further the further away the camera is focused (`ao_radius`): 0.8 m in the joints of the structure up close, 0.6 m of hall when pulled back, where it grounds the machinery.
 - **Camera**: exposure fixed at EV 9.2, TonyMcMapface tonemapping, a light grade (a touch of contrast, cooler shadows, warmer highlights), bloom only above a threshold so nothing glows that would not in a real hall, a soft vignette, distance haze, and the depth of field from the scaled sensor.
+
+### Depth of field
+
+A real lens blurs in front of and behind what it is focused on, so a lens focused on the middle of the table blurs its near and far edges: on the first playtest the blur covered much of the play area. The lab keeps the whole table sharp instead:
+
+- The lens focuses on the far edge of the table (and 10 world units above it, room for towers and rig gantries), measured as view depth from the camera, or on the orbit focus if that is further (`look::sharp_to`).
+- Nothing nearer than the focus is blurred. Bevy's depth of field has no setting for that, so the lab swaps in its own copy of Bevy's shader, `src/dof.wesl`, which differs only in `calculate_circle_of_confusion` (`max(depth - focus, 0)` instead of `abs(depth - focus)`). `look::override_dof_shader` replaces the embedded bytes at `bevy_post_process/dof/dof.wesl` in `LabPlugin::finish`, before the render pipelines load it. When the Bevy pin moves, copy the new `dof.wesl` and make the same one-line change.
+- Behind the table the hall goes soft as a real lens would make it. At the default view with f/2 the far end of the hall has a blur of about 4 px at 900 lines, against 20 px or more before. `LabSettings::f_stops` sets it.
 
 ### Surfaces
 
