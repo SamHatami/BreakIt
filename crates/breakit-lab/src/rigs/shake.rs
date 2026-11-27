@@ -14,9 +14,10 @@ use bevy::light::NotShadowCaster;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
+use super::hero::{ActuatorSpec, ShakeTableSpec};
 use super::{
-    park, send, spawn_rig, LabRigs, Owner, Part, Rest, Rig, RigClock, RigMaterials, RigModel,
-    RigModels, RigSlot, Role, ShakeSetup, Site,
+    in_parent, park, send, spawn_rig, Axis, LabRigs, Owner, Part, Rest, Rig, RigClock,
+    RigMaterials, RigModel, RigModels, RigSlot, Role, ShakeSetup, Site,
 };
 use crate::palette::Mat;
 use crate::scenery::Scenery;
@@ -33,13 +34,34 @@ pub fn actuator_axes() -> [(Vec3, f32); 4] {
     ]
 }
 
-/// The procedural actuators for a platform of edge `size`.
-pub fn actuators(size: f32) -> RigModel {
+/// Height of the actuators' axis above the table top.
+const AXIS_Y: f32 = 0.42;
+/// From an actuator's base pin to the platform edge.
+const REACH: f32 = 3.2;
+
+/// Where the hero actuators go for a platform of edge `size`: one model
+/// frame per actuator, base pin on the reaction bracket, rod end on the
+/// platform's lug.
+pub fn hero_fits(size: f32) -> Vec<Transform> {
+    let p = size * 0.5;
+    actuator_axes()
+        .into_iter()
+        .map(|(a, across)| {
+            let base = a * -(p + REACH) + Vec3::Y * AXIS_Y + Vec3::Y.cross(a) * across;
+            ActuatorSpec::fit(base, a, REACH)
+        })
+        .collect()
+}
+
+/// The procedural actuators for a platform of edge `size`. With `hero`
+/// only what the hero actuators are mounted on: the reaction brackets and
+/// the platform's lugs.
+pub fn actuators(size: f32, hero: bool) -> RigModel {
     let p = size * 0.5;
     let mut fixed = Scenery::default();
     let mut riding = Scenery::default();
     let mut parts = Vec::new();
-    let axis_y = 0.42;
+    let axis_y = AXIS_Y;
     for (k, (a, across)) in actuator_axes().into_iter().enumerate() {
         let side = Vec3::Y.cross(a);
         let at = |along: f32, up: f32, lateral: f32| {
@@ -65,43 +87,45 @@ pub fn actuators(size: f32) -> RigModel {
                 Vec3::Y,
             );
         }
-        // Cylinder barrel, end caps, tie rods, trunnion saddle.
-        let (b0, b1) = (at(-(p + 3.2), axis_y, 0.0), at(-(p + 0.95), axis_y, 0.0));
-        fixed.m(Mat::Yellow).cylinder(b0, b1, 0.3, 20, true);
-        for c in [b0, b1] {
-            fixed.m(Mat::LightSteel).ring(c, a, 0.37, 0.37, 0.16, 20);
-        }
-        fixed.m(Mat::Dark).cuboid(
-            at(-(p + 1.3), 0.08, 0.0),
-            Vec3::new(0.2, 0.08, 0.42),
-            Quat::from_rotation_arc(Vec3::X, a),
-        );
-        // Servo valve and its hoses, off towards the table edge.
-        fixed.m(Mat::MachineBlue).cuboid(
-            at(-(p + 2.3), axis_y + 0.42, 0.0),
-            Vec3::new(0.3, 0.14, 0.22),
-            Quat::from_rotation_arc(Vec3::X, a),
-        );
-        for (s, mat) in [(-0.1, Mat::Dark), (0.1, Mat::PipeRed)] {
-            let top = at(-(p + 2.3), axis_y + 0.56, s);
-            let knee = at(-(p + 2.9), axis_y + 0.75, s + 0.9 * across.signum());
-            let down = at(-(p + 3.2), 0.1, s + 1.3 * across.signum());
-            fixed.m(mat).cylinder(top, knee, 0.045, 6, false);
-            fixed.m(mat).cylinder(knee, down, 0.045, 6, false);
-        }
-
-        // Rod: slides in the barrel, its clevis follows the platform lug.
         let rot = Quat::from_rotation_arc(Vec3::X, a);
-        let mut rod = Scenery::default();
-        rod.m(Mat::Stainless)
-            .cylinder(Vec3::ZERO, Vec3::X * 2.9, 0.11, 12, false);
-        rod.m(Mat::Dark)
-            .cuboid(Vec3::X * 2.98, Vec3::new(0.14, 0.14, 0.2), Quat::IDENTITY);
-        parts.push(Part::local(
-            Role::Rod(k as u8),
-            Transform::from_translation(at(-(p + 3.0), axis_y, 0.0)).with_rotation(rot),
-            rod,
-        ));
+        if !hero {
+            // Cylinder barrel, end caps, tie rods, trunnion saddle.
+            let (b0, b1) = (at(-(p + 3.2), axis_y, 0.0), at(-(p + 0.95), axis_y, 0.0));
+            fixed.m(Mat::Yellow).cylinder(b0, b1, 0.3, 20, true);
+            for c in [b0, b1] {
+                fixed.m(Mat::LightSteel).ring(c, a, 0.37, 0.37, 0.16, 20);
+            }
+            fixed.m(Mat::Dark).cuboid(
+                at(-(p + 1.3), 0.08, 0.0),
+                Vec3::new(0.2, 0.08, 0.42),
+                Quat::from_rotation_arc(Vec3::X, a),
+            );
+            // Servo valve and its hoses, off towards the table edge.
+            fixed.m(Mat::MachineBlue).cuboid(
+                at(-(p + 2.3), axis_y + 0.42, 0.0),
+                Vec3::new(0.3, 0.14, 0.22),
+                Quat::from_rotation_arc(Vec3::X, a),
+            );
+            for (s, mat) in [(-0.1, Mat::Dark), (0.1, Mat::PipeRed)] {
+                let top = at(-(p + 2.3), axis_y + 0.56, s);
+                let knee = at(-(p + 2.9), axis_y + 0.75, s + 0.9 * across.signum());
+                let down = at(-(p + 3.2), 0.1, s + 1.3 * across.signum());
+                fixed.m(mat).cylinder(top, knee, 0.045, 6, false);
+                fixed.m(mat).cylinder(knee, down, 0.045, 6, false);
+            }
+
+            // Rod: slides in the barrel, its clevis follows the platform lug.
+            let mut rod = Scenery::default();
+            rod.m(Mat::Stainless)
+                .cylinder(Vec3::ZERO, Vec3::X * 2.9, 0.11, 12, false);
+            rod.m(Mat::Dark)
+                .cuboid(Vec3::X * 2.98, Vec3::new(0.14, 0.14, 0.2), Quat::IDENTITY);
+            parts.push(Part::local(
+                Role::Rod(k as u8),
+                Transform::from_translation(at(-(p + 3.0), axis_y, 0.0)).with_rotation(rot),
+                rod,
+            ));
+        }
 
         // Lug on the platform edge, with the clevis pin.
         riding.m(Mat::MachineBlue).cuboid(
@@ -300,7 +324,8 @@ pub(crate) fn call(
                 &models,
                 RigSlot::InstrumentCart,
                 park,
-                || cart(floor),
+                &[],
+                |_| cart(floor),
             );
             spawn_trace(&mut commands, &mut meshes, &extra, root);
             *placed = Some((None, half));
@@ -320,8 +345,10 @@ pub(crate) fn call(
 
     // The actuators are bolted to the shake table insert: they come and go
     // with it.
-    if let Some((e, _, _)) = find(RigSlot::ShakeActuators) {
-        commands.entity(e).despawn();
+    for slot in [RigSlot::ShakeActuators, RigSlot::ShakeTable] {
+        if let Some((e, _, _)) = find(slot) {
+            commands.entity(e).despawn();
+        }
     }
     if let Some(setup) = rigs.setup.shake {
         spawn_rig(
@@ -332,8 +359,24 @@ pub(crate) fn call(
             &models,
             RigSlot::ShakeActuators,
             Transform::IDENTITY,
-            || actuators(setup.platform),
+            &hero_fits(setup.platform),
+            |hero| actuators(setup.platform, hero),
         );
+        // The hero platform replaces the table insert's own (hidden in
+        // `drive`); without the model there is nothing to add.
+        if models.has(RigSlot::ShakeTable) {
+            spawn_rig(
+                &mut commands,
+                &mut meshes,
+                &mut maker,
+                &mut cache,
+                &models,
+                RigSlot::ShakeTable,
+                Transform::IDENTITY,
+                &[ShakeTableSpec::fit(setup.platform)],
+                |_| RigModel::default(),
+            );
+        }
     }
 }
 
@@ -374,25 +417,39 @@ fn spawn_trace(
 /// Moves the platform, everything that rides it, and the actuator rods.
 pub(crate) fn drive(
     rigs: Res<LabRigs>,
+    models: Res<RigModels>,
     owners: Query<&Rig>,
-    mut platform: Query<&mut Transform, (With<ShakePlatform>, Without<Role>)>,
-    mut parts: Query<(&Role, &Rest, &Owner, &mut Transform)>,
+    parents: Query<&ChildOf>,
+    globals: Query<&GlobalTransform>,
+    mut platform: Query<(&mut Transform, &mut Visibility), (With<ShakePlatform>, Without<Role>)>,
+    mut parts: Query<(Entity, &Role, &Rest, &Owner, Option<&Axis>, &mut Transform)>,
 ) {
     let offset = rigs.live.table.map_or(Vec3::ZERO, |t| t.displacement);
-    for mut at in &mut platform {
+    // The hero platform stands in for the table insert's.
+    let hero = models.has(RigSlot::ShakeTable) && rigs.setup.shake.is_some();
+    for (mut at, mut vis) in &mut platform {
         if at.translation != offset {
             at.translation = offset;
         }
+        vis.set_if_neq(if hero {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        });
     }
-    for (role, rest, owner, mut at) in &mut parts {
-        if owners.get(owner.0).map(|r| r.0) != Ok(RigSlot::ShakeActuators) {
+    for (e, role, rest, owner, axis, mut at) in &mut parts {
+        if !matches!(
+            owners.get(owner.0).map(|r| r.0),
+            Ok(RigSlot::ShakeActuators | RigSlot::ShakeTable)
+        ) {
             continue;
         }
+        let local = in_parent(&parents, &globals, e, offset);
         let to = match role {
-            Role::Platform => rest.0.translation + offset,
+            Role::Platform => rest.0.translation + local,
             Role::Rod(_) => {
-                let axis = rest.0.rotation * Vec3::X;
-                rest.0.translation + axis * offset.dot(axis)
+                let axis = rest.0.rotation * axis.map_or(Vec3::X, |a| a.0);
+                rest.0.translation + axis * local.dot(axis)
             }
             _ => continue,
         };
@@ -466,7 +523,7 @@ mod tests {
     fn actuators_fit_on_the_surround() {
         let size = ShakeSetup::default().platform;
         let half = PlayTable::default().size * 0.5;
-        let m = actuators(size);
+        let m = actuators(size, false);
         assert_eq!(
             m.parts
                 .iter()
@@ -486,7 +543,7 @@ mod tests {
 
     #[test]
     fn rods_point_at_the_platform() {
-        for part in actuators(8.0).parts {
+        for part in actuators(8.0, false).parts {
             if let Some(Role::Rod(k)) = part.role {
                 let (axis, _) = actuator_axes()[k as usize];
                 assert!((part.at.rotation * Vec3::X).distance(axis) < 1e-5);

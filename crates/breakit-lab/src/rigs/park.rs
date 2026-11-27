@@ -22,14 +22,27 @@ pub fn fan_pose() -> Transform {
     Transform::from_xyz(-28.0, 0.0, -32.8).with_rotation(yaw_to(Vec3::Z))
 }
 
+/// Where the hero fan wall parks in a hall drawn `scale` times larger: its
+/// back against the far side of the bay, facing the table.
+pub fn hero_fan_pose(scale: f32) -> Transform {
+    use super::hero::FanSpec;
+    let back = (FanSpec::BACK + FanSpec::OUTLET) * scale;
+    Transform::from_xyz(
+        (BAY.0.x + BAY.1.x) * 0.5 - FanSpec::OFF_CENTRE * scale,
+        0.0,
+        BAY.0.y + 0.8 + back,
+    )
+    .with_rotation(yaw_to(Vec3::Z))
+}
+
 /// Where the instrument cart parks.
 pub fn cart_pose() -> Transform {
-    Transform::from_xyz(-21.5, 0.0, -25.5).with_rotation(Quat::from_rotation_y(0.5))
+    Transform::from_xyz(-21.5, 0.0, -22.5).with_rotation(Quat::from_rotation_y(0.5))
 }
 
 /// Middle of the paddle's trolley, world x and z, and its top above the
 /// floor.
-const TROLLEY: (Vec2, f32) = (Vec2::new(-37.0, -26.0), 1.6);
+const TROLLEY: (Vec2, f32) = (Vec2::new(-37.0, -24.0), 1.6);
 
 /// Where the paddle rests on its trolley: turned across the bay, the foot
 /// of its plate on the trolley top.
@@ -215,8 +228,8 @@ mod tests {
     /// The patch of floor the hall keeps free of dressing around the table
     /// (see `table_area_is_clear_of_dressing`), world units.
     fn clear_patch() -> Vec2 {
-        let s = LabSettings::default();
-        PlayTable::default().size * 0.5 + Vec2::splat(1.5 * s.model_scale)
+        // 30 world units round the table, whatever the hall's scale.
+        PlayTable::default().size * 0.5 + Vec2::splat(30.0)
     }
 
     #[test]

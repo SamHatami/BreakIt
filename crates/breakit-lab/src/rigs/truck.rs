@@ -8,6 +8,7 @@
 
 use bevy::prelude::*;
 
+use super::hero::TruckSpec;
 use super::{
     spawn_rig, LabRigs, Owner, Part, Rest, RigClock, RigModel, RigModels, RigSlot, Role,
     VehicleDrive,
@@ -476,6 +477,38 @@ pub(crate) struct Truck {
     width: f32,
     /// Distance rolled, world units.
     rolled: f32,
+    /// The hero model shown and the scale it is drawn at.
+    hero: Option<(TruckSpec, f32)>,
+}
+
+/// The sprung body's pose relative to its rest for the bounce at the
+/// front and rear axles, `base` apart: it rides up with the front and
+/// pitches by the difference.
+fn body_motion(front: f32, rear: f32, base: f32) -> Transform {
+    let pitch = -((rear - front) / base.max(1e-3)).clamp(-0.5, 0.5).asin();
+    Transform::from_translation(Vec3::Y * front).with_rotation(Quat::from_rotation_z(pitch))
+}
+
+/// Height of the deck under a point `back` behind the front axle, from
+/// the wheel contacts in the vehicle's frame (front first).
+fn deck_height(contacts: &[Vec3], back: f32) -> f32 {
+    let x = -back;
+    for pair in contacts.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        if x <= a.x && x >= b.x && a.x - b.x > 1e-4 {
+            return a.y + (b.y - a.y) * (a.x - x) / (a.x - b.x);
+        }
+    }
+    match (contacts.first(), contacts.last()) {
+        (Some(first), Some(last)) => {
+            if x > first.x {
+                first.y
+            } else {
+                last.y
+            }
+        }
+        _ => 0.0,
+    }
 }
 
 /// Axle offsets behind the front axle, from the wheel contacts.
@@ -533,15 +566,30 @@ pub(crate) fn drive(
         let kind = VehicleKind::from_name(&v.name);
         let axles = axle_offsets(v);
         let width = DEFAULT_WIDTH;
+        let slot = RigSlot::Truck(kind);
+        let hero = TruckSpec::of(kind)
+            .filter(|_| models.has(slot))
+            .map(|spec| {
+                let wheelbase = axles.last().copied().unwrap_or(0.0);
+                (spec, spec.scale_for(wheelbase, width))
+            });
+        let fits: Vec<Transform> = hero.iter().map(|(spec, s)| spec.fit(*s)).collect();
         let root = spawn_rig(
             &mut commands,
             &mut meshes,
             &mut maker,
             &mut cache,
             &models,
-            RigSlot::Truck(kind),
+            slot,
             pose(v.wheels[0].contact, v.forward),
-            || model(kind, &axles, width),
+            &fits,
+            |hero| {
+                if hero {
+                    RigModel::default()
+                } else {
+                    model(kind, &axles, width)
+                }
+            },
         );
         commands.entity(root).insert(Truck {
             index: i,
@@ -549,6 +597,7 @@ pub(crate) fn drive(
             axles,
             width,
             rolled: 0.0,
+            hero,
         });
     }
 
@@ -559,6 +608,45 @@ pub(crate) fn drive(
         let Some(v) = live.get(truck.index) else {
             continue;
         };
+        let front = v.wheels.first().map_or(0.0, |w| w.bounce);
+        let rear = v.wheels.last().map_or(0.0, |w| w.bounce);
+        let base = truck.axles.last().copied().unwrap_or(0.0);
+        let in_vehicle = |p: Vec3| root.rotation.inverse() * (p - root.translation);
+        if let Some((spec, scale)) = truck.hero {
+            // The model's wheels are children of its chassis, which rides
+            // the bounce: work out where each has to be in the chassis'
+            // frame to stand on the deck.
+            let fit = spec.fit(scale);
+            let motion = body_motion(front / scale, rear / scale, base / scale);
+            match *role {
+                Role::Body => {
+                    at.translation = rest.0.translation + motion.translation;
+                    at.rotation = rest.0.rotation * motion.rotation;
+                }
+                Role::Wheel(n) => {
+                    let n = n as usize;
+                    let r = spec.radius * scale;
+                    let contacts: Vec<Vec3> =
+                        v.wheels.iter().map(|w| in_vehicle(w.contact)).collect();
+                    // The end axles stand on the first and last load; one
+                    // between keeps its place on the model.
+                    let back = if n + 1 == spec.axles.len() {
+                        base
+                    } else {
+                        spec.offset(n, scale)
+                    };
+                    let on_deck = Vec3::new(-back, deck_height(&contacts, back) + r, 0.0);
+                    let mut in_model = (on_deck - fit.translation) / scale;
+                    in_model.z = rest.0.translation.z;
+                    at.translation = motion.rotation.inverse() * (in_model - motion.translation);
+                    at.translation.z = rest.0.translation.z;
+                    at.rotation =
+                        motion.rotation.inverse() * Quat::from_rotation_z(-truck.rolled / r);
+                }
+                _ => {}
+            }
+            continue;
+        }
         let r = wheel_radius(truck.width);
         match *role {
             Role::Wheel(n) => {
@@ -572,12 +660,9 @@ pub(crate) fn drive(
                 at.rotation = Quat::from_rotation_z(-truck.rolled / r);
             }
             Role::Body | Role::BrakeLight => {
-                let front = v.wheels.first().map_or(0.0, |w| w.bounce);
-                let rear = v.wheels.last().map_or(0.0, |w| w.bounce);
-                let base = truck.axles.last().copied().unwrap_or(0.0).max(1e-3);
-                let pitch = -((rear - front) / base).clamp(-0.5, 0.5).asin();
-                at.translation = rest.0.translation + Vec3::Y * front;
-                at.rotation = rest.0.rotation * Quat::from_rotation_z(pitch);
+                let motion = body_motion(front, rear, base);
+                at.translation = rest.0.translation + motion.translation;
+                at.rotation = rest.0.rotation * motion.rotation;
                 if *role == Role::BrakeLight {
                     vis.set_if_neq(if v.braking {
                         Visibility::Inherited

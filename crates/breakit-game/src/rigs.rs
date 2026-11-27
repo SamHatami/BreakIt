@@ -9,7 +9,7 @@ use breakit_lab::rigs::{
     FanSetup, FlumeDrive, PaddleSetup, RigLive, RigSetup, ShakeSetup, TableDrive, VehicleDrive,
     WheelDrive, WindDrive,
 };
-use breakit_lab::{LabRigs, RigModels, RigSet};
+use breakit_lab::{LabRigs, RigSet};
 use breakit_scenario as bs;
 use breakit_scenario::Binding;
 
@@ -25,7 +25,7 @@ pub struct RigsPlugin;
 
 impl Plugin for RigsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, load_hero_models).add_systems(
+        app.add_systems(
             Update,
             (call_rigs, drive_rigs)
                 .chain()
@@ -113,12 +113,6 @@ pub fn to_lab(state: &RigState, time: f32) -> RigLive {
             })
             .collect(),
     }
-}
-
-/// Hero models in `assets/props/` replace the procedural rigs they are
-/// named for (see `docs/rigs.md`).
-fn load_hero_models(mut commands: Commands, assets: Res<AssetServer>) {
-    commands.insert_resource(RigModels::from_folder(&assets, "props"));
 }
 
 fn call_rigs(
