@@ -161,8 +161,10 @@ fn capture_script(
                 let a = design.add_node(Vec3::new(-1.5, 2.5, 0.0));
                 let b = design.add_node(Vec3::new(1.5, 2.5, 0.0));
                 design.add_beam(a, b, chord);
+            } else {
+                build_truss(&mut design, chord, web);
             }
-            tool.selected_beam = (!faulty()).then(|| design.beams.len() - 1);
+            tool.selected_beam = design.beams.len().checked_sub(1).filter(|_| !faulty());
             advance(&mut s);
         }
         5 if waited >= 40 => {
