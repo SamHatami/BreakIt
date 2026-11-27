@@ -23,6 +23,7 @@ use breakit_water_render::{LiveWater, WaterLook, WaterQuality, WaterRenderPlugin
 
 use crate::analysis::{BreakitSet, Simulation};
 use crate::flow::Screen;
+use crate::scenario::Sheets;
 
 pub struct WaterPlugin;
 
@@ -136,8 +137,10 @@ fn water_quality(quality: LabQuality) -> WaterQuality {
 }
 
 /// The table's water at rest, or as the water case of a test wants it.
-fn build_water(basin: &TableWater, case: Option<&Water>, dx: f64) -> LiveWater {
-    let level = case.map_or(basin.level as f64, |w| w.still_level(0.0));
+/// `rest` is the still level the sheet's water case starts from, so the
+/// water stands where the test will have it while the player builds.
+fn build_water(basin: &TableWater, case: Option<&Water>, rest: Option<f64>, dx: f64) -> LiveWater {
+    let level = case.map_or(rest.unwrap_or(basin.level as f64), |w| w.still_level(0.0));
     // A current has to leave at the far end; still water in a closed
     // flume stays put.
     let flowing = case.is_some_and(|w| w.current.norm() > 0.0);
@@ -169,7 +172,8 @@ fn sync_water(
     mut look: ResMut<WaterLook>,
     backend: Res<WaterBackend>,
     mut gpu: ResMut<WaterGpu>,
-    mut built_for: Local<Option<(LabQuality, WaterBackend)>>,
+    sheets: Res<Sheets>,
+    mut built_for: Local<Option<(LabQuality, WaterBackend, Option<u64>)>>,
 ) {
     let want = water_quality(lab.quality).look();
     if *look != want {
@@ -184,7 +188,8 @@ fn sync_water(
         return;
     };
     let dx = cell_size(lab.quality, *backend);
-    let built = Some((lab.quality, *backend));
+    let rest = sheet_level(&sheets);
+    let built = Some((lab.quality, *backend, rest.map(f64::to_bits)));
     // A test has just started: set the water up for its water case.
     let starting = sim.as_ref().filter(|s| s.is_added() || link.is_none());
     if let Some(run) = starting.and_then(|s| s.run()) {
@@ -196,7 +201,7 @@ fn sync_water(
             }
         });
         if let Some((index, water)) = case {
-            commands.insert_resource(build_water(&basin, Some(water), dx));
+            commands.insert_resource(build_water(&basin, Some(water), rest, dx));
             commands.insert_resource(WaterLink {
                 case: index,
                 geometry: Geometry::new(run.structure()),
@@ -210,7 +215,7 @@ fn sync_water(
     // running test: that would reset its water.
     let stale = *built_for != built && sim.is_none();
     if live.is_none() || table.is_changed() || stale {
-        commands.insert_resource(build_water(&basin, None, dx));
+        commands.insert_resource(build_water(&basin, None, rest, dx));
         commands.remove_resource::<WaterLink>();
         gpu.0 = None;
         *built_for = built;
@@ -224,6 +229,7 @@ fn still_water(
     lab: Res<LabSettings>,
     link: Option<Res<WaterLink>>,
     backend: Res<WaterBackend>,
+    sheets: Res<Sheets>,
     mut gpu: ResMut<WaterGpu>,
 ) {
     if link.is_none() {
@@ -232,9 +238,17 @@ fn still_water(
     commands.remove_resource::<WaterLink>();
     if let Some(basin) = simulated(&table) {
         let dx = cell_size(lab.quality, *backend);
-        commands.insert_resource(build_water(&basin, None, dx));
+        commands.insert_resource(build_water(&basin, None, sheet_level(&sheets), dx));
         gpu.0 = None;
     }
+}
+
+/// The still water level of the current sheet's water case, if it has one.
+fn sheet_level(sheets: &Sheets) -> Option<f64> {
+    sheets.current().def.events.iter().find_map(|e| match e {
+        breakit_scenario::Event::Water { level, .. } => Some(*level),
+        _ => None,
+    })
 }
 
 /// What a physics step needs to step the water with it.

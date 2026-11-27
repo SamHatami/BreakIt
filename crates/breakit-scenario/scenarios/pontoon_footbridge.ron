@@ -9,7 +9,13 @@
     sheet: "F-02",
     group: "Water",
     title: "Floating footbridge",
-    brief: "Carry a footpath 6.3 m across the flume to the far bank, which can take no load: the bridge has to float. It is moored by two pins on the near bank at x = ±0.75 m. A crowd of 2 kN per metre walks on while a current runs and 0.4 m waves roll along the flume (+x). Still water is 1 m below the path. Pontoons (large: about 200 kg of spare lift per metre fully under) float; any sealed tube does. The path needs a node at least every 1.5 m and must not sink more than 30 cm.",
+    brief: "Build a footbridge that floats across the wave channel. Only the near bank can hold it; the far bank is too soft to carry anything.",
+    steps: [
+        "The path is the dashed line across the water. Put nodes along it no more than 1.5 m apart and join them.",
+        "Tie the near end to the two pin foundations on the bank. Nothing else holds it: the rest has to float.",
+        "Pontoons are sealed floats: put them in the water under the path. A large one lifts about 200 kg per metre.",
+        "A crowd walks on while waves roll down the channel. The path may not sink more than 30 cm.",
+    ],
     limits: (
         volume: (min: (-2.5, -2.0, -3.6), max: (2.5, 0.6, 2.9)),
         budget: Some(300000.0),

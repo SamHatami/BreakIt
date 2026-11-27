@@ -23,6 +23,7 @@ mod release;
 mod render;
 mod rigs;
 mod scenario;
+mod site;
 mod sound;
 mod testrun;
 mod ui;
@@ -75,6 +76,7 @@ fn main() {
             sound::SoundPlugin,
             water::WaterPlugin,
         ))
+        .add_plugins(site::SitePlugin)
         .add_systems(Update, cycle_table.run_if(in_state(flow::Screen::Build)))
         .run();
 }

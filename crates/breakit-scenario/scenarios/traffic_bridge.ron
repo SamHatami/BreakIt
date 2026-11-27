@@ -7,7 +7,13 @@
     sheet: "B-01",
     group: "Bridges",
     title: "Culvert road bridge",
-    brief: "Carry a road 6 m across a culvert. Two delivery trucks cross first, then a loaded tipper. The bearings on each bank are pins: they hold the bridge in place but cannot stop it rotating. The deck needs a node at least every 1.5 m for the wheels.",
+    brief: "Build a road bridge over the gap between the two banks. Trucks drive across it: two delivery trucks first, then a heavy tipper.",
+    steps: [
+        "The road is the dashed line across the gap. Put nodes along it and join them: the road surface is laid on those nodes, and the wheels push down on them.",
+        "Keep road nodes no more than 1.5 m apart, from bank to bank, or a wheel drops through the gap.",
+        "Rest the bridge on the six foundations at the edges of the banks. They are pins: they hold the bridge in place but let it turn.",
+        "Anything else is up to you, inside the orange box: an arch below the road, or a truss each side of it. The trucks are about 2 m wide, so keep members above the road out of its middle.",
+    ],
     limits: (
         volume: (min: (-3.5, -2.0, -1.5), max: (3.5, 3.0, 1.5)),
         budget: Some(54000.0),

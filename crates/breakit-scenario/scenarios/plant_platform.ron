@@ -9,7 +9,12 @@
     sheet: "P-01",
     group: "Equipment",
     title: "Pump platform on the shake table",
-    brief: "Hold a 2.5 t pump skid and a 400 kg control cabinet on a platform 3 m up while the table shakes at 0.3 g. The pump only stands on its four feet: shake the deck too hard and it slides or tips off, and the test fails. Its feet need nodes at x = ±1 m, z = ±0.5 m; the cabinet's at x = ±0.5 m, z = 0.5 and 1.5 m. Four fixed footings at the corners of a 3 m square.",
+    brief: "Hold a 2.5 t pump and its 400 kg control cabinet on a platform 3 m up while the shake table shakes.",
+    steps: [
+        "Start from the four fixed foundations.",
+        "Carry the orange foot marks 3 m up: four for the pump, four for the cabinet.",
+        "The pump only rests on its feet: shake the platform too hard and it slides or tips off, and the test fails.",
+    ],
     limits: (
         volume: (min: (-2.0, 0.0, -2.0), max: (2.0, 3.5, 2.0)),
         budget: Some(150000.0),

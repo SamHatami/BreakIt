@@ -263,6 +263,12 @@ impl TestRun {
     pub fn phase(&self) -> Phase {
         self.phase
     }
+    /// The equipment on the structure, per payload in scenario order:
+    /// where its feet are and whether it is still on.
+    pub fn equipment(&self) -> &[Equipment] {
+        &self.equipment
+    }
+
     pub fn measured(&self) -> &Measured {
         &self.measured
     }

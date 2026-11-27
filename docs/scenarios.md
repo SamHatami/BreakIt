@@ -80,4 +80,17 @@ Q-01 is easy for a braced tower; the budget is what bites. Make it harder with a
 
 ## In the game
 
-The game's screens play these scenarios: see `docs/game-ui.md`. Build shows the blocking problems and RUN TEST only starts when there are none; the test screen steps a `TestRun` and the report screen shows its `Report`. Build volume, anchors, lane, payloads and vehicles are gizmos (`breakit-game/src/guides.rs`) until the play table draws them. Anchor capacity (pull-out, sliding) waits for foundation components.
+The game's screens play these scenarios: see `docs/game-ui.md`. Build shows the blocking problems and RUN TEST only starts when there are none; the test screen steps a `TestRun` and the report screen shows its `Report`. Anchor capacity (pull-out, sliding) waits for foundation components.
+
+### Briefs and the site (after Sam's first playtest, 2026-11-27)
+
+Sam could not tell what to build from the briefs ("1.6 m something", coordinates, "flume"), did not know what the yellow orbs were, and found no road for the trucks. So:
+
+- A brief is one or two plain sentences of story; `steps` lists what to build, in the order a player does it, in words that point at what is drawn ("the dashed road line", "the orange foot marks", "the foundations"). No coordinates and no lab jargon: say "wave channel", not "flume". The brief screen numbers the steps.
+- `breakit-game/src/site.rs` draws the site as things, with a short caption on each while building:
+  - foundations: a concrete block per anchor, an orange pin across it for a pin, an orange plate for a fixed one ("3 foundations (pins): support here");
+  - the road (or footpath, when no trucks drive): approach roads on the banks, and a road surface laid on the deck nodes the player builds, following them in the test and dropping out where the members under it break. While building, the lane's strip shows where nodes count as road nodes, with red stretches where they are more than `max_gap` apart;
+  - equipment: each payload as a box of its `size` on its feet (see-through while building, solid in the test, falling when the run loses it). Its feet are the sheet's locked nodes, one per foot, so the player sees exactly what to carry.
+- `guides.rs` keeps the build-area box and the vehicles' outlines.
+- Each register tab sits on a table that has its foundations: shaking sheets (Towers, Equipment) on the shake table, wind sheets on open ground in front of the fan wall, bridges on the ravine. A test checks every foundation stands on solid table.
+- The violation messages name what is drawn ("the red stretch of the road", "its orange foot marks").

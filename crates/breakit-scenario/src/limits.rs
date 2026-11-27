@@ -99,13 +99,16 @@ impl fmt::Display for Violation {
                 "Member {member} is {}, which this test does not allow.",
                 material.label()
             ),
-            Violation::NoDeck => write!(f, "Nothing carries the deck."),
+            Violation::NoDeck => write!(
+                f,
+                "Nothing carries the road yet: put nodes on the dashed road line and join them."
+            ),
             Violation::DeckGap { at, gap, max } => write!(
                 f,
-                "The deck has a {gap:.1} m gap at {at:.1} m along it; wheels need a node every {max:.1} m."
+                "The road has a {gap:.1} m stretch with no node under it (red, {at:.1} m from its start). Add a node there: road nodes can be at most {max:.1} m apart."
             ),
             Violation::PayloadUnattached { payload } => {
-                write!(f, "Nothing holds the {payload}: each of its feet needs a node of its own.")
+                write!(f, "Nothing holds the {payload}: join each of its orange foot marks to the structure.")
             }
         }
     }
