@@ -353,8 +353,8 @@ pub fn unstable(d: &Design) -> Option<Problem> {
         );
     }
     let mut held = vec![false; n];
-    for i in 0..n {
-        if d.supports[i].is_some() {
+    for (i, s) in d.supports.iter().enumerate() {
+        if s.is_some() {
             let r = find(&mut parent, i);
             held[r] = true;
         }

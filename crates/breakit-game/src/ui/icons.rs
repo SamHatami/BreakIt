@@ -76,7 +76,7 @@ pub fn ensure_icons(
     }
 }
 
-/// How much of the icon a part fills, 0.5 to 1: its size on a log scale
+/// How much of the icon a part fills, 0.65 to 1: its size on a log scale
 /// between the smallest and largest catalog part of the same material,
 /// so a tie rod reads thinner than a pontoon without vanishing.
 fn fill(k: BeamKind) -> f32 {
@@ -91,7 +91,7 @@ fn fill(k: BeamKind) -> f32 {
     if hi <= lo * 1.01 {
         return 1.0;
     }
-    0.5 + 0.5 * ((r / lo).ln() / (hi / lo).ln()).clamp(0.0, 1.0)
+    0.65 + 0.35 * ((r / lo).ln() / (hi / lo).ln()).clamp(0.0, 1.0)
 }
 
 /// Base colour per material, linear RGB.
@@ -165,7 +165,7 @@ pub fn render_icon(profile: Profile, kind: MaterialKind, size: u32, fill: f32) -
     let back = (view * Vec3::new(-0.6, 0.1, 0.4)).normalize();
     let base = base_colour(kind);
     let n = size * SS;
-    let scale = fill * 0.47 * n as f32 / (1.75 * r);
+    let scale = fill * 0.5 * n as f32 / (1.6 * r);
     let centre = Vec2::splat(n as f32 * 0.5);
     let mut depth = vec![f32::NEG_INFINITY; (n * n) as usize];
     let mut colour = vec![Vec4::ZERO; (n * n) as usize];

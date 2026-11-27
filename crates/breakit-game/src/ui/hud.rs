@@ -33,7 +33,7 @@ pub fn spawn_build_hud(mut commands: Commands) {
             l.spawn(view(View::BuildFooter, layer()));
             // Requirements and the selected member, top right.
             l.spawn(Node {
-                width: Val::Px(370.0),
+                width: Val::Px(350.0),
                 row_gap: Val::Px(12.0),
                 ..at(None, Some(EDGE), Some(EDGE), None)
             })
@@ -483,15 +483,6 @@ pub fn build_readouts(p: &mut ChildSpawnerCommands, v: &GameView) {
                 None => c.spawn(text("-", TextRole::Body, Swatch::Muted)),
             };
             stress_legend(c);
-        });
-        strip_item(b, "Static check", |c| {
-            c.spawn(match &v.state.error {
-                Some(_) => text("unstable, see list", TextRole::Body, Swatch::Fail),
-                None if v.design.beams.is_empty() => {
-                    text("nothing built", TextRole::Body, Swatch::Muted)
-                }
-                None => text("holds its loads", TextRole::Body, Swatch::Ink),
-            });
         });
     });
 }
