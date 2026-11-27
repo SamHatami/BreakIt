@@ -4,7 +4,7 @@
 //! hall. The structure on the table is full size as far as the solver is
 //! concerned (SI units, a 6 m bridge is 6 world units), and the hall is
 //! drawn [`LabSettings::model_scale`] times larger, so the table reads as a
-//! 1:20 model in a real hall. Depth of field with a sensor scaled the same
+//! 1:10 model in a real hall. Depth of field with a sensor scaled the same
 //! way gives the out-of-focus background of a photo of a real model.
 //!
 //! Everything is generated in code: no assets to author or re-export.
@@ -38,9 +38,13 @@ pub use scenery::{Anchor, Scenery};
 pub use surface::{LabMaterial, LabSurface, LabWater, SurfaceKind};
 pub use table::{Flat, Flume, PlayTable, Ravine, ShakeTable, TableInsert, TableTop, TableWater};
 
+/// Free floor beyond the table's edge on every side, world units. See
+/// [`LabSettings::clear_floor_half`].
+pub const CLEAR_FLOOR_MARGIN: f32 = 30.0;
+
 #[derive(Resource, Clone, Debug)]
 pub struct LabSettings {
-    /// World units per lab metre: 20 means the table is a 1:20 model.
+    /// World units per lab metre: 10 means the table is a 1:10 model.
     pub model_scale: f32,
     /// Where the table stands in the hall (lab metres, x and z).
     pub table_at: Vec2,
@@ -64,7 +68,7 @@ pub struct LabSettings {
 impl Default for LabSettings {
     fn default() -> Self {
         Self {
-            model_scale: 20.0,
+            model_scale: 10.0,
             table_at: Vec2::new(4.0, 5.0),
             table_height: 0.86,
             hall: HallSpec::default(),
@@ -102,6 +106,15 @@ impl LabSettings {
     /// The hall floor, in world units.
     pub fn floor_y(&self) -> f32 {
         -self.table_height * self.model_scale
+    }
+
+    /// Half size (x, z) of the patch of hall floor round a table of
+    /// `table_size` that the dressing keeps clear, world units, centred on
+    /// the table. The rig park and the parked rigs stand in it; they are
+    /// sized by the structure, so the margin is in world units and does
+    /// not change with `model_scale`.
+    pub fn clear_floor_half(&self, table_size: Vec2) -> Vec2 {
+        table_size * 0.5 + Vec2::splat(CLEAR_FLOOR_MARGIN)
     }
 }
 
@@ -175,6 +188,12 @@ impl Plugin for LabPlugin {
                     .chain(),
             ),
         );
+    }
+
+    fn finish(&self, app: &mut App) {
+        // After every plugin is built, so Bevy's own copy is in place to
+        // be replaced, and before the render pipelines load it.
+        look::override_dof_shader(app);
     }
 }
 
@@ -357,8 +376,8 @@ mod tests {
         let s = LabSettings::default();
         let hall = build_hall(&s);
         let t = PlayTable::default();
-        // Table footprint in lab metres, plus walking room.
-        let half = t.size * 0.5 / s.model_scale + Vec2::splat(1.5);
+        // The clear floor round the table, in lab metres.
+        let half = s.clear_floor_half(t.size) / s.model_scale;
         for (mat, buf) in &hall.bufs {
             if matches!(
                 mat,
@@ -395,6 +414,6 @@ mod tests {
     fn world_origin_is_the_table_top() {
         let s = LabSettings::default();
         assert_eq!(s.lab_to_world(s.lab_origin()), Vec3::ZERO);
-        assert!((s.floor_y() + 17.2).abs() < 1e-4);
+        assert!((s.floor_y() + 8.6).abs() < 1e-4);
     }
 }

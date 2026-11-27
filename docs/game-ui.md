@@ -4,10 +4,11 @@ The concept canvas (wireframes, high-fidelity screens, flows, input map,
 stress colours): https://claude.ai/artifact/Mr17fNnWSXoMxXciR6Yy65
 
 The look is "Hairline", picked by Sam from three mock-ups
-(`/mnt/project-files/ui-directions/`): no panels, type straight on the
-scene over soft top and bottom gradients, light weights for values, one
-warm accent (active tool, primary action, playhead). The 3D lab stays the
-hero. Everything visual still goes through one theme layer.
+(`/mnt/project-files/ui-directions/`): light weights for values, one warm
+accent (active tool, primary action, playhead). The 3D lab stays the
+hero. After the first playtest Sam found type straight on the scene too
+hard to read, so every group of read-outs now sits on a frosted backdrop
+(below). Everything visual still goes through one theme layer.
 
 ## Loop
 
@@ -95,8 +96,49 @@ The stress ramp in the UI (blue, amber, orange, red at 50/80/100%) is the
 colour-blind-safe one from the canvas. The member shader in
 `breakit-render` still uses its own ramp, so the two differ for now.
 
+## Frosted backdrops
+
+`ui/frost.rs`. A render pass on the game camera (`Core3d`, after
+post-processing, before the UI pass) copies the finished frame into a
+quarter-size texture and blurs it: a 4x box downsample, then a separable
+Gaussian (`frost_blur.wesl`). `widgets::panel` and `widgets::instrument`
+give their node `MaterialNode<FrostMaterial>`; `frost.wesl` samples the
+blurred frame at the panel's screen position, lays the theme's
+`backdrop` tint over it, cuts the node's rounded corners and draws a
+hairline edge (`backdrop_edge`). The material and both textures have
+fixed handles, so panels need no lookup and the render world finds the
+textures the same way. The scene itself is not blurred. Anything that
+shows text over the scene should be a `panel`.
+
+## Build screen layout
+
+- Left: the parts browser. Material tabs (keys 1-4), then the parts of
+  that material as cards in two columns: a thumbnail, the name, the
+  standard size and the price per metre. The thumbnails (`ui/icons.rs`)
+  are rendered once on the CPU from each part's `Profile`, a short length
+  seen three-quarters on with its end cut showing, sized on a log scale
+  within the material so a tie rod reads thinner than a pontoon.
+- Top, next to it: cost against the budget, mass, worst member (with the
+  utilisation colours) and the static check.
+- Right: the sheet (what blocks the test, then the criteria) and, under
+  it, the selected member.
+
+## Problems
+
+`ui/problems.rs` turns what blocks the test into sentences the player
+can act on: a headline, where and by how much, and the fix. It reads the
+scenario's `Violation`s and adds the numbers they leave out (how far
+outside the build area, the nearest foundation, the priciest members,
+where along the road a gap is), and replaces the static solver's bare
+"unstable" with the cause it finds in the design: a node on no beam, a
+piece that reaches no support, or a frame that can fold. The sheet lists
+the first three, numbered; the same numbers ring the offending nodes,
+members and points in the scene (`WorldTag::{Node, Beam, Point}`).
+
 ## Headless check
 
 `BREAKIT_CAPTURE=<dir>` walks the whole loop on sheet B-01 and saves
 `1-register.png` to `6-lab.png`. `BREAKIT_TRUSS=weak` lays a bare
-timber plank instead of a truss, to see the failure path.
+timber plank instead of a truss, to see the failure path;
+`BREAKIT_TRUSS=faulty` leaves problems that block the test and stops
+after `3-build.png`, to see the problem list and markers.
