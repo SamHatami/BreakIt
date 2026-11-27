@@ -1,1384 +1,1402 @@
-//! Structure sounds: stress beds, damage onsets, breaks and debris impacts.
+//! Structure sounds from the structure's physics: members straining,
+//! damage, breaks and loose pieces landing.
 //!
-//! Everything here is modal synthesis driven by stochastic excitation:
+//! Nothing here is a patch tuned to sound like something. Every sound is a
+//! score of **force events** played into the **modes of the bodies
+//! involved** (see [`crate::body`] and [`crate::modal`]). What differs
+//! between a steel rupture and a timber splinter is the physics of how the
+//! force is let go:
 //!
-//! * a **body** is what rings: a bank of resonant modes (a steel tube's
-//!   bending modes, a timber member's broad wooden resonances, a concrete
-//!   member's heavily damped modes, a carbon laminate's stiff high-Q ones),
-//!   or a plain band filter for grit and fibres;
-//! * an **exciter** is what hits it: a single click (a crack front), a noise
-//!   burst (crushing, grinding), a stick-slip pulse train (creaks and groans:
-//!   friction that sticks, builds up and slips, again and again) or a
-//!   crackle (a Poisson shower of clicks whose rate and size decay, like
-//!   fibres or grains giving way one after another).
+//! * **Release.** A member carrying force that suddenly cannot: the force
+//!   steps to zero in the time the crack takes to cross the section. Both
+//!   new pieces spring back and ring from their static deflection. A
+//!   tension member dumps its energy into axial modes (a hard, pitched
+//!   bang); a bending failure into bending modes (lower, clangier).
+//! * **Micro-fracture** (acoustic emission). Cracks advance in jumps:
+//!   fibres, grains and laminate plies give way in avalanches whose
+//!   energies follow a power law, `P(E) ~ E^-β` with β about 1.4 for wood
+//!   under compression (Mäkinen et al. 2015), close to other brittle solids,
+//!   and whose aftershocks thin out by Omori's law, rate `~ t^-0.75`. Bigger
+//!   events last longer (duration scales with crack size, size with `E^⅓`),
+//!   so big cracks are low and small ones tick.
+//! * **Stick-slip.** Joints and crack faces under changing load stick,
+//!   build up force and slip. Each slip is a small impulse. At a steady
+//!   sliding speed slips come at a steady rate, which is the pitch of a
+//!   creak: it rises when the load changes faster.
+//! * **Contact.** A piece landing pushes on the floor for a Hertz contact
+//!   time, `τ = 2.87 (m² / (R E*² v))^⅕`: milliseconds for timber (dull
+//!   knock), a fraction of one for steel on concrete (bright clang).
 //!
-//! A sound is a few [`Layer`]s (exciter into body, with a start delay and a
-//! gain). Members under load get a [`StressVoice`] per material that spawns
-//! short layers at a rate that climbs steeply with load, so a structure is
-//! silent when relaxed, ticks and creaks as it is loaded and groans near
-//! capacity. Every random choice comes from the voice's seed, so repeated
-//! events vary but a given seed always sounds the same.
+//! Loudness follows energy: a voice's level is `(E / 1 kJ)^0.3`, between
+//! the physical square root and nothing at all, because a game cannot play
+//! the 60 dB between a creak and a girder snapping.
 
-use std::cell::RefCell;
-
-use crate::dsp::{AttackDecay, Brown, ModalBank, OnePole, Rng, Svf};
+use crate::body::{floor_modes, Body, Drive, Ends, ModeSpec};
+use crate::dsp::{OnePole, Rng};
+use crate::modal::{step_leak, Bank, GrainHit, Grains, Hit, ModalVoice, Pulses};
+use crate::timbre::{self, Timbre};
 use crate::{BoxVoice, BreakCause, DamageState, MaterialKind, Voice};
 
-/// Reference member masses (kg) the patches are tuned at.
-const REF_STEEL: f32 = 40.0;
-const REF_TIMBER: f32 = 30.0;
-const REF_CONCRETE: f32 = 300.0;
-const REF_COMPOSITE: f32 = 10.0;
+/// Modes per body in a break, an impact and a straining member, at full
+/// detail.
+const BREAK_MODES: usize = 28;
+const IMPACT_MODES: usize = 22;
+const STRAIN_MODES: usize = 18;
 
-fn reference(m: MaterialKind) -> f32 {
+/// A mode budget scaled by `detail` (0..1). The mixer lowers detail when
+/// many voices already sound: in a collapse nobody can tell 28 modes from
+/// 12, and the cost is all in the modes.
+fn budget(modes: usize, detail: f32) -> usize {
+    ((modes as f32 * detail.clamp(0.3, 1.0)) as usize).max(6)
+}
+
+/// Overall scale from unit-energy bank output to full scale.
+const OUTPUT: f32 = 0.8;
+
+/// Level of a voice for an event that releases `energy` joules.
+pub fn level(energy: f32) -> f32 {
+    (energy.max(0.0) / 1000.0).powf(0.3).clamp(0.0, 2.2)
+}
+
+/// Elastic energy per volume at the material's strength, J/m³: σ²/2E.
+fn energy_density(m: MaterialKind) -> f32 {
     match m {
-        MaterialKind::Steel => REF_STEEL,
-        MaterialKind::Timber => REF_TIMBER,
-        MaterialKind::Concrete => REF_CONCRETE,
-        MaterialKind::Composite => REF_COMPOSITE,
+        MaterialKind::Steel => 3.0e5,
+        MaterialKind::Timber => 2.6e4,
+        MaterialKind::Concrete => 1.4e4,
+        MaterialKind::Composite => 2.0e6,
     }
 }
 
-/// Output roll-off per material, Hz: metal and carbon stay bright,
-/// concrete is dull.
-fn air(m: MaterialKind) -> f32 {
-    match m {
-        MaterialKind::Steel => 12_000.0,
-        MaterialKind::Timber => 9_000.0,
-        MaterialKind::Concrete => 6_500.0,
-        MaterialKind::Composite => 12_000.0,
-    }
+/// Elastic energy a member holds at capacity, J.
+pub fn capacity_energy(body: &Body) -> f32 {
+    energy_density(body.material) * body.area * body.length
 }
 
-/// How a member's mass (relative to its material's reference) scales a
-/// sound: heavier is lower, longer and louder, all on a gentle log scale.
+/// How one material cracks at the small scale.
 #[derive(Clone, Copy, Debug)]
-struct Scale {
-    /// Frequency multiplier.
-    pitch: f32,
-    /// Duration multiplier.
-    len: f32,
-    /// Gain multiplier.
-    loud: f32,
+struct Micro {
+    /// Power-law exponent of event energies.
+    beta: f32,
+    /// Duration of the largest events, s (crack size over crack speed).
+    tau: f32,
+    /// Roll-off of the events' own sound, Hz.
+    cutoff: f32,
+    /// Level of the events' own sound against the ringing bodies.
+    direct: f32,
 }
 
-impl Scale {
-    fn of(material: MaterialKind, size: f32) -> Self {
-        let r = (size.max(0.01) / reference(material)).clamp(0.01, 100.0);
-        Self {
-            pitch: r.powf(-0.2).clamp(0.5, 2.0),
-            len: r.powf(0.2).clamp(0.6, 2.0),
-            loud: r.powf(0.12).clamp(0.6, 1.4),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Exciters and bodies
-
-enum Excite {
-    /// A single crack: a spike and a short noise tail.
-    Click { spike: f32, level: f32, k: f32 },
-    /// Enveloped noise, optionally low-passed.
-    Burst {
-        env: AttackDecay,
-        amp: f32,
-        lp: Option<OnePole>,
-    },
-    /// Stick-slip: slips at a gliding rate `f0 -> f1` over `dur` seconds.
-    Pulses {
-        phase: f32,
-        f0: f32,
-        f1: f32,
-        dur: f32,
-        t: f32,
-        amp: f32,
-        jitter: f32,
-        tail: f32,
-        k: f32,
-        /// How much each slip is a noise grain rather than a click.
-        noise: f32,
-    },
-    /// Poisson shower of short noise grains: rate rises over `rise`, then
-    /// decays with `rate_tau`; each grain is a burst of white noise that
-    /// decays in `k` per sample. Dense showers of these are what real
-    /// fracture recordings are made of: thousands of tiny broadband events.
-    Grains {
-        rate: f32,
-        rise: f32,
-        rate_tau: f32,
-        dur: f32,
-        t: f32,
-        amp: f32,
-        amp_tau: f32,
-        var: f32,
-        level: f32,
-        k: f32,
-    },
-    /// Poisson shower of clicks; rate and size decay with time constants.
-    #[allow(dead_code)]
-    Crackle {
-        rate: f32,
-        rate_tau: f32,
-        dur: f32,
-        t: f32,
-        amp: f32,
-        amp_tau: f32,
-        /// Exponent on the random click size: higher = more small clicks
-        /// between rare big ones.
-        var: f32,
-        tail: f32,
-        k: f32,
-    },
-}
-
-impl Excite {
-    #[inline]
-    fn next(&mut self, rng: &mut Rng, dt: f32) -> f32 {
-        match self {
-            Excite::Click { spike, level, k } => {
-                let x = *spike + *level * 0.15 * rng.bipolar();
-                *spike = 0.0;
-                *level *= *k;
-                x
-            }
-            Excite::Burst { env, amp, lp } => {
-                let n = rng.bipolar();
-                let n = match lp {
-                    Some(f) => f.lp(n) * 2.0,
-                    None => n,
-                };
-                n * env.next() * *amp
-            }
-            Excite::Pulses {
-                phase,
-                f0,
-                f1,
-                dur,
-                t,
-                amp,
-                jitter,
-                tail,
-                k,
-                noise,
-            } => {
-                let mut x = *tail * *noise * rng.bipolar();
-                // Flush to zero between events (long gaps would otherwise
-                // decay into slow subnormal floats).
-                *tail = if *tail > 1e-6 { *tail * *k } else { 0.0 };
-                if *t < *dur {
-                    let u = *t / *dur;
-                    let freq = *f0 + (*f1 - *f0) * u;
-                    // Fast swell, slower fade.
-                    let env = (u / 0.12).min(1.0) * ((1.0 - u) / 0.35).min(1.0);
-                    *phase += freq * dt * (1.0 + *jitter * rng.bipolar());
-                    if *phase >= 1.0 {
-                        *phase -= 1.0;
-                        let a = *amp * env * rng.range(0.4, 1.0);
-                        x += a * (1.0 - *noise).max(0.2);
-                        *tail = a;
-                    }
-                    *t += dt;
-                }
-                x
-            }
-            Excite::Grains {
-                rate,
-                rise,
-                rate_tau,
-                dur,
-                t,
-                amp,
-                amp_tau,
-                var,
-                level,
-                k,
-            } => {
-                let x = *level * rng.bipolar();
-                *level = if *level > 1e-6 { *level * *k } else { 0.0 };
-                if *t < *dur {
-                    let shape = (*t / *rise).min(1.0) * (-*t / *rate_tau).exp();
-                    if rng.chance(*rate * shape * dt) {
-                        let a = *amp * (-*t / *amp_tau).exp() * rng.unit().powf(*var);
-                        *level = level.max(a);
-                    }
-                    *t += dt;
-                }
-                x
-            }
-            Excite::Crackle {
-                rate,
-                rate_tau,
-                dur,
-                t,
-                amp,
-                amp_tau,
-                var,
-                tail,
-                k,
-            } => {
-                let mut x = *tail * 0.15 * rng.bipolar();
-                // Flush to zero between events (long gaps would otherwise
-                // decay into slow subnormal floats).
-                *tail = if *tail > 1e-6 { *tail * *k } else { 0.0 };
-                if *t < *dur {
-                    let r = *rate * (-*t / *rate_tau).exp();
-                    if rng.chance(r * dt) {
-                        let a = *amp * (-*t / *amp_tau).exp() * rng.unit().powf(*var);
-                        let a = if rng.chance(0.5) { a } else { -a };
-                        x += a;
-                        *tail = a.abs();
-                    }
-                    *t += dt;
-                }
-                x
-            }
-        }
-    }
-
-    fn done(&self) -> bool {
-        match self {
-            Excite::Click { level, .. } => *level < 1e-4,
-            Excite::Burst { env, .. } => env.done(),
-            Excite::Pulses { t, dur, tail, .. } => *t >= *dur && *tail < 1e-4,
-            Excite::Crackle { t, dur, tail, .. } => *t >= *dur && *tail < 1e-4,
-            Excite::Grains { t, dur, level, .. } => *t >= *dur && *level < 1e-4,
-        }
+fn micro(m: MaterialKind) -> Micro {
+    match m {
+        // Ductile tearing is nearly silent; what cracks is scale, welds
+        // and bolts.
+        MaterialKind::Steel => Micro {
+            beta: 1.8,
+            tau: 0.15e-3,
+            cutoff: 11_000.0,
+            direct: 0.5,
+        },
+        // Fibre bundles a millimetre or more across.
+        MaterialKind::Timber => Micro {
+            beta: 1.4,
+            tau: 0.35e-3,
+            cutoff: 9_000.0,
+            direct: 1.1,
+        },
+        // Aggregate-sized cracks and stones knocking together: hard, light
+        // and short.
+        MaterialKind::Concrete => Micro {
+            beta: 1.5,
+            tau: 0.25e-3,
+            cutoff: 9_000.0,
+            direct: 1.5,
+        },
+        // Fibres a few microns thick: all ticks.
+        MaterialKind::Composite => Micro {
+            beta: 1.6,
+            tau: 0.09e-3,
+            cutoff: 12_000.0,
+            direct: 0.9,
+        },
     }
 }
 
-enum Body {
-    /// No filtering: broadband.
-    Pass,
-    Modes(ModalBank),
-    Band(Svf),
-    Low(Svf),
-    High(Svf),
-}
-
-impl Body {
-    #[inline]
-    fn process(&mut self, x: f32) -> f32 {
-        match self {
-            Body::Pass => x,
-            Body::Modes(b) => b.process(x),
-            Body::Band(f) => f.bp(x),
-            Body::Low(f) => f.lp(x),
-            Body::High(f) => f.hp(x),
-        }
-    }
-}
-
-/// One exciter into one body.
-pub struct Layer {
-    delay: u32,
-    ex: Excite,
-    body: Body,
-    gain: f32,
-    tail: u32,
-    max_tail: u32,
-}
-
-impl Layer {
-    /// Adds this layer into `out`; false once it has rung out.
-    fn render(&mut self, rng: &mut Rng, dt: f32, out: &mut [f32]) -> bool {
-        let mut start = 0;
-        if self.delay > 0 {
-            let skip = (self.delay as usize).min(out.len());
-            self.delay -= skip as u32;
-            start = skip;
-            if self.delay > 0 {
-                return true;
-            }
-        }
-        // Once the exciter is spent only the body rings on. Not calling the
-        // exciter also keeps its decaying state out of subnormal floats,
-        // which are very slow to multiply.
-        let excited = !self.ex.done();
-        for o in &mut out[start..] {
-            // The tiny offset keeps quickly damped modes out of subnormals
-            // while slower ones in the same bank still ring.
-            let x = if excited { self.ex.next(rng, dt) } else { 0.0 } + 1e-15;
-            *o += self.body.process(x) * self.gain;
-        }
-        if excited {
-            return true;
-        }
-        match &self.body {
-            Body::Modes(b) => b.energy() > 1e-5,
-            _ => {
-                self.tail += (out.len() - start) as u32;
-                self.tail < self.max_tail
-            }
-        }
-    }
-}
-
-/// Builds layers for one sound.
-struct Kit {
-    sr: f32,
-    /// Output low-pass cutoff, Hz.
-    air: f32,
-    rng: RefCell<Rng>,
-    layers: Vec<Layer>,
-}
-
-impl Kit {
-    fn new(sr: f32, seed: u32) -> Self {
-        Self {
-            sr,
-            air: 9000.0,
-            rng: RefCell::new(Rng::new(seed)),
-            layers: Vec::with_capacity(8),
-        }
-    }
-
-    fn range(&self, lo: f32, hi: f32) -> f32 {
-        self.rng.borrow_mut().range(lo, hi)
-    }
-
-    fn unit(&self) -> f32 {
-        self.rng.borrow_mut().unit()
-    }
-
-    fn vary(&self, x: f32, spread: f32) -> f32 {
-        self.rng.borrow_mut().vary(x, spread)
-    }
-
-    fn chance(&self, p: f32) -> bool {
-        self.rng.borrow_mut().chance(p)
-    }
-
-    fn add(&mut self, delay: f32, ex: Excite, body: Body, gain: f32) {
-        self.layers.push(Layer {
-            delay: (delay.max(0.0) * self.sr) as u32,
-            ex,
-            body,
-            gain,
-            tail: 0,
-            max_tail: (0.06 * self.sr) as u32,
-        });
-    }
-
-    // Exciters --------------------------------------------------------------
-
-    /// `decay` seconds for the noise tail to fall 60 dB.
-    fn click(&self, level: f32, decay: f32) -> Excite {
-        Excite::Click {
-            spike: level,
-            level,
-            k: (-6.9 / (decay.max(1e-4) * self.sr)).exp(),
-        }
-    }
-
-    fn burst(&self, amp: f32, attack: f32, t60: f32, lp: Option<f32>) -> Excite {
-        Excite::Burst {
-            env: AttackDecay::new(attack, t60, self.sr),
-            amp,
-            lp: lp.map(|c| OnePole::new(c, self.sr)),
-        }
-    }
-
-    #[allow(dead_code)]
-    fn pulses(&self, f0: f32, f1: f32, dur: f32, amp: f32, jitter: f32) -> Excite {
-        Excite::Pulses {
-            phase: self.unit(),
-            f0,
-            f1,
-            dur,
-            t: 0.0,
-            amp,
-            jitter,
-            tail: 0.0,
-            k: (-6.9 / (0.0015 * self.sr)).exp(),
-            noise: 0.15,
-        }
-    }
-
-    /// Stick-slip where every slip is a short noise grain (`grain` s to
-    /// -60 dB): grinding and groaning rather than a clean buzz.
-    fn grind(&self, f0: f32, f1: f32, dur: f32, amp: f32, jitter: f32, grain: f32) -> Excite {
-        Excite::Pulses {
-            phase: self.unit(),
-            f0,
-            f1,
-            dur,
-            t: 0.0,
-            amp,
-            jitter,
-            tail: 0.0,
-            k: (-6.9 / (grain.max(1e-4) * self.sr)).exp(),
-            noise: 0.8,
-        }
-    }
-
-    /// A shower of noise grains. `rate` per second at its peak, reached
-    /// after `rise` s, then falling with `tau`; grains last `grain` s.
-    #[allow(clippy::too_many_arguments)]
-    fn grains(
-        &self,
-        rate: f32,
-        rise: f32,
-        tau: f32,
-        dur: f32,
-        amp: f32,
-        amp_tau: f32,
-        var: f32,
-        grain: f32,
-    ) -> Excite {
-        Excite::Grains {
-            rate,
-            rise: rise.max(1e-4),
-            rate_tau: tau.max(1e-4),
-            dur,
-            t: 0.0,
-            amp,
-            amp_tau: amp_tau.max(1e-4),
-            var,
-            level: 0.0,
-            k: (-6.9 / (grain.max(1e-4) * self.sr)).exp(),
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    #[allow(dead_code)]
-    fn crackle(
-        &self,
-        rate: f32,
-        rate_tau: f32,
-        dur: f32,
-        amp: f32,
-        amp_tau: f32,
-        var: f32,
-    ) -> Excite {
-        Excite::Crackle {
-            rate,
-            rate_tau,
-            dur,
-            t: 0.0,
-            amp,
-            amp_tau,
-            var,
-            tail: 0.0,
-            k: (-6.9 / (0.0012 * self.sr)).exp(),
-        }
-    }
-
-    // Bodies ----------------------------------------------------------------
-
-    fn pass(&self) -> Body {
-        Body::Pass
-    }
-
-    /// A dense, slightly detuned metal body: `n` modes spread log-randomly
-    /// over `lo..hi`, about a third of them in close pairs that beat. This
-    /// is what makes a ring sound like a big piece of steel instead of a
-    /// bell.
-    fn steel_dense(&self, lo: f32, hi: f32, n: usize, t60: f32) -> Body {
-        let mut m = Vec::with_capacity(n);
-        while m.len() < n {
-            let f = lo * (hi / lo).powf(self.unit());
-            let t = t60 * (lo / f).powf(0.45) * self.range(0.6, 1.3);
-            let a = self.range(0.3, 1.0) / (f / lo).powf(0.25);
-            m.push((f, t, a));
-            if m.len() < n && self.chance(0.35) {
-                m.push((f + self.range(0.4, 3.0), t, a * self.range(0.6, 1.0)));
-            }
-        }
-        self.modes(m)
-    }
-
-    fn band(&self, f: f32, q: f32) -> Body {
-        Body::Band(Svf::new(f, q, self.sr))
-    }
-
-    fn low(&self, f: f32) -> Body {
-        Body::Low(Svf::new(f, 0.7, self.sr))
-    }
-
-    fn high(&self, f: f32) -> Body {
-        Body::High(Svf::new(f, 0.7, self.sr))
-    }
-
-    fn modes(&self, modes: Vec<(f32, f32, f32)>) -> Body {
-        // Normalise so the amplitudes sum to 1: a unit click peaks near 1.
-        let sum: f32 = modes.iter().map(|m| m.2.abs()).sum::<f32>().max(1e-6);
-        let modes: Vec<_> = modes.into_iter().map(|(f, t, a)| (f, t, a / sum)).collect();
-        Body::Modes(ModalBank::new(&modes, self.sr))
-    }
-
-    /// A steel member: free-free Euler-Bernoulli bending modes above `base`
-    /// plus a few inharmonic shell (ovalling) modes. `tilt` darkens.
-    #[allow(dead_code)]
-    fn steel(
-        &self,
-        base: f32,
-        t60: f32,
-        bend: usize,
-        shell: usize,
-        shell_band: (f32, f32),
-        tilt: f32,
-    ) -> Body {
-        const R: [f32; 7] = [1.0, 2.756, 5.404, 8.933, 13.344, 18.64, 24.81];
-        let mut m = Vec::with_capacity(bend + shell);
-        for (i, r) in R.iter().take(bend).enumerate() {
-            let f = base * r * self.vary(1.0, 0.03);
-            let a = self.range(0.6, 1.0) / (1.0 + i as f32).powf(tilt);
-            m.push((f, t60 * (base / f).powf(0.35), a));
-        }
-        for _ in 0..shell {
-            let f = self.range(shell_band.0, shell_band.1);
-            m.push((f, t60 * self.range(0.3, 0.7), self.range(0.15, 0.45)));
-        }
-        self.modes(m)
-    }
-
-    /// Wooden body: broad, quickly damped resonances.
-    fn wood(&self, pitch: f32, t60: f32) -> Body {
-        const F: [(f32, f32); 5] = [
-            (190.0, 1.0),
-            (410.0, 0.85),
-            (760.0, 0.6),
-            (1150.0, 0.45),
-            (2300.0, 0.22),
-        ];
-        let m = F
-            .iter()
-            .map(|&(f, a)| {
-                let f = f * pitch * self.vary(1.0, 0.12);
-                (
-                    f,
-                    t60 * self.range(0.6, 1.2) * (400.0 / f).powf(0.3),
-                    a * self.range(0.6, 1.0),
-                )
-            })
-            .collect();
-        self.modes(m)
-    }
-
-    /// Concrete: low, very heavily damped modes.
-    fn concrete(&self, pitch: f32, t60: f32) -> Body {
-        const F: [(f32, f32); 5] = [
-            (85.0, 1.0),
-            (230.0, 0.8),
-            (510.0, 0.6),
-            (1100.0, 0.45),
-            (2400.0, 0.3),
-        ];
-        let m = F
-            .iter()
-            .map(|&(f, a)| {
-                let f = f * pitch * self.vary(1.0, 0.15);
-                (
-                    f,
-                    t60 * self.range(0.6, 1.2) * (200.0 / f).powf(0.4),
-                    a * self.range(0.6, 1.0),
-                )
-            })
-            .collect();
-        self.modes(m)
-    }
-
-    /// Carbon laminate: stiff, light, ringing high modes.
-    fn laminate(&self, lo: f32, hi: f32, t60: f32, count: usize) -> Body {
-        let m = (0..count)
-            .map(|_| {
-                let f = lo * (hi / lo).powf(self.unit());
-                (f, t60 * self.range(0.5, 1.2), self.range(0.4, 1.0))
-            })
-            .collect();
-        self.modes(m)
-    }
-
-    /// Scales every layer added so far: per-patch loudness trim.
-    fn scale(&mut self, g: f32) {
-        for l in &mut self.layers {
-            l.gain *= g;
-        }
-    }
-
-    fn finish(self, max_len: f32) -> BoxVoice {
-        Box::new(Shot {
-            air: OnePole::new(self.air, self.sr),
-            layers: self.layers,
-            scratch: Vec::new(),
-            rng: self.rng.into_inner(),
-            dt: 1.0 / self.sr,
-            left: (max_len * self.sr) as u32,
-        })
-    }
-}
-
-/// A one-shot made of layers.
-struct Shot {
-    layers: Vec<Layer>,
-    /// Gentle top-end roll-off: real recordings of these events have little
-    /// above ~8-12 kHz, and raw noise there reads as hiss.
-    air: OnePole,
-    /// The layers are summed here, then soft-limited: coinciding transients
-    /// of a big event would otherwise stack past full scale.
-    scratch: Vec<f32>,
-    rng: Rng,
-    dt: f32,
-    left: u32,
-}
-
-impl Voice for Shot {
-    fn render(&mut self, out: &mut [f32]) -> bool {
-        let (rng, dt) = (&mut self.rng, self.dt);
-        self.scratch.clear();
-        self.scratch.resize(out.len(), 0.0);
-        let scratch = &mut self.scratch;
-        self.layers.retain_mut(|l| l.render(rng, dt, scratch));
-        let last = self.left <= out.len() as u32;
-        let n = out.len() as f32;
-        for (i, (o, x)) in out.iter_mut().zip(self.scratch.iter()).enumerate() {
-            let x = &self.air.lp(*x);
-            let a = x.abs();
-            let y = if a <= 0.6 {
-                *x
-            } else {
-                x.signum() * (0.6 + 0.35 * ((a - 0.6) / 0.35).tanh())
-            };
-            // Hard cap: fade the last block instead of cutting.
-            *o += if last { y * (1.0 - i as f32 / n) } else { y };
-        }
-        if last {
-            return false;
-        }
-        self.left -= out.len() as u32;
-        !self.layers.is_empty()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Stress beds
-
-/// Most grains a bed plays at once.
-const MAX_GRAINS: usize = 8;
-
-/// Continuous creaking / groaning of one material's loaded members.
-pub struct StressVoice {
-    material: MaterialKind,
-    sr: f32,
-    rng: Rng,
-    seed: u32,
-    load: f32,
-    target: f32,
-    rate: f32,
-    members: f32,
-    grains: Vec<Layer>,
-    /// Concrete's low strain rumble.
-    rumble: Option<(Brown, Svf, f32)>,
-}
-
-impl StressVoice {
-    pub fn new(material: MaterialKind, sr: f32, seed: u32) -> Self {
-        let rumble = (material == MaterialKind::Concrete)
-            .then(|| (Brown::new(seed ^ 0xC0FE), Svf::new(65.0, 0.9, sr), 0.0));
-        Self {
-            material,
-            sr,
-            rng: Rng::new(seed),
-            seed,
-            load: 0.0,
-            target: 0.0,
-            rate: 0.0,
-            members: 1.0,
-            grains: Vec::with_capacity(MAX_GRAINS),
-            rumble,
-        }
-    }
-
-    /// `load` is utilisation over the onset (0 quiet, 1 at capacity), `rate`
-    /// its rise per second, `members` how many members contribute.
-    pub fn set(&mut self, load: f32, rate: f32, members: f32) {
-        self.target = if load.is_finite() {
-            load.clamp(0.0, 3.0)
-        } else {
-            0.0
-        };
-        self.rate = if rate.is_finite() {
-            rate.clamp(0.0, 4.0)
-        } else {
-            0.0
-        };
-        self.members = if members.is_finite() {
-            members.clamp(0.0, 400.0)
-        } else {
-            0.0
-        };
-    }
-
-    pub fn reset(&mut self) {
-        self.target = 0.0;
-        self.load = 0.0;
-        self.rate = 0.0;
-        self.grains.clear();
-        if let Some(r) = &mut self.rumble {
-            r.2 = 0.0;
-        }
-    }
-
-    /// Load past the onset, 0 at 0.35, 1 at capacity.
-    fn intensity(&self) -> f32 {
-        ((self.load - 0.35) / 0.65).max(0.0)
-    }
-
-    fn spawn(&mut self, delay: f32) {
-        let f = self.intensity();
-        self.seed = self.seed.wrapping_add(0x6D2B_79F5);
-        let mut kit = Kit::new(self.sr, self.seed);
-        let amp = (0.7 + 0.3 * f.min(1.2)) * kit.range(0.5, 1.0);
-        match self.material {
-            MaterialKind::Steel => {
-                if f > 0.6 && kit.chance(0.3 * f.min(1.5)) {
-                    // A bang or tick: a bolt seat or a plate edge slipping.
-                    let ex = kit.burst(1.0, 0.0001, 0.003, None);
-                    let lo = kit.range(250.0, 600.0);
-                    let body = kit.steel_dense(lo, 5000.0, 12, 0.5);
-                    kit.add(delay, ex, body, 0.3 * amp);
-                } else {
-                    // Groan: slow grinding stick-slip through the member's
-                    // dense low modes.
-                    let f0 = kit.range(10.0, 25.0);
-                    let f1 = f0 * kit.range(0.8, 2.2);
-                    let dur = kit.range(0.4, 1.3);
-                    let ex = kit.grind(f0, f1, dur, 1.0, 0.4, 0.006);
-                    let lo = kit.range(40.0, 70.0);
-                    let body = kit.steel_dense(lo, 420.0, 14, kit.range(0.3, 0.7));
-                    kit.add(delay, ex, body, 0.42 * amp);
-                    let ex = kit.burst(1.0, dur * 0.5, dur * 0.7, None);
-                    let body = kit.band(kit.range(600.0, 1200.0), 0.9);
-                    kit.add(delay, ex, body, 0.04 * amp);
-                }
-            }
-            MaterialKind::Timber => {
-                if f > 0.7 && kit.chance(0.35) {
-                    // Dry fibre crackle.
-                    let dur = kit.range(0.1, 0.35);
-                    let ex = kit.grains(900.0, 0.02, dur, dur, 1.0, dur, 2.2, 0.0015);
-                    let body = kit.band(kit.range(1800.0, 3200.0), 0.5);
-                    kit.add(delay, ex, body, 0.6 * amp);
-                } else {
-                    // Creak: a rusty-hinge stick-slip that glides in pitch.
-                    let (a, b) = (kit.range(18.0, 45.0), kit.range(45.0, 110.0));
-                    let (f0, f1) = if kit.chance(0.6) { (a, b) } else { (b, a) };
-                    let dur = kit.range(0.25, 0.8);
-                    let ex = kit.grind(f0, f1, dur, 1.0, 0.12, 0.0025);
-                    let pitch = kit.range(0.8, 1.3);
-                    let body = kit.wood(pitch, 0.08);
-                    kit.add(delay, ex, body, 0.5 * amp);
-                }
-            }
-            MaterialKind::Concrete => {
-                if f > 0.6 && kit.chance(0.3) {
-                    // Fine crumble.
-                    let dur = kit.range(0.15, 0.4);
-                    let ex = kit.grains(1500.0, 0.01, dur * 0.4, dur, 1.0, dur, 2.2, 0.002);
-                    let body = kit.band(kit.range(1200.0, 2500.0), 0.5);
-                    kit.add(delay, ex, body, 0.5 * amp);
-                } else {
-                    // Micro-crack: a short broadband tick with a little body.
-                    let ex = kit.burst(1.0, 0.0001, 0.003, None);
-                    let body = kit.band(kit.range(1500.0, 5000.0), 0.6);
-                    kit.add(delay, ex, body, 0.9 * amp);
-                }
-            }
-            MaterialKind::Composite => {
-                if f > 0.7 && kit.chance(0.25) {
-                    // A cluster of fibre breaks.
-                    let ex = kit.grains(3000.0, 0.005, 0.06, 0.15, 1.0, 0.1, 1.5, 0.0006);
-                    let body = kit.high(3000.0);
-                    kit.add(delay, ex, body, 0.45 * amp);
-                } else {
-                    let ex = kit.burst(1.0, 0.0001, 0.002, None);
-                    let body = kit.laminate(2000.0, 8000.0, kit.range(0.05, 0.15), 6);
-                    kit.add(delay, ex, body, 0.6 * amp);
-                }
-            }
-        }
-        self.grains.extend(kit.layers);
-    }
-
-    fn base_rate(&self) -> f32 {
-        match self.material {
-            MaterialKind::Steel => 1.5,
-            MaterialKind::Timber => 3.0,
-            MaterialKind::Concrete => 4.0,
-            MaterialKind::Composite => 4.5,
-        }
-    }
-}
-
-impl Voice for StressVoice {
-    fn render(&mut self, out: &mut [f32]) -> bool {
-        let n = out.len();
-        let dt = n as f32 / self.sr;
-        self.load += (self.target - self.load) * (1.0 - (-dt / 0.15).exp());
-        let f = self.intensity();
-        let rumble_level = self.rumble.as_ref().map_or(0.0, |r| r.2);
-        if f <= 0.0 && self.grains.is_empty() && rumble_level < 1e-5 {
-            return true;
-        }
-
-        if f > 0.0 {
-            // Audible from about 0.45 utilisation, dense near capacity.
-            let i = f.min(1.5);
-            let rate = self.base_rate()
-                * (0.15 + 1.4 * i * i)
-                * (1.0 + self.rate)
-                * self.members.max(1.0).sqrt();
-            let mut t = self.rng.exp_interval(rate);
-            // Steel grains ring for a long time; fewer of them overlap.
-            let cap = if self.material == MaterialKind::Steel {
-                6
-            } else {
-                MAX_GRAINS
-            };
-            while t < dt && self.grains.len() < cap {
-                self.spawn(t);
-                t += self.rng.exp_interval(rate);
-            }
-        }
-
-        let sdt = 1.0 / self.sr;
-        let rng = &mut self.rng;
-        self.grains.retain_mut(|g| g.render(rng, sdt, out));
-
-        if let Some((noise, filter, level)) = &mut self.rumble {
-            let target = 0.08
-                * f.min(1.3)
-                * (1.0 + 0.5 * self.rate)
-                * (self.members.max(1.0).sqrt() / 2.45).min(2.0);
-            let start = *level;
-            let end = start + (target - start) * (1.0 - (-dt / 0.3).exp());
-            *level = end;
-            if start.max(end) > 1e-5 {
-                for (k, o) in out.iter_mut().enumerate() {
-                    let g = start + (end - start) * (k as f32 / n as f32);
-                    *o += filter.lp(noise.next()) * g;
-                }
-            }
-        }
-        true
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Damage onsets
-
-/// The moment a member reaches a worse damage state. `None` for states that
-/// have no onset sound (intact; broken has its own [`break_voice`]).
-pub fn damage_voice(
-    material: MaterialKind,
-    state: DamageState,
-    size: f32,
-    sr: f32,
-    seed: u32,
-) -> Option<BoxVoice> {
-    let s = Scale::of(material, size);
-    let mut k = Kit::new(sr, seed);
-    k.air = air(material);
-    match state {
-        DamageState::Intact | DamageState::Broken => return None,
-        DamageState::Yielded => {
-            if material == MaterialKind::Concrete {
-                // Reinforced concrete: the bars yield inside a cracking
-                // section. A crack, a low grind and a crumble.
-                crack(&mut k, material, s, 0.45, 0.0);
-                groan(&mut k, s, 0.3, 0.6 * s.len, 0.7);
-                crumble(&mut k, material, s, 0.3, 0.05);
-            } else {
-                // The section gives: a long grinding groan with a few jerks.
-                groan(&mut k, s, 0.5, 1.1 * s.len, 1.0);
-                for _ in 0..3 {
-                    let t = k.range(0.15, 0.9) * s.len;
-                    let f = k.range(50.0, 80.0) * s.pitch;
-                    thump(&mut k, f, 0.25, 0.18, t);
-                }
-            }
-        }
-        DamageState::Cracked => {
-            crack(&mut k, material, s, 0.5, 0.0);
-            // A short flurry of the material giving way around the crack.
-            let (centre, rate) = match material {
-                MaterialKind::Timber => (2400.0, 900.0),
-                MaterialKind::Composite => (5000.0, 1500.0),
-                _ => (1800.0, 1200.0),
-            };
-            let ex = k.grains(rate * 0.4, 0.01, 0.12, 0.3, 1.0, 0.15, 2.4, 0.0015);
-            let body = k.band(centre * s.pitch, 0.5);
-            k.add(0.005, ex, body, 0.45 * s.loud);
-        }
-        DamageState::Crushed => crunch(&mut k, material, s, 0.55, 0.5),
-        DamageState::Delaminated => rip(&mut k, s, 0.7, 0.35),
-    }
-    // Loudness trims, measured at the reference sizes.
-    let trim = match (material, state) {
-        (MaterialKind::Concrete, DamageState::Yielded) => 0.65,
-        (_, DamageState::Yielded) => 0.4,
-        (MaterialKind::Steel, DamageState::Cracked) => 0.8,
-        (MaterialKind::Composite, DamageState::Cracked) => 0.38,
-        (_, DamageState::Cracked) => 0.65,
-        (_, DamageState::Crushed) => 2.0,
-        _ => 0.6,
-    };
-    k.scale(trim);
-    Some(k.finish(5.0))
-}
-
-// ---------------------------------------------------------------------------
-// Shared gestures
-
-/// A heavy low thump: a damped low resonance hit by a soft click and a
-/// low-passed noise puff. Gives every big event its weight.
-fn thump(k: &mut Kit, f: f32, gain: f32, t60: f32, delay: f32) {
-    let ex = k.click(1.0, 0.004);
-    let body = k.modes(vec![
-        (f, t60, 1.0),
-        (f * k.range(1.9, 2.4), t60 * 0.5, 0.35),
-    ]);
-    k.add(delay, ex, body, gain);
-    let ex = k.burst(1.0, 0.002, t60 * 0.5, Some(220.0));
-    let body = k.low(180.0);
-    k.add(delay, ex, body, gain * 0.9);
-}
-
-/// A crack front: a very short, very loud broadband snap with the
-/// material's body under it, a low thump and a few milliseconds of
-/// micro-fracture.
-fn crack(k: &mut Kit, material: MaterialKind, s: Scale, gain: f32, delay: f32) {
-    // The snap itself: raw noise, a few milliseconds long.
-    let snap_len = match material {
+/// Loss factor a member picks up from the structure it is built into:
+/// friction in its joints and energy leaking into its neighbours. It is
+/// several times the material's own and it is why a member in a frame thuds
+/// where the same bar hung from a string would ring like a glass.
+fn joint_loss(m: MaterialKind) -> f32 {
+    match m {
         MaterialKind::Steel => 0.012,
         MaterialKind::Timber => 0.03,
         MaterialKind::Concrete => 0.04,
-        MaterialKind::Composite => 0.02,
-    };
-    let ex = k.burst(1.0, 0.0001, snap_len, None);
-    let body = k.high(600.0);
-    k.add(delay, ex, body, gain * 0.9);
-    // The material ringing from it.
-    let body = match material {
-        MaterialKind::Steel => k.steel_dense(250.0 * s.pitch, 7000.0, 18, 0.7),
-        MaterialKind::Timber => {
-            let p = k.range(0.7, 1.0) * s.pitch;
-            k.wood(p, 0.1)
-        }
-        MaterialKind::Concrete => {
-            let p = k.range(0.8, 1.2) * s.pitch;
-            k.concrete(p, 0.05)
-        }
-        MaterialKind::Composite => k.laminate(900.0, 6000.0, 0.15, 8),
-    };
-    let ex = k.burst(1.0, 0.0001, 0.006, None);
-    k.add(delay, ex, body, gain * 0.7);
-    // Micro-fracture right behind the front.
-    let ex = k.grains(1500.0, 0.002, 0.03, 0.08, 0.8, 0.04, 2.0, 0.001);
-    let body = k.high(1500.0);
-    k.add(delay + 0.002, ex, body, gain * 0.6);
-    let f = match material {
-        MaterialKind::Concrete => 50.0,
-        MaterialKind::Steel => 70.0,
-        MaterialKind::Timber => 85.0,
-        MaterialKind::Composite => 120.0,
-    } * s.pitch;
-    thump(k, f, gain * 0.7, 0.25 * s.len, delay);
-}
-
-/// A steel section folding: stick-slip grinding through a dense low metal
-/// body, rising in pitch, with a metallic scrape on top.
-fn groan(k: &mut Kit, s: Scale, gain: f32, dur: f32, rise: f32) {
-    let f0 = k.range(14.0, 22.0);
-    let ex = k.grind(f0, f0 * (1.0 + 1.6 * rise), dur, 1.0, 0.4, 0.006);
-    let lo = k.range(40.0, 60.0) * s.pitch;
-    let body = k.steel_dense(lo, 450.0 * s.pitch, 22, 0.5);
-    k.add(0.0, ex, body, gain);
-    // Scrape: band noise following the grind.
-    let ex = k.burst(1.0, dur * 0.7, dur * 0.8, None);
-    let body = k.band(k.range(700.0, 1400.0) * s.pitch, 0.5);
-    k.add(0.0, ex, body, gain * 0.12);
-    // The grind also excites higher, brighter modes a little.
-    let ex = k.grind(f0 * 2.0, f0 * 3.5, dur, 1.0, 0.5, 0.003);
-    let body = k.steel_dense(600.0 * s.pitch, 3000.0, 10, 0.25);
-    k.add(0.0, ex, body, gain * 0.12);
-}
-
-/// Crushing: grinding crunch (dense grains, low-mid heavy), a low rumble
-/// and a thump.
-fn crunch(k: &mut Kit, material: MaterialKind, s: Scale, gain: f32, dur: f32) {
-    let dur = dur * s.len;
-    let (rate, centre) = match material {
-        MaterialKind::Timber => (600.0, 1300.0),
-        MaterialKind::Composite => (900.0, 2800.0),
-        _ => (800.0, 800.0),
-    };
-    let ex = k.grains(rate, dur * 0.15, dur * 0.7, dur, 1.0, dur, 2.2, 0.003);
-    let body = k.band(centre * s.pitch, 0.45);
-    k.add(0.0, ex, body, gain * 1.1);
-    let ex = k.grains(rate * 0.35, dur * 0.1, dur, dur, 1.0, dur, 2.4, 0.0015);
-    let body = k.high(2500.0);
-    k.add(0.0, ex, body, gain * 0.35);
-    let ex = k.burst(1.0, dur * 0.2, dur * 1.2, Some(300.0 * s.pitch));
-    let body = k.low(250.0 * s.pitch);
-    k.add(0.0, ex, body, gain * 0.5);
-    let f = if material == MaterialKind::Concrete {
-        45.0
-    } else {
-        70.0
-    };
-    thump(k, f * s.pitch, gain * 0.8, 0.3, 0.0);
-}
-
-/// Grit and fragments trickling down after a fracture.
-fn crumble(k: &mut Kit, material: MaterialKind, s: Scale, gain: f32, delay: f32) {
-    let dur = k.range(0.7, 1.2) * s.len;
-    let centre = match material {
-        MaterialKind::Concrete => 2200.0,
-        MaterialKind::Timber => 2800.0,
-        _ => 3500.0,
-    };
-    let ex = k.grains(220.0, 0.05, dur * 0.4, dur, 1.0, dur * 0.6, 2.6, 0.002);
-    let body = k.band(centre, 0.5);
-    k.add(delay, ex, body, gain);
-    let ex = k.grains(80.0, 0.1, dur * 0.6, dur, 1.0, dur * 0.8, 2.2, 0.005);
-    let body = k.band(700.0 * s.pitch, 0.6);
-    k.add(delay, ex, body, gain * 0.6);
-}
-
-/// Fragments landing: a handful of small, quick hits spread over `span`,
-/// most early.
-fn debris(k: &mut Kit, material: MaterialKind, count: usize, start: f32, span: f32, gain: f32) {
-    for _ in 0..count {
-        let t = start + span * k.unit().powf(1.8);
-        let g = gain * k.range(0.3, 1.0) * (1.0 - (t - start) / (span + 1e-3) * 0.6);
-        let ex = k.burst(1.0, 0.0001, 0.007, None);
-        let body = match material {
-            MaterialKind::Steel => {
-                let lo = k.range(350.0, 900.0);
-                k.steel_dense(lo, lo * 8.0, 8, 0.12)
-            }
-            MaterialKind::Timber => {
-                let p = k.range(1.4, 2.5);
-                k.wood(p, 0.04)
-            }
-            MaterialKind::Concrete => k.band(k.range(1200.0, 3500.0), 0.7),
-            MaterialKind::Composite => k.laminate(1500.0, 6000.0, 0.05, 4),
-        };
-        k.add(t, ex, body, g);
+        MaterialKind::Composite => 0.015,
     }
 }
 
-/// Tearing along a seam: a dense rasp of grains plus a fibrous hiss.
-fn rip(k: &mut Kit, s: Scale, gain: f32, dur: f32) {
-    let dur = dur * s.len;
-    let ex = k.grains(
-        1200.0,
-        dur * 0.3,
-        dur * 2.0,
-        dur,
-        1.0,
-        dur * 1.5,
-        2.0,
-        0.0012,
-    );
-    let body = k.band(k.range(2600.0, 3600.0), 0.5);
-    k.add(0.0, ex, body, gain * 0.8);
-    let ex = k.burst(1.0, dur * 0.3, dur * 1.2, None);
-    let body = k.high(3000.0);
-    k.add(0.0, ex, body, gain * 0.15);
-    let ex = k.burst(1.0, 0.0001, 0.01, None);
-    let body = k.laminate(1500.0, 6000.0, 0.12, 6);
-    k.add(dur * 0.9, ex, body, gain * 0.5);
+/// A body's modes as they ring in place: with the joint loss added.
+fn seated(body: &Body, drive: Drive, budget: usize, seed: u32) -> Vec<ModeSpec> {
+    let eta = joint_loss(body.material);
+    let mut modes = body.modes(drive, budget, seed);
+    for m in &mut modes {
+        m.decay += std::f32::consts::PI * m.freq * eta;
+        // A joint passes less of a mode the shorter its wavelength gets
+        // against the joint itself; above a kilohertz or two a member in a
+        // frame hardly rings at all. (An estimate, not a calculation.)
+        m.gain *= (RING_CORNER / m.freq.max(RING_CORNER)).powf(1.5);
+    }
+    modes
 }
 
-/// Steel snapping in tension: a hard broadband crack, a noisy dense ring,
-/// a short twang of the freed end and a thump.
-fn snap(k: &mut Kit, s: Scale, gain: f32, delay: f32) {
-    let ex = k.burst(1.0, 0.0001, 0.006, None);
-    let body = k.pass();
-    k.add(delay, ex, body, gain * 0.8);
-    let ex = k.burst(1.0, 0.0001, 0.004, None);
-    let base = k.range(220.0, 320.0) * s.pitch;
-    let body = k.steel_dense(base, 8000.0, 26, 1.1 * s.len);
-    k.add(delay, ex, body, gain * 0.9);
-    // Twang: the freed end, nearly harmonic but detuned and short.
-    let f = k.range(140.0, 220.0) * s.pitch;
-    let body = k.modes(vec![
-        (f, 0.5 * s.len, 1.0),
-        (f * 2.02 + k.range(-2.0, 2.0), 0.35 * s.len, 0.6),
-        (f * 3.05, 0.25 * s.len, 0.4),
-        (f * 4.1, 0.15 * s.len, 0.3),
-        (f * 5.3, 0.1 * s.len, 0.2),
-    ]);
-    let ex = k.burst(1.0, 0.0001, 0.003, None);
-    k.add(delay + 0.003, ex, body, gain * 0.35);
-    let f = k.range(60.0, 80.0) * s.pitch;
-    thump(k, f, gain * 0.6, 0.2, delay);
+/// How strongly a bar shakes what it touches: the share of a blow that is
+/// heard through the floor or frame at 1 kHz, against a bar that radiates
+/// fully by itself. (An estimate.)
+const SOUNDBOARD: f32 = 0.15;
+
+/// The same for a load let go inside a frame: a step, which already leans
+/// on the low modes far more than a blow does.
+const SOUNDBOARD_RELEASE: f32 = 0.004;
+
+/// The modes of a bar that touches something large: a floor it lands on or
+/// the frame it is bolted into. Through the air a mode is heard by its
+/// surface acceleration, which favours the high modes, and a bar narrower
+/// than the wavelength hardly radiates its low ones at all. Through the
+/// contact it pushes with its displacement, and the slab or frame it pushes
+/// on radiates by its velocity over a large area. For the same blow that
+/// path falls with frequency instead of rising, so it carries the low modes:
+/// the rumble of heavy steel landing.
+fn grounded(body: &Body, mut modes: Vec<ModeSpec>, share: f32) -> Vec<ModeSpec> {
+    for m in &mut modes {
+        let f = m.freq.max(1.0);
+        // What the mode was given per unit frequency and radiation.
+        let blow = m.gain / (f * body.radiation(f).max(1e-4));
+        // A slab does not radiate below its own first modes either.
+        let slab = f / (f + 60.0);
+        m.gain += share * blow * 1000.0 * (1000.0 / f) * slab;
+        // What it touches also takes energy out of it.
+        m.decay += 1.5;
+    }
+    modes
 }
 
-// ---------------------------------------------------------------------------
-// Breaks
+/// Above this (Hz) a seated member's modes fall away.
+const RING_CORNER: f32 = 1200.0;
 
-/// A member breaking. Picks the gesture from the cause and colours it by the
-/// material; `size` is the member's mass in kg.
-pub fn break_voice(
-    material: MaterialKind,
-    cause: BreakCause,
-    size: f32,
+/// How hard a recorded event rings the member it happens in, against how
+/// loud the recording itself is heard.
+const BODY: f32 = 0.35;
+
+/// Longest a single recorded micro-event plays, s.
+const MICRO_LIMIT: f32 = 0.09;
+
+/// Largest avalanche over the smallest, in energy.
+const E_RANGE: f32 = 1000.0;
+
+/// An event energy from the power law, as a fraction of the largest
+/// possible (`cap` 0..1 lowers the cutoff).
+fn avalanche(rng: &mut Rng, beta: f32, cap: f32) -> f32 {
+    let u = rng.unit().max(1e-6);
+    let e = u.powf(-1.0 / (beta - 1.0));
+    (e / E_RANGE).min(cap.clamp(1.0 / E_RANGE, 1.0))
+}
+
+/// A score under construction.
+struct Score {
+    hits: Vec<Hit>,
+    recorded: Vec<GrainHit>,
+    rng: Rng,
     sr: f32,
-    seed: u32,
-) -> BoxVoice {
-    let s = Scale::of(material, size);
-    let mut k = Kit::new(sr, seed);
-    k.air = air(material);
-    let g = s.loud;
-    use BreakCause as C;
-    use MaterialKind as M;
-    match (material, cause) {
-        (M::Steel, C::Rupture) | (M::Steel, C::Brittle) => {
-            snap(&mut k, s, 0.8 * g, 0.0);
-            debris(&mut k, material, 5, 0.25, 0.9, 0.25 * g);
-        }
-        (M::Steel, _) => {
-            // Hinge: the section grinds as it folds, then gives with a bang
-            // and rings.
-            let bend = k.range(0.6, 1.0) * s.len;
-            groan(&mut k, s, 0.55 * g, bend, 1.0);
-            let ex = k.burst(1.0, 0.0001, 0.01, None);
-            let body = k.pass();
-            k.add(bend, ex, body, 0.6 * g);
-            let ex = k.burst(1.0, 0.0001, 0.005, None);
-            let lo = k.range(110.0, 160.0) * s.pitch;
-            let body = k.steel_dense(lo, 6000.0, 26, 1.3 * s.len);
-            k.add(bend, ex, body, 0.8 * g);
-            let f = k.range(50.0, 65.0) * s.pitch;
-            thump(&mut k, f, 0.8 * g, 0.3, bend);
-            debris(&mut k, material, 4, bend + 0.2, 0.8, 0.2 * g);
-        }
-        (M::Timber, C::TimberSplit) => {
-            // Long tear along the grain: irregular creaking stick-slip and
-            // a rising rasp of fibres, ending in a crack.
-            let dur = k.range(0.8, 1.2) * s.len;
-            let ex = k.grind(25.0, 70.0, dur, 1.0, 0.45, 0.004);
-            let p = 0.8 * s.pitch;
-            let body = k.wood(p, 0.06);
-            k.add(0.0, ex, body, 0.55 * g);
-            let ex = k.grains(
-                450.0,
-                dur * 0.8,
-                dur * 3.0,
-                dur,
-                1.0,
-                dur * 3.0,
-                2.2,
-                0.0012,
-            );
-            let body = k.band(2200.0 * s.pitch, 0.45);
-            k.add(0.0, ex, body, 0.5 * g);
-            crack(&mut k, material, s, 0.8 * g, dur);
-            splinters(&mut k, s, 0.5 * g, dur + 0.01, 0.5);
-        }
-        (M::Timber, C::Crushing) => crunch(&mut k, material, s, 0.7 * g, 0.6),
-        (M::Timber, _) => {
-            // Splinter: a big dry crack, then a cascade of fibres letting go.
-            crack(&mut k, material, s, 0.85 * g, 0.0);
-            let dur = k.range(0.7, 1.2);
-            splinters(&mut k, s, 0.65 * g, 0.01, dur);
-            debris(&mut k, material, 4, 0.3, 0.8, 0.3 * g);
-        }
-        (M::Concrete, C::Crushing) => {
-            crunch(&mut k, material, s, 0.75 * g, 0.8);
-            crumble(&mut k, material, s, 0.45 * g, 0.2);
-            debris(&mut k, material, 8, 0.2, 1.2, 0.3 * g);
-        }
-        (M::Concrete, C::RebarRupture) | (M::Concrete, C::Rupture) => {
-            crack(&mut k, material, s, 0.75 * g, 0.0);
-            crunch(&mut k, material, s, 0.4 * g, 0.3);
-            crumble(&mut k, material, s, 0.45 * g, 0.05);
-            let bar = Scale {
-                pitch: 1.5,
-                len: 0.7,
-                loud: 1.0,
-            };
-            snap(&mut k, bar, 0.5 * g, 0.07);
-            debris(&mut k, material, 8, 0.15, 1.2, 0.3 * g);
-        }
-        (M::Concrete, _) => {
-            // Brittle or shear: a loud crack, a crunch, crumbling and
-            // fragments landing.
-            crack(&mut k, material, s, 0.85 * g, 0.0);
-            let len = if cause == C::ConcreteShear { 0.6 } else { 0.35 };
-            crunch(&mut k, material, s, 0.5 * g, len);
-            crumble(&mut k, material, s, 0.5 * g, 0.05);
-            debris(&mut k, material, 10, 0.15, 1.3, 0.3 * g);
-        }
-        (M::Composite, C::Delamination) => {
-            rip(&mut k, s, 0.75 * g, 0.5);
-            crack(&mut k, material, s, 0.6 * g, 0.0);
-        }
-        (M::Composite, _) => {
-            // Fibre rupture: an explosive crack and a fizz of fibres.
-            crack(&mut k, material, s, 0.8 * g, 0.0);
-            let ex = k.grains(3500.0, 0.005, 0.18, 0.5 * s.len, 1.0, 0.2, 1.8, 0.0005);
-            let body = k.high(3500.0);
-            k.add(0.003, ex, body, 0.5 * g);
-            let ex = k.grains(2000.0, 0.005, 0.1, 0.3, 1.0, 0.1, 1.6, 0.002);
-            let body = k.band(1800.0, 0.6);
-            k.add(0.003, ex, body, 0.35 * g);
-            debris(&mut k, material, 3, 0.2, 0.6, 0.2 * g);
-        }
-    }
-    // Loudness trims, measured at the reference sizes.
-    let trim = match (material, cause) {
-        (M::Steel, C::Rupture) | (M::Steel, C::Brittle) => 0.8,
-        (M::Steel, _) => 0.5,
-        (M::Timber, C::TimberSplit) => 0.58,
-        (M::Timber, C::Crushing) => 2.3,
-        (M::Timber, _) => 0.55,
-        (M::Concrete, C::Crushing) => 2.5,
-        (M::Concrete, C::RebarRupture) | (M::Concrete, C::Rupture) => 0.75,
-        (M::Concrete, _) => 0.55,
-        (M::Composite, C::Delamination) => 0.85,
-        (M::Composite, _) => 0.55,
-    };
-    k.scale(trim);
-    k.finish(6.0)
-}
-
-/// Timber fibres giving way after the main crack: an accelerating, then
-/// thinning cascade of dry crackles, with wood under it and a few fibres
-/// pulling out with a short creak.
-fn splinters(k: &mut Kit, s: Scale, gain: f32, delay: f32, dur: f32) {
-    let dur = dur * s.len;
-    let ex = k.grains(420.0, 0.02, dur * 0.6, dur, 1.0, dur * 0.7, 2.4, 0.0012);
-    let body = k.band(k.range(2200.0, 3200.0), 0.45);
-    k.add(delay, ex, body, gain);
-    let ex = k.grains(160.0, 0.02, dur * 0.6, dur, 1.0, dur * 0.7, 2.0, 0.003);
-    let body = k.band(k.range(450.0, 800.0) * s.pitch, 0.5);
-    k.add(delay, ex, body, gain * 0.7);
-    let ex = k.grains(60.0, dur * 0.1, dur * 0.5, dur, 1.0, dur * 0.7, 1.6, 0.002);
-    let p = s.pitch * k.range(1.0, 1.4);
-    let body = k.wood(p, 0.04);
-    k.add(delay, ex, body, gain * 0.5);
-    for _ in 0..3 {
-        let t = delay + k.range(0.03, dur * 0.7);
-        let f0 = k.range(60.0, 140.0);
-        let ex = k.grind(
-            f0,
-            f0 * k.range(1.3, 2.2),
-            k.range(0.05, 0.15),
-            1.0,
-            0.3,
-            0.002,
-        );
-        let p = s.pitch * k.range(1.2, 2.0);
-        let body = k.wood(p, 0.05);
-        k.add(t, ex, body, gain * 0.35);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Impacts
-
-/// A loose piece hitting something. `None` when too gentle to hear.
-pub fn impact_voice(
+    micro: Micro,
     material: MaterialKind,
-    speed: f32,
+    /// Section size of the member, m: sets the pitch of its cracks.
     size: f32,
+}
+
+impl Score {
+    fn new(material: MaterialKind, sr: f32, seed: u32) -> Self {
+        Self {
+            hits: Vec::new(),
+            recorded: Vec::new(),
+            rng: Rng::new(seed),
+            sr,
+            micro: micro(material),
+            material,
+            size: 0.1,
+        }
+    }
+
+    fn sized(mut self, body: &Body) -> Self {
+        self.size = body.width.max(body.depth);
+        self
+    }
+
+    /// Plays `slice` at `t`: heard at `gain`, and ringing bank `to`.
+    fn play(&mut self, t: f32, slice: timbre::Slice, rate: f32, gain: f32, to: u8, limit: f32) {
+        self.recorded.push(GrainHit {
+            at: (t.max(0.0) * self.sr) as u32,
+            to,
+            slice,
+            rate,
+            gain,
+            body: gain * BODY,
+            limit,
+        });
+    }
+
+    /// A whole recording of `what` at `t`, pitched for a thing `size` m
+    /// across. False if there is no such recording.
+    fn event(&mut self, t: f32, what: Timbre, size: f32, gain: f32, to: u8) -> bool {
+        let Some(slice) = timbre::whole(what, &mut self.rng) else {
+            return false;
+        };
+        let rate = timbre::size_rate(what, size) * self.rng.range(0.94, 1.06);
+        self.play(t, slice, rate, gain, to, 6.0);
+        true
+    }
+
+    /// One single event out of a recording of `what`.
+    fn single(&mut self, t: f32, what: Timbre, size: f32, gain: f32, to: u8) -> bool {
+        let Some(slice) = timbre::event(what, &mut self.rng) else {
+            return false;
+        };
+        let rate = timbre::size_rate(what, size) * self.rng.range(0.9, 1.1);
+        self.play(t, slice, rate, gain, to, 0.6);
+        true
+    }
+
+    /// `seconds` of a sustained recording of `what`.
+    fn sustained(&mut self, t: f32, what: Timbre, seconds: f32, gain: f32, to: u8) -> bool {
+        let Some(slice) = timbre::stretch(what, seconds, &mut self.rng) else {
+            return false;
+        };
+        let rate = timbre::size_rate(what, self.size) * self.rng.range(0.94, 1.06);
+        self.play(t, slice, rate, gain, to, seconds);
+        true
+    }
+
+    /// The finished one-shot. The recordings are the events' own sound, so
+    /// the computed clicks that stood in for it are dropped where a
+    /// recording plays.
+    fn voice(mut self, banks: Vec<Bank>, gain: f32, direct_gain: f32) -> BoxVoice {
+        if !self.recorded.is_empty() {
+            for h in &mut self.hits {
+                h.direct = 0.0;
+            }
+        }
+        Box::new(
+            ModalVoice::new(
+                banks,
+                self.hits,
+                gain,
+                direct_gain,
+                self.micro.cutoff,
+                self.sr,
+            )
+            .with_recorded(self.recorded),
+        )
+    }
+
+    fn samples(&self, seconds: f32) -> u16 {
+        (seconds * self.sr).round().clamp(1.0, 4000.0) as u16
+    }
+
+    fn push(&mut self, t: f32, tau: f32, to: u8, step: bool, amp: f32, direct: f32) {
+        self.hits.push(Hit {
+            at: (t.max(0.0) * self.sr) as u32,
+            len: self.samples(tau),
+            to,
+            step,
+            amp,
+            direct,
+        });
+    }
+
+    /// A force pulse: an impact or a slip.
+    fn pulse(&mut self, t: f32, tau: f32, to: u8, amp: f32, direct: f32) {
+        self.push(t, tau, to, false, amp, direct);
+    }
+
+    /// A force step: a load let go over `tau`.
+    fn release(&mut self, t: f32, tau: f32, to: u8, amp: f32, direct: f32) {
+        self.push(t, tau, to, true, amp, direct);
+    }
+
+    /// One micro-fracture of relative energy `e` (0..1) at `t`.
+    fn crack(&mut self, t: f32, e: f32, to: u8, amp: f32) {
+        let a = amp * e.sqrt();
+        let what = timbre::crack_of(self.material);
+        if let Some(slice) = timbre::event(what, &mut self.rng) {
+            // Bigger cracks last longer, so they sound lower: duration goes
+            // as energy to the third; a quarter of that reaches the pitch.
+            let rate = timbre::size_rate(what, self.size)
+                * e.max(1e-3).powf(-0.08)
+                * self.rng.range(0.9, 1.1);
+            self.play(t, slice, rate, a * self.micro.direct, to, MICRO_LIMIT);
+            return;
+        }
+        let tau = self.micro.tau * e.cbrt();
+        self.pulse(t, tau, to, a, a * self.micro.direct);
+    }
+
+    /// `n` micro-fractures spread over the banks `to`, at times drawn by
+    /// `when`. Sizes follow the material's power law; `fade` (s) is how fast
+    /// the largest possible event shrinks.
+    fn shower(
+        &mut self,
+        n: usize,
+        to: &[u8],
+        amp: f32,
+        fade: f32,
+        mut when: impl FnMut(&mut Rng) -> f32,
+    ) {
+        // A recorded crack is already a small avalanche of its own, so
+        // fewer of them make the same shower.
+        let recorded = !timbre::clips(timbre::crack_of(self.material)).is_empty();
+        let n = if recorded { n.div_ceil(4).max(2) } else { n };
+        let amp = if recorded { amp * 1.6 } else { amp };
+        for _ in 0..n {
+            let t = when(&mut self.rng);
+            let cap = if fade > 0.0 {
+                1.0 / (1.0 + t / fade)
+            } else {
+                1.0
+            };
+            let e = avalanche(&mut self.rng, self.micro.beta, cap);
+            let bank = to[(self.rng.next_u32() as usize) % to.len()];
+            self.crack(t, e, bank, amp);
+        }
+    }
+}
+
+/// A time from Omori's law, rate `~ (t + c)^-p` on `[0, span]`.
+fn omori(rng: &mut Rng, c: f32, span: f32, p: f32) -> f32 {
+    let q = 1.0 - p;
+    let (lo, hi) = (c.powf(q), (span + c).powf(q));
+    (lo + rng.unit() * (hi - lo)).powf(1.0 / q) - c
+}
+
+/// A time from an exponentially decaying rate with time constant `tau`.
+fn decaying(rng: &mut Rng, tau: f32, span: f32) -> f32 {
+    (-tau * rng.unit().max(1e-6).ln()).min(span * rng.range(0.6, 1.0))
+}
+
+/// What the game knows about a break.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BreakInfo {
+    pub body: Body,
+    pub cause: BreakCause,
+    /// Where along the member, 0..1.
+    pub at: f32,
+    /// Elastic energy the member held when it let go, J.
+    pub energy: f32,
+    /// Share of that energy that was axial (the rest was bending), 0..1.
+    pub axial: f32,
+}
+
+fn sanitize(body: &Body) -> Option<Body> {
+    let ok = [
+        body.youngs,
+        body.shear,
+        body.density,
+        body.length,
+        body.area,
+        body.iy,
+        body.iz,
+        body.width,
+        body.depth,
+    ]
+    .iter()
+    .all(|x| x.is_finite() && *x > 0.0);
+    (ok && body.wall.is_finite() && body.damage.is_finite()).then_some(*body)
+}
+
+fn finite(x: f32, or: f32) -> f32 {
+    if x.is_finite() {
+        x
+    } else {
+        or
+    }
+}
+
+const A: u8 = 0;
+const B: u8 = 1;
+const FLOOR: u8 = 2;
+const EXTRA: u8 = 3;
+
+/// A member breaks.
+pub fn break_voice(info: &BreakInfo, detail: f32, sr: f32, seed: u32) -> Option<BoxVoice> {
+    let body = sanitize(&info.body)?;
+    let energy = finite(info.energy, 0.0).max(0.02 * capacity_energy(&body));
+    let gain = level(energy) * OUTPUT;
+    if gain < 1e-3 {
+        return None;
+    }
+    let material = body.material;
+    let cause = info.cause;
+    let axial = finite(info.axial, 0.5).clamp(0.0, 1.0);
+    let x = finite(info.at, 0.5).clamp(0.0, 1.0);
+    let mut s = Score::new(material, sr, seed).sized(&body);
+    let m = s.micro;
+
+    // The two pieces: each still held at its joint, free at the break. A
+    // connection failure leaves the member whole, hanging from its other
+    // end, and jolts whatever it was bolted to.
+    let connection = matches!(cause, BreakCause::Connection);
+    let split = x.clamp(0.15, 0.85);
+    let (pa, pb) = if connection {
+        (
+            body.piece(1.0, Ends::Cantilever),
+            body.piece(1.0, Ends::Held),
+        )
+    } else {
+        (
+            body.piece(split, Ends::Cantilever),
+            body.piece(1.0 - split, Ends::Cantilever),
+        )
+    };
+    // Bending and axial shares of the force that was released.
+    let drive = Drive {
+        at: 1.0,
+        transverse: (1.0 - axial).sqrt().max(0.25),
+        axial: axial.sqrt().max(0.15),
+    };
+    let modes = budget(BREAK_MODES, detail);
+    // Steel pulled apart is computed from end to end: the load let go rings
+    // the two halves with steel's own low loss, and they whip sideways as
+    // well as recoiling, since no break is square.
+    let computed = material == MaterialKind::Steel && matches!(cause, BreakCause::Rupture);
+    let held = |piece: &Body, drive: Drive, seed: u32| {
+        if computed {
+            let drive = Drive {
+                transverse: drive.transverse.max(0.35),
+                ..drive
+            };
+            grounded(piece, piece.modes(drive, modes, seed), SOUNDBOARD_RELEASE)
+        } else {
+            seated(piece, drive, modes, seed)
+        }
+    };
+    let mut banks = vec![
+        Bank::new(&held(&pa, drive, seed), sr),
+        Bank::new(
+            &held(
+                &pb,
+                if connection {
+                    Drive { at: 0.04, ..drive }
+                } else {
+                    drive
+                },
+                seed ^ 0xB,
+            ),
+            sr,
+        ),
+        Bank::new(&floor_modes(seed), sr),
+    ];
+    let both = [A, B];
+    // Time for a stress wave to cross a piece and come back.
+    let echo = |b: &Body| 2.0 * b.length / b.wave_speed();
+
+    match cause {
+        // Steel in tension: necking is silent, then the last ligament
+        // shears through in a fraction of a millisecond and the halves
+        // recoil. The wave that bounces along each half is its axial modes,
+        // already in the banks.
+        BreakCause::Rupture if computed => {
+            s.release(0.0, 0.25e-3, A, 0.8, 1.0);
+            s.release(0.0, 0.25e-3, B, 0.8, 0.0);
+            s.release(0.0, 1.5e-3, FLOOR, 0.15, 0.0);
+            // The jolt runs on into the frame: the members next to this one
+            // take it a wave transit later, spread out by the joints, and
+            // ring lower and longer. (Their sizes are a guess: twice this
+            // member, held at both ends.)
+            let frame = Body {
+                length: 2.0 * body.length,
+                ends: Ends::Held,
+                ..body
+            };
+            banks.push(Bank::new(
+                &grounded(
+                    &frame,
+                    frame.modes(
+                        Drive {
+                            at: 0.31,
+                            transverse: 1.0,
+                            axial: 0.3,
+                        },
+                        modes,
+                        seed ^ 0xF2A,
+                    ),
+                    SOUNDBOARD_RELEASE,
+                ),
+                sr,
+            ));
+            let transit = body.length / body.wave_speed();
+            s.release(transit, 1.2e-3, EXTRA, 0.6, 0.0);
+            s.release(3.0 * transit, 2.0e-3, EXTRA, 0.3, 0.0);
+        }
+        BreakCause::Rupture => {
+            s.release(0.0, 0.25e-3, A, 0.8, 1.0);
+            s.release(0.0, 0.25e-3, B, 0.8, 0.0);
+            for (bank, piece) in [(A, &pa), (B, &pb)] {
+                let period = echo(piece);
+                for k in 0..4 {
+                    let t = (0.5 + k as f32) * period * s.rng.range(0.95, 1.05);
+                    let a = 0.4 * 0.55f32.powi(k);
+                    s.pulse(t, 0.12e-3, bank, a, 0.5 * a);
+                }
+            }
+            s.release(0.0, 1.5e-3, FLOOR, 0.15, 0.0);
+        }
+        // A plastic hinge used up: the tension side tears open in steps,
+        // each a little larger and sooner than the last.
+        BreakCause::Hinge => {
+            let span = s.rng.range(0.035, 0.1);
+            let n = 5 + (s.rng.next_u32() % 4) as usize;
+            for i in 0..n {
+                let f = (i + 1) as f32 / n as f32;
+                let t = span * (1.0 - (1.0 - f).powf(1.7));
+                let a = 0.15 + 0.6 * f * f;
+                s.release(t, 0.6e-3, both[i % 2], a, 0.5 * a);
+                s.release(t, 0.6e-3, both[(i + 1) % 2], 0.6 * a, 0.0);
+            }
+            s.release(span, 3e-3, FLOOR, 0.12, 0.0);
+        }
+        // Bolts or a weld: the fasteners shear one after another as each
+        // hands its load to the next, then the member is free.
+        BreakCause::Connection => {
+            let n = 2 + (s.rng.next_u32() % 3) as usize;
+            let mut t = 0.0;
+            for i in 0..n {
+                let a = 0.45 + 0.1 * i as f32;
+                s.pulse(t, 0.08e-3, A, a, 1.2 * a);
+                s.pulse(t, 0.08e-3, B, 0.5 * a, 0.0);
+                t += s.rng.range(0.6e-3, 3.5e-3);
+            }
+            s.release(t, 0.3e-3, A, 0.8, 0.6);
+            s.release(t, 0.3e-3, B, 0.45, 0.0);
+            s.release(t, 1.5e-3, FLOOR, 0.15, 0.0);
+        }
+        // Timber in tension or bending: fibre bundles let go in a ragged
+        // run across the section, then splinters keep tearing out.
+        BreakCause::Splinter => {
+            let span = s.rng.range(0.010, 0.028);
+            let n = 6 + (s.rng.next_u32() % 5) as usize;
+            let mut sizes: Vec<f32> = (0..n)
+                .map(|_| avalanche(&mut s.rng, m.beta, 1.0).sqrt() + 0.15)
+                .collect();
+            let norm = sizes.iter().map(|a| a * a).sum::<f32>().sqrt();
+            sizes.iter_mut().for_each(|a| *a /= norm);
+            for (i, a) in sizes.iter().enumerate() {
+                let t = span * (i as f32 + s.rng.unit()) / n as f32;
+                let tau = s.rng.range(0.3e-3, 0.9e-3);
+                s.release(t, tau, both[i % 2], 1.1 * a, 1.3 * a);
+                s.release(t, tau, both[(i + 1) % 2], 0.7 * a, 0.0);
+            }
+            let after = 70 + (s.rng.next_u32() % 70) as usize;
+            s.shower(after, &both, 0.6, 0.12, |r| {
+                span + omori(r, 0.005, 0.5, 0.75)
+            });
+            s.release(span, 3e-3, FLOOR, 0.12, 0.0);
+        }
+        // Timber shear: one crack runs the length of the member along the
+        // grain at a few hundred metres a second.
+        BreakCause::TimberSplit => {
+            let run = (body.length / 300.0).clamp(0.006, 0.03);
+            s.shower(36, &both, 0.5, 0.0, |r| run * r.unit());
+            s.release(run, 0.6e-3, A, 0.75, 0.9);
+            s.release(run, 0.6e-3, B, 0.75, 0.0);
+            s.shower(40, &both, 0.4, 0.08, |r| run + omori(r, 0.004, 0.3, 0.75));
+            s.release(run, 3e-3, FLOOR, 0.10, 0.0);
+        }
+        // Crushing: no clean release, the section grinds down grain by
+        // grain (concrete) or fibres kink and fold (timber).
+        BreakCause::Crushing => {
+            let (n, span, tau) = if material == MaterialKind::Timber {
+                (130, 0.45, 0.14)
+            } else {
+                (320, 0.7, 0.2)
+            };
+            s.release(0.0, 2.5e-3, A, 0.4, 0.5);
+            s.release(0.0, 2.5e-3, B, 0.4, 0.0);
+            s.shower(n, &[A, B, FLOOR], 0.55, 0.25, |r| decaying(r, tau, span));
+            s.release(0.0, 5e-3, FLOOR, 0.17, 0.0);
+        }
+        // Reinforced concrete: the concrete cracks, then the bars snap one
+        // by one and ring inside it.
+        BreakCause::RebarRupture => {
+            s.release(0.0, 0.6e-3, A, 0.55, 0.8);
+            s.release(0.0, 0.6e-3, B, 0.55, 0.0);
+            s.shower(70, &[A, B, FLOOR], 0.4, 0.15, |r| decaying(r, 0.08, 0.35));
+            let bar = Body {
+                ends: Ends::Held,
+                // Cast in: the concrete damps it hard.
+                damage: 0.9,
+                ..Body::member(
+                    &breakit_core::Material::steel(),
+                    &breakit_core::Section::rect(0.016, 0.016),
+                    body.length as f64,
+                )
+            };
+            banks.push(Bank::new(
+                &bar.modes(
+                    Drive {
+                        at: split,
+                        transverse: 0.5,
+                        axial: 0.9,
+                    },
+                    16,
+                    seed ^ 0xBA2,
+                ),
+                sr,
+            ));
+            let bars = 2 + (s.rng.next_u32() % 3) as usize;
+            let mut t = s.rng.range(0.004, 0.02);
+            for _ in 0..bars {
+                s.release(t, 0.1e-3, EXTRA, 0.55, 0.5);
+                t += s.rng.range(0.008, 0.05);
+            }
+            s.release(0.0, 3e-3, FLOOR, 0.17, 0.0);
+        }
+        // Carbon fibre: stores far more energy per kilo than anything
+        // else here and lets go of all of it at once, then loose fibres
+        // keep snapping.
+        BreakCause::FibreRupture => {
+            s.release(0.0, 0.08e-3, A, 0.8, 1.1);
+            s.release(0.0, 0.08e-3, B, 0.8, 0.0);
+            s.shower(260, &both, 0.45, 0.02, |r| decaying(r, 0.012, 0.07));
+            s.release(0.0, 1e-3, FLOOR, 0.10, 0.0);
+        }
+        // Plies peel apart: a crack runs the length at over a kilometre a
+        // second.
+        BreakCause::Delamination => {
+            let run = (body.length / 1500.0).clamp(0.002, 0.008);
+            s.shower(50, &both, 0.5, 0.0, |r| run * r.unit());
+            s.release(run, 0.15e-3, A, 0.7, 0.8);
+            s.release(run, 0.15e-3, B, 0.7, 0.0);
+            s.shower(90, &both, 0.35, 0.02, |r| run + decaying(r, 0.012, 0.05));
+        }
+        // Brittle cracking and diagonal shear in concrete: one sharp
+        // release, then the faces grind and rubble falls.
+        _ => {
+            let shear = matches!(cause, BreakCause::ConcreteShear);
+            s.release(0.0, 0.5e-3, A, 0.8, 1.0);
+            s.release(0.0, 0.5e-3, B, 0.8, 0.0);
+            let n = if shear { 150 } else { 110 };
+            s.shower(n, &[A, B, FLOOR], 0.6, 0.12, |r| decaying(r, 0.09, 0.4));
+            s.release(0.0, 3e-3, FLOOR, 0.20, 0.0);
+        }
+    }
+    // What the failure itself sounds like, from a recording of one.
+    let size = s.size;
+    let _ = m;
+    match cause {
+        BreakCause::Rupture if computed => {}
+        BreakCause::Rupture => {
+            s.event(0.0, Timbre::SteelSnap, size, 1.0, A);
+        }
+        BreakCause::Hinge => {
+            s.sustained(0.0, Timbre::SteelGroan, 0.7, 0.7, A);
+            s.event(0.05, Timbre::SteelTear, size, 0.9, B);
+        }
+        BreakCause::Connection => {
+            s.event(0.0, Timbre::SteelTear, size, 1.0, A);
+        }
+        BreakCause::Splinter | BreakCause::TimberSplit => {
+            s.event(0.0, Timbre::TimberBreak, size, 1.0, A);
+        }
+        BreakCause::Crushing => {
+            let what = if material == MaterialKind::Timber {
+                Timbre::TimberCrush
+            } else {
+                Timbre::ConcreteCrush
+            };
+            s.event(0.0, what, size, 0.9, A);
+        }
+        BreakCause::RebarRupture => {
+            s.event(0.0, Timbre::ConcreteBreak, size, 1.0, A);
+            let bars = 2 + (s.rng.next_u32() % 3) as usize;
+            let mut t = s.rng.range(0.004, 0.02);
+            for _ in 0..bars {
+                s.single(t, Timbre::RebarSnap, 0.016, 0.6, B);
+                t += s.rng.range(0.008, 0.05);
+            }
+        }
+        BreakCause::FibreRupture => {
+            s.event(0.0, Timbre::CarbonSnap, size, 1.0, A);
+        }
+        BreakCause::Delamination => {
+            s.event(0.0, Timbre::CarbonCrackle, size, 0.9, A);
+        }
+        _ => {
+            s.event(0.0, Timbre::ConcreteBreak, size, 1.0, A);
+        }
+    }
+    Some(s.voice(banks, gain, 0.5))
+}
+
+/// A member reaches a worse damage state without breaking. `energy` is the
+/// elastic energy it holds, J; a few percent of it is released.
+pub fn damage_voice(
+    body: &Body,
+    state: DamageState,
+    energy: f32,
     sr: f32,
     seed: u32,
 ) -> Option<BoxVoice> {
-    if !(speed.is_finite() && size.is_finite()) || speed < 0.3 {
+    let body = sanitize(body)?;
+    let material = body.material;
+    let held = finite(energy, 0.0).max(0.05 * capacity_energy(&body));
+    let mut s = Score::new(material, sr, seed).sized(&body);
+    let at = s.rng.range(0.1, 0.9);
+    let drive = Drive {
+        at,
+        transverse: 0.9,
+        axial: 0.45,
+    };
+    let share = match state {
+        DamageState::Intact | DamageState::Broken => return None,
+        // First yield: the metal itself flows silently. What is heard is
+        // the member lengthening in its connections: a bolt slips into
+        // bearing, mill scale flakes off.
+        DamageState::Yielded => {
+            s.pulse(0.0, 0.2e-3, A, 0.9, 0.35);
+            let size = s.size;
+            s.single(0.0, Timbre::SteelKnock, size, 0.8, A);
+            s.sustained(0.02, Timbre::SteelGroan, 0.6, 0.6, A);
+            0.02
+        }
+        // A crack opens: one jump and its aftershocks.
+        DamageState::Cracked => {
+            s.crack(0.0, 1.0, A, 0.9);
+            let n = if material == MaterialKind::Timber {
+                22
+            } else {
+                12
+            };
+            s.shower(n, &[A], 0.6, 0.03, |r| omori(r, 0.003, 0.09, 0.75));
+            0.03
+        }
+        // Plies let go along part of the length.
+        DamageState::Delaminated => {
+            let run = (body.length / 1500.0).clamp(0.002, 0.006);
+            s.shower(30, &[A], 0.6, 0.0, |r| run * r.unit());
+            s.release(run, 0.15e-3, A, 0.6, 0.6);
+            0.06
+        }
+        // Crushing starts: grains or fibres giving way under compression.
+        DamageState::Crushed => {
+            s.shower(110, &[A], 0.6, 0.15, |r| decaying(r, 0.1, 0.35));
+            let what = if material == MaterialKind::Timber {
+                Timbre::TimberCrush
+            } else {
+                Timbre::ConcreteCrush
+            };
+            s.sustained(0.0, what, 0.5, 0.7, A);
+            0.06
+        }
+    };
+    let gain = level(held * share) * OUTPUT;
+    if gain < 1e-3 {
         return None;
     }
-    // Debris is smaller than members: pitch from the piece's own size.
-    let rel = size.max(0.01) / (reference(material) * 0.2);
-    let pitch = rel.powf(-0.25).clamp(0.5, 3.0);
-    // Heavier pieces carry more low end.
-    let weight = rel.powf(0.3).clamp(0.3, 2.0);
-    let gain = ((speed / 6.0).powf(1.1) * rel.powf(0.15)).clamp(0.0, 1.0) * 0.55;
-    let mut k = Kit::new(sr, seed);
-    k.air = air(material);
-    let bounce = speed > 2.0 && k.chance(0.6);
-    match material {
-        MaterialKind::Steel => {
-            let ex = k.burst(1.0, 0.0001, 0.004, None);
-            let body = k.pass();
-            k.add(0.0, ex, body, 0.45 * gain);
-            // Clatter: the contact chattering, a noisy metallic hiss.
-            let ex = k.burst(1.0, 0.0001, k.range(0.12, 0.25), None);
-            let body = k.band(k.range(2500.0, 4500.0), 0.4);
-            k.add(0.0, ex, body, 0.35 * gain);
-            let ex = k.burst(1.0, 0.0001, 0.015, None);
-            let lo = k.range(180.0, 300.0) * pitch;
-            let t60 = k.range(0.5, 0.9);
-            let body = k.steel_dense(lo, 11000.0, 28, t60);
-            k.add(0.0, ex, body, 1.0 * gain);
-            thump(&mut k, 70.0 * pitch.sqrt(), 0.5 * gain * weight, 0.15, 0.0);
-            if bounce {
-                let t = k.range(0.12, 0.3);
-                let ex = k.burst(1.0, 0.0001, 0.003, None);
-                let body = k.steel_dense(lo * 1.1, 6000.0, 10, t60 * 0.6);
-                k.add(t, ex, body, 0.45 * gain);
+    let bank = Bank::new(&seated(&body, drive, STRAIN_MODES + 4, seed), sr);
+    Some(s.voice(vec![bank], gain, 0.5))
+}
+
+/// Contact stiffness E* against the floor, Pa, and the coefficient of
+/// restitution. Timber and concrete crush locally, so their contact is far
+/// softer than their Young's modulus along the member suggests.
+fn contact(m: MaterialKind) -> (f32, f32) {
+    match m {
+        MaterialKind::Steel => (2.6e10, 0.45),
+        MaterialKind::Timber => (1.5e9, 0.4),
+        MaterialKind::Concrete => (6.0e9, 0.2),
+        MaterialKind::Composite => (5.0e9, 0.5),
+    }
+}
+
+/// Hertz contact time of a mass `m` (kg) landing at `v` (m/s) on a corner
+/// of radius `r` (m) with contact modulus `e` (Pa).
+pub fn contact_time(m: f32, v: f32, r: f32, e: f32) -> f32 {
+    2.87 * (m * m / (r * e * e * v.max(0.05))).powf(0.2)
+}
+
+/// A loose piece lands. `speed` m/s into the floor, `mass` kg.
+pub fn impact_voice(
+    body: &Body,
+    speed: f32,
+    mass: f32,
+    detail: f32,
+    sr: f32,
+    seed: u32,
+) -> Option<BoxVoice> {
+    let body = sanitize(body)?;
+    let speed = finite(speed, 0.0).clamp(0.0, 60.0);
+    let mass = finite(mass, 0.0).clamp(0.0, 20_000.0);
+    let energy = 0.5 * mass * speed * speed;
+    let gain = level(energy) * OUTPUT;
+    if gain < 0.015 {
+        return None;
+    }
+    let material = body.material;
+    let mut s = Score::new(material, sr, seed).sized(&body);
+    let (stiffness, restitution) = contact(material);
+    // It lands on a corner or an edge a fraction of its section across.
+    let corner = (0.08 * body.width.min(body.depth)).clamp(0.002, 0.03);
+    // A long piece is not rigid: during the contact the floor only feels
+    // the part of it a bending wave has had time to reach, about a
+    // wavelength at the contact's own frequency. Solve for that.
+    let mut felt = mass.max(1e-4);
+    let mut tau = contact_time(felt, speed, corner, stiffness);
+    for _ in 0..3 {
+        let reach = body.bending_wavelength(0.5 / tau) / std::f32::consts::PI;
+        felt = mass.min(body.density * body.area * reach).max(1e-4);
+        tau = contact_time(felt, speed, corner, stiffness);
+    }
+    let tau = tau.clamp(0.04e-3, 8e-3);
+    let piece = Body {
+        ends: Ends::Free,
+        ..body
+    };
+    // Long pieces land on an end, chunks anywhere.
+    let slender = piece.length / piece.width.max(piece.depth);
+    let at = if slender > 3.0 {
+        s.rng.range(0.0, 0.12)
+    } else {
+        s.rng.unit()
+    };
+    let drive = Drive {
+        at,
+        transverse: 1.0,
+        axial: if slender > 3.0 { 0.25 } else { 0.5 },
+    };
+    // Lying on the floor damps it a little more than hanging free.
+    let resting = piece.with_damage(piece.damage.max(0.15));
+    // Quiet pieces get fewer modes: nobody hears the difference.
+    let budget = budget(
+        if gain > 0.05 {
+            IMPACT_MODES
+        } else {
+            IMPACT_MODES / 2
+        },
+        detail,
+    );
+    // A loose steel or timber piece is a free bar and rings as one: its own modes and
+    // the contact pulse are the whole sound, nothing recorded. The other
+    // materials land with a recorded knock.
+    let rings = matches!(material, MaterialKind::Steel | MaterialKind::Timber);
+    let ringing = |drive: Drive, budget: usize, seed: u32| {
+        if rings {
+            grounded(&piece, piece.modes(drive, budget, seed), SOUNDBOARD)
+        } else {
+            seated(&resting, drive, budget, seed)
+        }
+    };
+    let modes = ringing(drive, budget, seed);
+    // The mode gains assume an ideal impulse. A real contact lasts `tau`
+    // and leaves the modes above about 1/tau alone, so a soft landing rings
+    // less of the piece. Most of that loss is real (a soft landing *is*
+    // quieter); the level law already compressed loudness once, so give
+    // some of it back.
+    let reached: f32 = modes
+        .iter()
+        .map(|m| {
+            let x = m.freq * tau;
+            let p = if (x - 1.0).abs() < 1e-3 {
+                0.5
+            } else {
+                ((std::f32::consts::PI * x).sin() / (std::f32::consts::PI * x * (1.0 - x * x)))
+                    .abs()
+            };
+            (m.gain * p.min(1.0)).powi(2)
+        })
+        .sum::<f32>()
+        .sqrt();
+    let gain = gain * (1.0 / reached.max(0.05)).sqrt().min(4.0);
+    let banks = vec![
+        Bank::new(&modes, sr),
+        // The same bar, driven at the far end, for when it slaps down.
+        Bank::new(
+            &ringing(
+                Drive {
+                    at: 1.0 - at,
+                    ..drive
+                },
+                budget / 2,
+                seed ^ 0x5,
+            ),
+            sr,
+        ),
+        Bank::new(&floor_modes(seed), sr),
+    ];
+    // The contact's own sound: louder the shorter it is against the
+    // piece's ringing.
+    let click = (0.4e-3 / tau).sqrt().clamp(0.3, 1.2);
+    // Neither surface is smooth: the force arrives through a few asperities
+    // that each make contact for a fraction of the whole.
+    // What the landing sounds like: the whole recording for the first
+    // contact, single knocks out of one for the bounces. The length of the
+    // piece sets its pitch, the hardness of the contact its level.
+    let what = timbre::drop_of(material, mass);
+    let length = piece.length;
+    let land = |s: &mut Score, t: f32, bank: u8, a: f32| {
+        if rings {
+        } else if t <= 0.0 {
+            s.event(t, what, length, a * click, bank);
+        } else {
+            s.single(t, what, length, a * click, bank);
+        }
+        s.pulse(t, tau, bank, a, a * click);
+        for _ in 0..if rings { 0 } else { 3 } {
+            let dt = tau * s.rng.range(0.0, 0.8);
+            let fine = tau * s.rng.range(0.1, 0.3);
+            s.pulse(t + dt, fine, bank, 0.22 * a, 0.3 * a * click);
+        }
+        s.pulse(t, tau * 1.3, FLOOR, 0.3 * a, 0.0);
+    };
+    land(&mut s, 0.0, A, 1.0);
+    // A long piece that landed on one end falls over onto the other.
+    if slender > 3.0 {
+        let fall = (0.5 * piece.length / speed.max(1.0)).clamp(0.02, 0.16) * s.rng.range(0.7, 1.3);
+        let a = s.rng.range(0.45, 0.8);
+        land(&mut s, fall, B, a);
+    }
+    // It chatters: each bounce is shorter and softer by the restitution.
+    let mut t = 0.0;
+    let mut gap = (2.0 * restitution * speed / 9.81).clamp(0.01, 0.25) * 0.35;
+    let mut a = 1.0;
+    for i in 0..3 {
+        gap *= restitution;
+        a *= restitution;
+        t += gap;
+        if a < 0.05 || gap < 2e-3 {
+            break;
+        }
+        land(&mut s, t, both_ends(i), a);
+    }
+    // Concrete sheds grit when it lands, timber a few splinters.
+    let grit = match material {
+        MaterialKind::Concrete => 24,
+        MaterialKind::Timber => 5,
+        _ => 0,
+    };
+    if grit > 0 && gain > 0.03 {
+        s.shower(grit, &[A, FLOOR], 0.3, 0.05, |r| decaying(r, 0.05, 0.2));
+    }
+    Some(s.voice(banks, gain, 0.6))
+}
+
+fn both_ends(i: usize) -> u8 {
+    if i.is_multiple_of(2) {
+        B
+    } else {
+        A
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Members under load
+
+/// How a material's joints and crack faces slip, and how much it cracks on
+/// the way to failure.
+#[derive(Clone, Copy, Debug)]
+struct Friction {
+    /// Change in utilisation that breaks a joint loose (mean).
+    hold: f32,
+    /// Change in utilisation it then slides for (mean).
+    slide: f32,
+    /// Change in utilisation per slip while sliding.
+    slip: f32,
+    /// Irregularity of the slips, 0 = a steady creak, 1 = grinding.
+    rough: f32,
+    /// Slip impulse.
+    amp: f32,
+    /// Slip duration, s.
+    tau: f32,
+    /// Micro-fractures over the whole way from intact to failure.
+    cracks: f32,
+    /// Level of the largest micro-fracture.
+    crack_amp: f32,
+}
+
+fn friction(m: MaterialKind) -> Friction {
+    match m {
+        // Bolted steel: nothing, then a bolt slips into bearing with a
+        // bang. One slip per event.
+        MaterialKind::Steel => Friction {
+            hold: 0.07,
+            slide: 0.004,
+            slip: 0.004,
+            rough: 0.3,
+            amp: 1.0,
+            tau: 0.15e-3,
+            cracks: 50.0,
+            crack_amp: 0.4,
+        },
+        // Timber joints work all the time: dowels and bearing faces creak
+        // in long, fairly regular slip trains.
+        MaterialKind::Timber => Friction {
+            hold: 0.022,
+            slide: 0.02,
+            slip: 0.0011,
+            rough: 0.12,
+            amp: 0.28,
+            tau: 0.3e-3,
+            cracks: 520.0,
+            crack_amp: 1.3,
+        },
+        // Concrete only grinds once it has cracked (see `StrainVoice`).
+        MaterialKind::Concrete => Friction {
+            hold: 0.03,
+            slide: 0.012,
+            slip: 0.0016,
+            rough: 0.7,
+            amp: 0.35,
+            tau: 0.6e-3,
+            cracks: 420.0,
+            crack_amp: 0.9,
+        },
+        // Bonded laminate: no joints to creak, only matrix cracks.
+        MaterialKind::Composite => Friction {
+            hold: 0.09,
+            slide: 0.003,
+            slip: 0.003,
+            rough: 0.4,
+            amp: 0.45,
+            tau: 0.07e-3,
+            cracks: 300.0,
+            crack_amp: 0.8,
+        },
+    }
+}
+
+/// Most force events a straining member starts per block.
+const MAX_EVENTS_PER_BLOCK: usize = 10;
+
+/// One member under changing load, heard through its own modes.
+///
+/// Silent while the load is steady: a structure at rest makes no sound.
+/// It is driven by two things the solver reports:
+///
+/// * **utilisation changing**: joints stick and slip (see `Friction`);
+/// * **damage growing**: micro-fractures. Damage never decreases, so this
+///   reproduces the Kaiser effect for free: reloading a member to a load it
+///   has already seen is quiet, new ground is not. Events get more frequent
+///   and the largest ones larger as failure nears.
+pub struct StrainVoice {
+    bank: Bank,
+    body: Body,
+    seed: u32,
+    sr: f32,
+    rng: Rng,
+    law: Friction,
+    micro: Micro,
+    gain: f32,
+    /// Targets from the game and the smoothed values the voice has reached.
+    target_u: f32,
+    target_d: f32,
+    u: f32,
+    d: f32,
+    fresh: bool,
+    /// Stick-slip state, in utilisation travelled.
+    stuck: f32,
+    hold: f32,
+    sliding: f32,
+    /// A recorded creak is playing for the current slide.
+    creaking: bool,
+    crept: f32,
+    next_slip: f32,
+    /// Expected micro-fractures not yet played.
+    owed: f32,
+    pulses: Pulses,
+    /// Recorded events and what is heard of them directly.
+    grains: Grains,
+    heard: Vec<f32>,
+    /// Section size, m: the pitch of the member's cracks.
+    size: f32,
+    imp: Vec<Vec<f32>>,
+    step: Vec<Vec<f32>>,
+    held: f32,
+    leak: f32,
+    direct: Vec<f32>,
+    direct_lp: OnePole,
+}
+
+impl StrainVoice {
+    pub fn new(body: &Body, sr: f32, seed: u32) -> Option<Self> {
+        let body = sanitize(body)?;
+        let law = friction(body.material);
+        let micro = micro(body.material);
+        let mut rng = Rng::new(seed);
+        let drive = Drive {
+            at: rng.range(0.03, 0.2),
+            transverse: 0.8,
+            axial: 0.6,
+        };
+        Some(Self {
+            bank: Bank::new(&seated(&body, drive, STRAIN_MODES, seed), sr),
+            body,
+            seed,
+            sr,
+            hold: law.hold * rng.range(0.3, 1.0),
+            next_slip: law.slip,
+            rng,
+            law,
+            micro,
+            gain: level(capacity_energy(&body)) * OUTPUT * 0.5,
+            target_u: 0.0,
+            target_d: 0.0,
+            u: 0.0,
+            d: 0.0,
+            fresh: true,
+            stuck: 0.0,
+            sliding: 0.0,
+            creaking: false,
+            crept: 0.0,
+            owed: 0.0,
+            pulses: Pulses::default(),
+            grains: Grains::default(),
+            heard: Vec::new(),
+            size: body.width.max(body.depth),
+            imp: vec![Vec::new()],
+            step: vec![Vec::new()],
+            held: 0.0,
+            leak: step_leak(sr),
+            direct: Vec::new(),
+            direct_lp: OnePole::new(micro.cutoff, sr),
+        })
+    }
+
+    /// The solver's latest word on this member: `utilization` (1 = at
+    /// capacity) and `damage` (0..1, never decreasing). `jump` is true when
+    /// the voice has not been updated for a while: it then adopts the values
+    /// without sounding the difference.
+    pub fn set(&mut self, body: &Body, utilization: f32, damage: f32, jump: bool) {
+        let u = finite(utilization, 0.0).clamp(0.0, 3.0);
+        let d = finite(damage, 0.0).clamp(0.0, 1.0);
+        self.target_u = u;
+        self.target_d = d.max(self.target_d);
+        if jump || self.fresh {
+            self.u = u;
+            self.d = self.target_d;
+            self.fresh = false;
+        }
+        // A member that has cracked or yielded since rings duller.
+        if (body.damage - self.body.damage).abs() > 0.2 {
+            if let Some(b) = sanitize(body) {
+                self.body = b;
+                let drive = Drive {
+                    at: 0.1,
+                    transverse: 0.8,
+                    axial: 0.6,
+                };
+                self.bank = Bank::new(&seated(&b, drive, STRAIN_MODES, self.seed), self.sr);
             }
         }
-        MaterialKind::Timber => {
-            // Hollow knock with a little clatter.
-            let ex = k.burst(1.0, 0.0001, 0.006, None);
-            let p = 1.2 * pitch * k.range(0.85, 1.15);
-            let body = k.wood(p, 0.06);
-            k.add(0.0, ex, body, 1.3 * gain);
-            let ex = k.burst(1.0, 0.0001, 0.008, None);
-            let body = k.band(1600.0, 0.6);
-            k.add(0.0, ex, body, 0.4 * gain);
-            thump(&mut k, 95.0 * pitch.sqrt(), 0.4 * gain * weight, 0.1, 0.0);
-            if bounce {
-                for i in 0..2 {
-                    let t = k.range(0.08, 0.18) * (i + 1) as f32;
-                    let ex = k.burst(1.0, 0.0001, 0.004, None);
-                    let p = p * k.range(0.9, 1.2);
-                    let body = k.wood(p, 0.04);
-                    k.add(t, ex, body, 0.5 * gain / (i + 1) as f32);
+    }
+
+    /// True when it has nothing left to play.
+    pub fn quiet(&self) -> bool {
+        self.pulses.is_empty()
+            && self.grains.is_empty()
+            && self.bank.level() < 2e-5
+            && self.held.abs() < 1e-6
+    }
+
+    fn start(&mut self, offset: usize, tau: f32, amp: f32, direct: f32) {
+        let len = (tau * self.sr).round().clamp(1.0, 4000.0) as u16;
+        self.pulses.start(
+            Hit {
+                at: 0,
+                len,
+                to: 0,
+                step: false,
+                amp,
+                direct,
+            },
+            offset as u32,
+        );
+    }
+
+    /// Starts a recorded event `offset` samples into the block.
+    fn record(&mut self, offset: usize, slice: timbre::Slice, rate: f32, gain: f32, limit: f32) {
+        // Voices are cheap, but a member cannot say more than a few things
+        // at once.
+        if self.grains.len() >= 24 {
+            return;
+        }
+        self.grains.start(
+            GrainHit {
+                at: 0,
+                to: 0,
+                slice,
+                rate,
+                gain,
+                body: gain * BODY,
+                limit,
+            },
+            offset as u32,
+            self.sr,
+        );
+    }
+
+    /// Turns this block's change in load and damage into force events.
+    fn drive(&mut self, n: usize) {
+        let dt = n as f32 / self.sr;
+        // The solver steps at frame rate; follow it smoothly.
+        let k = 1.0 - (-dt / 0.03).exp();
+        let du = (self.target_u - self.u) * k;
+        let dd = (self.target_d - self.d) * k;
+        self.u += du;
+        self.d += dd;
+        let mut budget = MAX_EVENTS_PER_BLOCK;
+        let law = self.law;
+
+        // Stick-slip. Concrete has nothing to slip on until it has cracked.
+        let travel = du.abs();
+        let can_slip = self.body.material != MaterialKind::Concrete || self.d > 0.25;
+        if travel > 0.0 && can_slip {
+            // Friction force follows the normal force, which follows load.
+            let force = 0.35 + self.u.min(1.5);
+            if self.sliding <= 0.0 {
+                self.stuck += travel;
+                if self.stuck >= self.hold {
+                    self.stuck = 0.0;
+                    self.hold = law.hold * (0.25 - self.rng.unit().max(1e-3).ln());
+                    self.sliding = law.slide * self.rng.range(0.5, 1.5);
+                    self.crept = self.next_slip;
+                    // The joint lets go. If there is a recording of this
+                    // material straining, the slide plays a stretch of it:
+                    // as long as the slide will take at this loading rate,
+                    // and higher the faster the load moves.
+                    let speed = travel / dt;
+                    let seconds = (self.sliding / speed.max(1e-4)).clamp(0.15, 1.5);
+                    let what = timbre::strain_of(self.body.material);
+                    self.creaking = false;
+                    // Bonded laminate has no joints to creak.
+                    let jointed = self.body.material != MaterialKind::Composite;
+                    if jointed && timbre::recorded(what) {
+                        if let Some(slice) = timbre::stretch(what, seconds, &mut self.rng) {
+                            let rate = timbre::size_rate(what, self.size)
+                                * (speed / 0.2).clamp(0.2, 5.0).powf(0.2);
+                            self.record(0, slice, rate, 0.6 * law.amp.max(0.5) * force, seconds);
+                            self.creaking = true;
+                        }
+                    }
+                }
+            }
+            if self.sliding > 0.0 {
+                self.sliding -= travel;
+                let before = self.crept;
+                self.crept += travel;
+                while self.crept >= self.next_slip && budget > 0 {
+                    // Where in the block the threshold was crossed: steady
+                    // sliding gives evenly spaced slips, which is the pitch
+                    // of a creak.
+                    let frac = ((self.next_slip - before) / travel).clamp(0.0, 0.999);
+                    let size = self.next_slip / law.slip;
+                    let amp = law.amp * size * force;
+                    let offset = (frac * n as f32) as usize;
+                    // A bolt slipping into bearing is a knock: play a
+                    // recorded one. A train of slips under a recorded creak
+                    // only shakes the member; without a recording the
+                    // computed slips are all there is.
+                    let knock = self.body.material == MaterialKind::Steel;
+                    let what = timbre::crack_of(self.body.material);
+                    let slice = if knock {
+                        timbre::event(what, &mut self.rng)
+                    } else {
+                        None
+                    };
+                    if let Some(slice) = slice {
+                        let rate = timbre::size_rate(what, self.size) * self.rng.range(0.9, 1.1);
+                        self.record(offset, slice, rate, 0.6 * amp, 0.5);
+                        self.start(offset, law.tau, 0.3 * amp, 0.0);
+                    } else if self.creaking {
+                        self.start(offset, law.tau, 0.3 * amp, 0.0);
+                    } else {
+                        self.start(offset, law.tau, amp, amp * 0.5 * self.micro.direct);
+                    }
+                    self.crept -= self.next_slip;
+                    self.next_slip = law.slip * (1.0 + law.rough * self.rng.bipolar()).max(0.2);
+                    budget -= 1;
+                }
+                if budget == 0 {
+                    self.crept = self.crept.min(self.next_slip);
                 }
             }
         }
-        MaterialKind::Concrete => {
-            // Dull thud and a scatter of gravel.
-            let f = k.range(55.0, 80.0) * pitch.sqrt();
-            thump(&mut k, f, 0.9 * gain * weight, 0.12, 0.0);
-            let ex = k.burst(1.0, 0.0001, 0.03, Some(900.0));
-            let body = k.band(500.0 * pitch, 0.6);
-            k.add(0.0, ex, body, 0.6 * gain);
-            let ex = k.grains(500.0, 0.005, 0.08, 0.3, 1.0, 0.1, 2.2, 0.002);
-            let body = k.band(2600.0, 0.5);
-            k.add(0.002, ex, body, 0.5 * gain);
-        }
-        MaterialKind::Composite => {
-            let ex = k.burst(1.0, 0.0001, 0.003, None);
-            let lo = 800.0 * pitch;
-            let body = k.laminate(lo, lo * 5.0, 0.06, 6);
-            k.add(0.0, ex, body, 1.0 * gain);
-            let ex = k.burst(1.0, 0.0001, 0.004, None);
-            let body = k.high(2000.0);
-            k.add(0.0, ex, body, 0.35 * gain);
-            thump(
-                &mut k,
-                120.0 * pitch.sqrt(),
-                0.25 * gain * weight,
-                0.08,
-                0.0,
-            );
+
+        // Micro-fractures from new damage: sparse and small early, dense
+        // with rare large ones close to failure.
+        if dd > 0.0 {
+            let d = self.d;
+            self.owed += law.cracks * dd * (0.25 + 1.5 * d * d);
+            let cap = 0.01 + 0.99 * d * d * d;
+            while self.owed >= 1.0 && budget > 0 {
+                self.owed -= 1.0;
+                let e = avalanche(&mut self.rng, self.micro.beta, cap);
+                let amp = law.crack_amp * e.sqrt();
+                let offset = ((self.rng.unit() * n as f32) as usize).min(n - 1);
+                let what = timbre::crack_of(self.body.material);
+                if let Some(slice) = timbre::event(what, &mut self.rng) {
+                    let rate = timbre::size_rate(what, self.size)
+                        * e.max(1e-3).powf(-0.08)
+                        * self.rng.range(0.9, 1.1);
+                    self.record(offset, slice, rate, amp * self.micro.direct, MICRO_LIMIT);
+                    // A recorded crack is a small avalanche already.
+                    self.owed -= 3.0;
+                } else {
+                    self.start(
+                        offset,
+                        self.micro.tau * e.cbrt(),
+                        amp,
+                        amp * self.micro.direct,
+                    );
+                }
+                budget -= 1;
+            }
+            self.owed = self.owed.clamp(-3.0, 4.0);
         }
     }
-    k.scale(match material {
-        MaterialKind::Steel => 0.38,
-        MaterialKind::Timber => 0.45,
-        MaterialKind::Concrete => 1.1,
-        MaterialKind::Composite => 0.95,
-    });
-    Some(k.finish(2.0))
+}
+
+impl Voice for StrainVoice {
+    fn render(&mut self, out: &mut [f32]) -> bool {
+        let n = out.len();
+        if n == 0 {
+            return true;
+        }
+        self.drive(n);
+        if self.quiet() {
+            return true;
+        }
+        for b in [
+            &mut self.imp[0],
+            &mut self.step[0],
+            &mut self.direct,
+            &mut self.heard,
+        ] {
+            b.clear();
+            b.resize(n, 0.0);
+        }
+        self.pulses
+            .render(n, &mut self.imp, &mut self.step, &mut self.direct);
+        self.grains.render(n, &mut self.imp, &mut self.heard);
+        for (d, h) in self.direct.iter_mut().zip(&self.heard) {
+            *d = 0.5 * self.direct_lp.lp(*d + 1e-18) + h;
+        }
+        let scale = self.bank.step_scale();
+        for (x, &st) in self.imp[0].iter_mut().zip(&self.step[0]) {
+            self.held = self.held * self.leak + st * scale;
+            *x += self.held;
+        }
+        self.bank.process(&self.imp[0], &mut self.direct);
+        for (o, &d) in out.iter_mut().zip(&self.direct) {
+            *o += d * self.gain;
+        }
+        true
+    }
 }
 
 #[cfg(test)]
@@ -1386,281 +1404,286 @@ mod tests {
     use super::*;
 
     const SR: f32 = 48_000.0;
-
-    /// Renders until the voice ends; (seconds, peak, rms).
-    fn run(mut v: BoxVoice, max: f32) -> (f32, f32, f32) {
-        let mut buf = [0.0f32; 128];
-        let mut t = 0.0;
-        let (mut peak, mut sum, mut n) = (0.0f32, 0.0f32, 0usize);
-        loop {
-            buf.iter_mut().for_each(|x| *x = 0.0);
-            let alive = v.render(&mut buf);
-            for &x in &buf {
-                assert!(x.is_finite());
-                peak = peak.max(x.abs());
-                sum += x * x;
-                n += 1;
-            }
-            t += 128.0 / SR;
-            if !alive || t > max {
-                break;
-            }
-        }
-        (t, peak, (sum / n as f32).sqrt())
-    }
-
-    const CAUSES: [BreakCause; 10] = [
-        BreakCause::Rupture,
-        BreakCause::Hinge,
-        BreakCause::Brittle,
-        BreakCause::Splinter,
-        BreakCause::TimberSplit,
-        BreakCause::Crushing,
-        BreakCause::ConcreteShear,
-        BreakCause::RebarRupture,
-        BreakCause::FibreRupture,
-        BreakCause::Delamination,
-    ];
-    const MATS: [MaterialKind; 4] = [
+    const ALL: [MaterialKind; 4] = [
         MaterialKind::Steel,
         MaterialKind::Timber,
         MaterialKind::Concrete,
         MaterialKind::Composite,
     ];
 
-    #[test]
-    #[ignore]
-    fn print_levels() {
-        for m in MATS {
-            for c in CAUSES {
-                let (t, p, r) = run(break_voice(m, c, reference(m), SR, 1), 10.0);
-                println!("break {m:?} {c:?}: {t:.2}s peak {p:.2} rms {r:.3}");
-            }
-            for s in [
-                DamageState::Cracked,
-                DamageState::Yielded,
-                DamageState::Crushed,
-                DamageState::Delaminated,
-            ] {
-                let (t, p, r) = run(damage_voice(m, s, reference(m), SR, 1).unwrap(), 10.0);
-                println!("damage {m:?} {s:?}: {t:.2}s peak {p:.2} rms {r:.3}");
-            }
-            for v in [1.0, 3.0, 8.0] {
-                let (t, p, r) = run(impact_voice(m, v, reference(m) * 0.2, SR, 1).unwrap(), 10.0);
-                println!("impact {m:?} {v}: {t:.2}s peak {p:.2} rms {r:.3}");
-            }
-        }
-    }
-
-    /// Writes every break, damage and impact sound dry to
-    /// `$BREAKIT_DRY_DIR` for listening and spectrograms.
-    #[test]
-    #[ignore]
-    fn dump_dry() {
-        let Ok(dir) = std::env::var("BREAKIT_DRY_DIR") else {
-            return;
-        };
-        let dir = std::path::PathBuf::from(dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let render = |mut v: BoxVoice| {
-            let mut out = Vec::new();
+    fn render(mut v: BoxVoice, seconds: f32) -> (Vec<f32>, bool) {
+        let mut out = Vec::new();
+        let mut alive = true;
+        while alive && out.len() < (seconds * SR) as usize {
             let mut buf = [0.0f32; 128];
-            loop {
-                buf.iter_mut().for_each(|x| *x = 0.0);
-                let alive = v.render(&mut buf);
-                out.extend_from_slice(&buf);
-                if !alive {
-                    break;
-                }
-            }
-            out.extend(std::iter::repeat_n(0.0, SR as usize / 4));
-            out
+            alive = v.render(&mut buf);
+            out.extend_from_slice(&buf);
+        }
+        (out, alive)
+    }
+
+    fn peak(x: &[f32]) -> f32 {
+        x.iter().fold(0.0f32, |m, v| m.max(v.abs()))
+    }
+
+    fn rms(x: &[f32]) -> f32 {
+        (x.iter().map(|v| v * v).sum::<f32>() / x.len().max(1) as f32).sqrt()
+    }
+
+    /// Share of the energy above `hz`, by a one-pole split.
+    fn brightness(x: &[f32], hz: f32) -> f32 {
+        let mut lp = OnePole::new(hz, SR);
+        let (mut lo, mut hi) = (0.0, 0.0);
+        for &v in x {
+            let l = lp.lp(v);
+            lo += l * l;
+            hi += (v - l) * (v - l);
+        }
+        hi / (lo + hi + 1e-20)
+    }
+
+    fn info(m: MaterialKind, cause: BreakCause) -> BreakInfo {
+        let body = Body::typical(m, 3.0);
+        BreakInfo {
+            body,
+            cause,
+            at: 0.4,
+            energy: capacity_energy(&body),
+            axial: 0.5,
+        }
+    }
+
+    const CAUSES: [(MaterialKind, BreakCause); 11] = [
+        (MaterialKind::Steel, BreakCause::Rupture),
+        (MaterialKind::Steel, BreakCause::Hinge),
+        (MaterialKind::Steel, BreakCause::Connection),
+        (MaterialKind::Timber, BreakCause::Splinter),
+        (MaterialKind::Timber, BreakCause::TimberSplit),
+        (MaterialKind::Timber, BreakCause::Crushing),
+        (MaterialKind::Concrete, BreakCause::Brittle),
+        (MaterialKind::Concrete, BreakCause::ConcreteShear),
+        (MaterialKind::Concrete, BreakCause::RebarRupture),
+        (MaterialKind::Composite, BreakCause::FibreRupture),
+        (MaterialKind::Composite, BreakCause::Delamination),
+    ];
+
+    #[test]
+    fn every_break_sounds_ends_and_stays_finite() {
+        for (m, cause) in CAUSES {
+            let v = break_voice(&info(m, cause), 1.0, SR, 3).unwrap();
+            let (x, alive) = render(v, 10.5);
+            assert!(!alive, "{m:?} {cause:?} never ended");
+            assert!(x.iter().all(|v| v.is_finite()), "{m:?} {cause:?}");
+            let p = peak(&x);
+            assert!(p > 0.03 && p < 6.0, "{m:?} {cause:?} peak {p}");
+        }
+    }
+
+    #[test]
+    fn a_member_in_a_frame_does_not_ring_on() {
+        // A bare steel bar rings for seconds, which is what made the first
+        // version sound like glass. Built into a frame it is over quickly.
+        let (x, _) = render(
+            break_voice(&info(MaterialKind::Steel, BreakCause::Rupture), 1.0, SR, 5).unwrap(),
+            2.5,
+        );
+        let at = (1.5 * SR) as usize;
+        let tail = if x.len() > at { rms(&x[at..]) } else { 0.0 };
+        let onset = rms(&x[..(0.1 * SR) as usize]);
+        assert!(onset > 1e-3, "{onset}");
+        assert!(tail < 0.05 * onset, "tail {tail} vs onset {onset}");
+    }
+
+    #[test]
+    fn more_energy_is_louder_but_compressed() {
+        let loud = |e: f32| {
+            let mut i = info(MaterialKind::Steel, BreakCause::Rupture);
+            i.energy = e;
+            rms(&render(break_voice(&i, 1.0, SR, 9).unwrap(), 0.3).0)
         };
-        for m in MATS {
-            let mut all = Vec::new();
-            for c in CAUSES {
-                all.extend(render(break_voice(m, c, reference(m), SR, 7)));
-            }
-            crate::wav::write_wav(&dir.join(format!("break_{m:?}.wav")), &all, 1, SR as u32)
-                .unwrap();
-            let mut all = Vec::new();
-            for v in [8.0, 4.0, 2.0] {
-                for seed in 0..2 {
-                    all.extend(render(
-                        impact_voice(m, v, reference(m) * 0.2, SR, seed).unwrap(),
-                    ));
-                }
-            }
-            crate::wav::write_wav(&dir.join(format!("impact_{m:?}.wav")), &all, 1, SR as u32)
-                .unwrap();
-        }
+        let ratio = loud(4000.0) / loud(250.0);
+        // 16x the energy: 4x by physics, 2.3x after compression.
+        assert!(ratio > 1.8 && ratio < 3.0, "{ratio}");
     }
 
     #[test]
-    #[ignore]
-    fn print_stress_curve() {
-        for m in MATS {
-            let mut line = format!("{m:?}:");
-            for load in [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0] {
-                let mut v = StressVoice::new(m, SR, 3);
-                v.set(load, 0.1, 4.0);
-                let mut buf = vec![0.0f32; 128];
-                let (mut sum, mut n) = (0.0f32, 0);
-                for _ in 0..(10.0 * SR / 128.0) as usize {
-                    buf.iter_mut().for_each(|x| *x = 0.0);
-                    v.render(&mut buf);
-                    sum += buf.iter().map(|x| x * x).sum::<f32>();
-                    n += buf.len();
-                }
-                line += &format!(" {load}:{:.3}", (sum / n as f32).sqrt());
+    fn an_axial_break_is_pitched_at_the_bar_wave_frequency() {
+        // A steel tie that snaps rings at multiples of c / 4L of its
+        // pieces. Count the strongest low partial by correlation.
+        let mut i = info(MaterialKind::Steel, BreakCause::Rupture);
+        i.axial = 1.0;
+        i.at = 0.5;
+        let (x, _) = render(break_voice(&i, 1.0, SR, 2).unwrap(), 0.5);
+        let x = &x[(0.05 * SR) as usize..];
+        let power = |f: f32| {
+            let (mut s, mut c) = (0.0f32, 0.0f32);
+            for (n, v) in x.iter().enumerate() {
+                let p = std::f32::consts::TAU * f * n as f32 / SR;
+                s += v * p.sin();
+                c += v * p.cos();
             }
-            println!("{line}");
-        }
+            s * s + c * c
+        };
+        let piece = i.body.piece(0.5, Ends::Cantilever);
+        let f1 = piece.wave_speed() / (4.0 * piece.length);
+        let on = (-6..=6)
+            .map(|k| power(f1 * (1.0 + 0.002 * k as f32)))
+            .fold(0.0, f32::max);
+        let off = power(f1 * 1.37).max(power(f1 * 0.71));
+        // The recorded snap is heard over it, so the margin is modest.
+        assert!(on > 4.0 * off, "axial partial {on} vs {off}");
     }
 
     #[test]
-    fn breaks_terminate_and_peak_in_range() {
-        for m in MATS {
-            for c in CAUSES {
-                for seed in 0..3 {
-                    let (t, peak, _) = run(break_voice(m, c, reference(m), SR, seed), 10.0);
-                    assert!(t < 6.1, "{m:?} {c:?} ran {t} s");
-                    assert!((0.2..1.2).contains(&peak), "{m:?} {c:?} peak {peak}");
-                }
-            }
+    fn impacts_follow_contact_physics() {
+        // Steel on the floor: sub-millisecond. Timber: milliseconds.
+        let steel = contact_time(5.0, 3.0, 0.004, contact(MaterialKind::Steel).0);
+        let timber = contact_time(5.0, 3.0, 0.004, contact(MaterialKind::Timber).0);
+        assert!(steel > 0.2e-3 && steel < 1.5e-3, "{steel}");
+        assert!(timber > 3.0 * steel, "{timber}");
+        // Faster is shorter.
+        assert!(contact_time(5.0, 9.0, 0.004, 1e10) < contact_time(5.0, 1.0, 0.004, 1e10));
+
+        // A steel piece rings as a free bar under the contact pulse alone,
+        // so a harder landing, with its shorter contact, is brighter.
+        let hit = |speed: f32| {
+            let body = Body::typical(MaterialKind::Steel, 1.5);
+            let mass = body.mass();
+            render(impact_voice(&body, speed, mass, 1.0, SR, 4).unwrap(), 3.0).0
+        };
+        let (soft, hard) = (hit(0.7), hit(12.0));
+        assert!(
+            brightness(&hard, 1500.0) > 1.2 * brightness(&soft, 1500.0),
+            "hard {} soft {}",
+            brightness(&hard, 1500.0),
+            brightness(&soft, 1500.0)
+        );
+        // The other materials land with a recorded knock.
+        for (m, mass) in [(MaterialKind::Timber, 6.0), (MaterialKind::Concrete, 40.0)] {
+            assert!(impact_voice(&Body::fragment(m, 0.4), 4.0, mass, 1.0, SR, 4).is_some());
         }
     }
 
-    #[test]
-    fn damage_and_impacts_terminate_and_stay_bounded() {
-        let states = [
-            DamageState::Cracked,
-            DamageState::Yielded,
-            DamageState::Crushed,
-            DamageState::Delaminated,
-        ];
-        for m in MATS {
-            for s in states {
-                let (t, peak, _) = run(damage_voice(m, s, reference(m), SR, 5).unwrap(), 10.0);
-                assert!(
-                    t < 5.1 && peak < 1.0 && peak > 0.1,
-                    "{m:?} {s:?}: {t} s, peak {peak}"
-                );
+    fn strain(m: MaterialKind, path: impl Fn(f32) -> (f32, f32), seconds: f32) -> Vec<f32> {
+        let body = Body::typical(m, 3.0);
+        let mut v = StrainVoice::new(&body, SR, 11).unwrap();
+        let mut out = Vec::new();
+        let blocks = (seconds * SR / 128.0) as usize;
+        for b in 0..blocks {
+            let t = b as f32 * 128.0 / SR;
+            // The game updates at 60 Hz.
+            if b % 6 == 0 {
+                let (u, d) = path(t);
+                v.set(&body, u, d, false);
             }
-            assert!(damage_voice(m, DamageState::Intact, 10.0, SR, 1).is_none());
-            assert!(impact_voice(m, 0.1, 10.0, SR, 1).is_none());
-            let (t, peak, _) = run(
-                impact_voice(m, 8.0, reference(m) * 0.2, SR, 2).unwrap(),
-                5.0,
-            );
-            assert!(
-                t < 2.1 && peak <= 0.7 && peak > 0.05,
-                "{m:?} impact: {t} s, peak {peak}"
-            );
-        }
-    }
-
-    #[test]
-    fn stress_is_silent_unloaded_and_audible_at_capacity() {
-        let mut bad = Vec::new();
-        for m in MATS {
-            let mut v = StressVoice::new(m, SR, 9);
-            let mut buf = vec![0.0f32; 128];
-            for _ in 0..400 {
-                v.render(&mut buf);
-            }
-            assert!(buf.iter().all(|x| *x == 0.0));
-            v.set(1.0, 0.2, 6.0);
-            let (mut sum, mut n) = (0.0f32, 0);
-            for _ in 0..(10.0 * SR / 128.0) as usize {
-                buf.iter_mut().for_each(|x| *x = 0.0);
-                v.render(&mut buf);
-                sum += buf.iter().map(|x| x * x).sum::<f32>();
-                n += buf.len();
-            }
-            let rms = (sum / n as f32).sqrt();
-            println!("{m:?} stress rms at capacity: {rms:.3}");
-            if !(0.03..0.15).contains(&rms) {
-                bad.push(format!("{m:?} rms {rms}"));
-            }
-            v.reset();
-            buf.iter_mut().for_each(|x| *x = 0.0);
+            let mut buf = [0.0f32; 128];
             v.render(&mut buf);
-            assert!(buf.iter().all(|x| *x == 0.0));
+            out.extend_from_slice(&buf);
         }
-        assert!(bad.is_empty(), "{bad:?}");
+        out
     }
-}
-
-#[cfg(test)]
-mod bench {
-    use super::*;
 
     #[test]
-    #[ignore]
-    fn speed() {
-        let sr = 48_000.0;
-        let mut buf = vec![0.0f32; 128];
-        let blocks = (10.0 * sr / 128.0) as usize;
+    fn a_steady_load_is_silent() {
+        for m in ALL {
+            let x = strain(m, |_| (0.9, 0.9), 2.0);
+            // Adopted on the first update: nothing to say.
+            assert!(peak(&x) < 1e-4, "{m:?} {}", peak(&x));
+        }
+    }
+
+    #[test]
+    fn loading_is_heard_and_reloading_is_quieter() {
+        for m in ALL {
+            // Up to 0.9, back to 0.2, up to 0.9 again; damage follows the
+            // peak (Kaiser effect).
+            let path = |t: f32| {
+                let u = if t < 3.0 {
+                    0.3 * t
+                } else if t < 5.0 {
+                    0.9 - 0.35 * (t - 3.0)
+                } else {
+                    (0.2 + 0.35 * (t - 5.0)).min(0.9)
+                };
+                (u, (0.3 * t).min(0.9))
+            };
+            let x = strain(m, path, 7.0);
+            assert!(x.iter().all(|v| v.is_finite()));
+            let first = rms(&x[..(3.0 * SR) as usize]);
+            let again = rms(&x[(5.0 * SR) as usize..]);
+            assert!(first > 1e-4, "{m:?} first loading silent: {first}");
+            assert!(peak(&x) < 3.0, "{m:?} {}", peak(&x));
+            // Steel is the exception: its sound is bolts slipping, and they
+            // slip again on the way back up.
+            if m != MaterialKind::Steel {
+                assert!(again < 0.9 * first, "{m:?} reload {again} vs {first}");
+            }
+        }
+    }
+
+    #[test]
+    fn nearer_failure_is_busier() {
         for m in [
-            MaterialKind::Steel,
             MaterialKind::Timber,
             MaterialKind::Concrete,
             MaterialKind::Composite,
         ] {
-            let mut v = StressVoice::new(m, sr, 1);
-            v.set(1.2, 0.5, 8.0);
-            let t = std::time::Instant::now();
-            for _ in 0..blocks {
-                v.render(&mut buf);
-            }
-            println!(
-                "{m:?} stress at 1.2: {:.0}x real time",
-                10.0 / t.elapsed().as_secs_f32()
-            );
-            let t = std::time::Instant::now();
-            let mut b = break_voice(m, BreakCause::Hinge, 40.0, sr, 3);
-            let mut n = 0;
-            while b.render(&mut buf) {
-                n += 1;
-            }
-            println!(
-                "{m:?} break: {:.0}x real time",
-                (n as f32 * 128.0 / sr) / t.elapsed().as_secs_f32()
-            );
+            let x = strain(m, |t| (0.25 * t, (0.25 * t).min(1.0)), 4.0);
+            let early = rms(&x[..(1.5 * SR) as usize]);
+            let late = rms(&x[(2.5 * SR) as usize..]);
+            assert!(late > 1.4 * early, "{m:?} {early} -> {late}");
         }
-        let mut bank = ModalBank::new(&[(100.0, 1.0, 0.1); 8], sr);
-        let t = std::time::Instant::now();
-        let mut acc = 0.0;
-        for i in 0..480_000 {
-            acc += bank.process(if i % 1000 == 0 { 1.0 } else { 0.0 });
-        }
-        println!(
-            "8-mode bank: {:.0}x real time ({acc})",
-            10.0 / t.elapsed().as_secs_f32()
+    }
+
+    #[test]
+    fn a_creak_rises_in_pitch_with_loading_rate() {
+        // Slips per second while sliding = rate / slip distance.
+        let count = |rate: f32| {
+            let x = strain(MaterialKind::Timber, |t| (0.1 + rate * t, 0.0), 2.0);
+            // Onsets: samples where the envelope jumps.
+            let mut env = 0.0f32;
+            let mut onsets = 0;
+            let mut armed = true;
+            for v in &x {
+                let a = v.abs();
+                if a > 4.0 * env + 1e-4 && armed {
+                    onsets += 1;
+                    armed = false;
+                }
+                env = 0.995 * env + 0.005 * a;
+                if a < 1.5 * env {
+                    armed = true;
+                }
+            }
+            onsets
+        };
+        let (slow, fast) = (count(0.1), count(0.4));
+        assert!(slow > 5, "{slow}");
+        assert!(fast as f32 > 1.3 * slow as f32, "{slow} -> {fast}");
+    }
+
+    #[test]
+    fn bad_numbers_make_no_voice() {
+        let mut body = Body::typical(MaterialKind::Steel, 3.0);
+        body.area = f32::NAN;
+        assert!(impact_voice(&body, 3.0, 5.0, 1.0, SR, 1).is_none());
+        assert!(StrainVoice::new(&body, SR, 1).is_none());
+        body.area = 0.0;
+        assert!(damage_voice(&body, DamageState::Cracked, 10.0, SR, 1).is_none());
+        let good = Body::typical(MaterialKind::Steel, 3.0);
+        let v = break_voice(
+            &BreakInfo {
+                body: good,
+                cause: BreakCause::Rupture,
+                at: f32::NAN,
+                energy: f32::INFINITY,
+                axial: f32::NAN,
+            },
+            1.0,
+            SR,
+            1,
         );
-        let t = std::time::Instant::now();
-        let mut mix = crate::Mixer::new(sr);
-        let out = mix.render_seconds(10.0);
-        println!(
-            "empty mixer: {:.0}x ({})",
-            10.0 / t.elapsed().as_secs_f32(),
-            out.len()
-        );
-        let mut mix = crate::Mixer::new(sr);
-        mix.handle(crate::Command::Ui(crate::UiSound::Select));
-        mix.handle(crate::Command::Impact {
-            material: MaterialKind::Steel,
-            speed: 5.0,
-            size: 5.0,
-            place: crate::Place::at([0.0, 0.0, 0.0]),
-        });
-        mix.render_seconds(1.0);
-        let t = std::time::Instant::now();
-        mix.render_seconds(10.0);
-        println!(
-            "mixer after one impact, decaying: {:.0}x",
-            10.0 / t.elapsed().as_secs_f32()
-        );
+        let (x, _) = render(v.unwrap(), 1.0);
+        assert!(x.iter().all(|v| v.is_finite()));
     }
 }

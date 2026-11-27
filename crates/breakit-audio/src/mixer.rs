@@ -1,6 +1,6 @@
 //! Voices, buses, positioning, the hall reverb and the output limiter.
 //!
-//! The mixer owns everything that sounds: one stress bed per material, the
+//! The mixer owns everything that sounds: a voice per straining member, the
 //! rig and ambience voices keyed by the game's ids, and a capped pool of
 //! one-shots (damage, breaks, impacts, UI). [`Mixer::render`] runs on the
 //! audio thread; [`Mixer::handle`] applies a [`Command`] between blocks.
@@ -8,11 +8,12 @@
 use crate::ambience::AmbientVoice;
 use crate::dsp::{soft_clip, OnePole};
 use crate::material;
-use crate::material::StressVoice;
+use crate::material::StrainVoice;
 use crate::reverb::Hall;
 use crate::rigs::RigVoice;
 use crate::ui::ui_voice;
-use crate::{AmbientKind, BoxVoice, Bus, Command, MaterialKind, Place, Pos, RigKind, Voice};
+use crate::wind::WindVoice;
+use crate::{AmbientKind, BoxVoice, Bus, Command, Place, Pos, RigKind, Voice};
 
 /// Samples processed per internal block. Positions and gains are updated
 /// once per block and ramped across it.
@@ -28,21 +29,16 @@ const IMPACTS_PER_WINDOW: u32 = 6;
 /// A rig not updated for this long (seconds) fades out.
 const RIG_TIMEOUT: f32 = 0.5;
 
-const MATERIALS: [MaterialKind; 4] = [
-    MaterialKind::Steel,
-    MaterialKind::Timber,
-    MaterialKind::Concrete,
-    MaterialKind::Composite,
-];
+/// Most members heard straining at once.
+pub const MAX_STRAIN_VOICES: usize = 8;
 
-fn material_index(m: MaterialKind) -> usize {
-    match m {
-        MaterialKind::Steel => 0,
-        MaterialKind::Timber => 1,
-        MaterialKind::Concrete => 2,
-        MaterialKind::Composite => 3,
-    }
-}
+/// A straining member not updated for this long (seconds) holds its load
+/// (and so goes quiet); after `STRAIN_DROP` it is dropped.
+const STRAIN_STALE: f32 = 0.25;
+const STRAIN_DROP: f32 = 1.5;
+
+/// Most members heard singing in the wind at once.
+pub const MAX_WIND_VOICES: usize = 6;
 
 #[derive(Clone, Copy, Debug)]
 struct Listener {
@@ -153,10 +149,22 @@ struct OneShot {
     loudness: f32,
 }
 
-struct Bed {
-    voice: StressVoice,
-    place: Option<Place>,
+struct Strain {
+    id: u32,
+    voice: StrainVoice,
+    place: Place,
     channel: Channel,
+    /// Seconds since the game last updated it.
+    idle: f32,
+}
+
+struct Singer {
+    id: u32,
+    voice: WindVoice,
+    place: Place,
+    channel: Channel,
+    /// Seconds since the game last updated it.
+    idle: f32,
 }
 
 struct Rig {
@@ -183,7 +191,8 @@ struct Ambient {
 pub struct Mixer {
     sr: f32,
     listener: Listener,
-    beds: Vec<Bed>,
+    strains: Vec<Strain>,
+    singers: Vec<Singer>,
     rigs: Vec<Rig>,
     ambient: Vec<Ambient>,
     shots: Vec<OneShot>,
@@ -208,19 +217,13 @@ pub struct Mixer {
 impl Mixer {
     pub fn new(sample_rate: f32) -> Self {
         let sr = sample_rate;
-        let beds = MATERIALS
-            .iter()
-            .enumerate()
-            .map(|(i, &m)| Bed {
-                voice: StressVoice::new(m, sr, 1000 + i as u32),
-                place: None,
-                channel: Channel::new(sr),
-            })
-            .collect();
+        // Decode the recordings before the audio thread needs them.
+        crate::timbre::preload();
         Self {
             sr,
             listener: Listener::default(),
-            beds,
+            strains: Vec::with_capacity(MAX_STRAIN_VOICES),
+            singers: Vec::with_capacity(MAX_WIND_VOICES),
             rigs: Vec::new(),
             ambient: Vec::new(),
             shots: Vec::with_capacity(MAX_ONE_SHOTS),
@@ -250,6 +253,16 @@ impl Mixer {
         self.shots.len()
     }
 
+    /// How much detail a new voice gets: fewer modes when many voices
+    /// already sound.
+    fn detail(&self) -> f32 {
+        match self.shots.len() {
+            0..=11 => 1.0,
+            12..=27 => 0.6,
+            _ => 0.4,
+        }
+    }
+
     fn next_seed(&mut self) -> u32 {
         self.seed = self.seed.wrapping_add(0x9E37_79B9);
         self.seed
@@ -265,42 +278,104 @@ impl Mixer {
             } => {
                 self.listener = Listener { position, right };
             }
-            Command::Stress {
-                material,
-                load,
-                rate,
-                members,
+            Command::Strain {
+                id,
+                body,
+                utilization,
+                damage,
                 place,
             } => {
-                let bed = &mut self.beds[material_index(material)];
-                bed.voice.set(load, rate, members);
-                bed.place = Some(place);
+                if let Some(s) = self.strains.iter_mut().find(|s| s.id == id) {
+                    s.voice
+                        .set(&body, utilization, damage, s.idle > STRAIN_STALE);
+                    s.place = place;
+                    s.idle = 0.0;
+                    return;
+                }
+                if self.strains.len() >= MAX_STRAIN_VOICES {
+                    // Make room by dropping the one longest without news,
+                    // if it has finished speaking.
+                    let stale = self
+                        .strains
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, s)| s.idle > 0.05 && s.voice.quiet())
+                        .max_by(|a, b| a.1.idle.total_cmp(&b.1.idle))
+                        .map(|(i, _)| i);
+                    match stale {
+                        Some(i) => {
+                            self.strains.swap_remove(i);
+                        }
+                        None => return,
+                    }
+                }
+                let seed = self.next_seed();
+                if let Some(mut voice) = StrainVoice::new(&body, sr, seed) {
+                    voice.set(&body, utilization, damage, true);
+                    self.strains.push(Strain {
+                        id,
+                        voice,
+                        place,
+                        channel: Channel::new(sr),
+                        idle: 0.0,
+                    });
+                }
+            }
+            Command::Wind {
+                id,
+                body,
+                frequency,
+                force,
+                locked,
+                place,
+            } => {
+                if let Some(s) = self.singers.iter_mut().find(|s| s.id == id) {
+                    s.voice.set(frequency, force, locked);
+                    s.place = place;
+                    s.idle = 0.0;
+                    return;
+                }
+                if self.singers.len() >= MAX_WIND_VOICES {
+                    match self.singers.iter().position(|s| s.voice.quiet()) {
+                        Some(i) => {
+                            self.singers.swap_remove(i);
+                        }
+                        None => return,
+                    }
+                }
+                let seed = self.next_seed();
+                if let Some(mut voice) = WindVoice::new(&body, sr, seed) {
+                    voice.set(frequency, force, locked);
+                    self.singers.push(Singer {
+                        id,
+                        voice,
+                        place,
+                        channel: Channel::new(sr),
+                        idle: 0.0,
+                    });
+                }
             }
             Command::Damage {
-                material,
+                body,
                 state,
-                size,
+                energy,
                 place,
             } => {
                 let seed = self.next_seed();
-                if let Some(v) = material::damage_voice(material, state, size, sr, seed) {
+                if let Some(v) = material::damage_voice(&body, state, energy, sr, seed) {
                     self.play(v, Bus::Structure, Some(place), 1.0, 3.0);
                 }
             }
-            Command::Break {
-                material,
-                cause,
-                size,
-                place,
-            } => {
+            Command::Break { info, place } => {
                 let seed = self.next_seed();
-                let v = material::break_voice(material, cause, size, sr, seed);
-                self.play(v, Bus::Structure, Some(place), 1.0, 4.0);
+                if let Some(v) = material::break_voice(&info, self.detail(), sr, seed) {
+                    self.play(v, Bus::Structure, Some(place), 1.0, 4.0);
+                }
             }
             Command::Impact {
-                material,
+                body,
                 speed,
-                size,
+                mass,
                 place,
             } => {
                 let window = (self.clock / (sr as u64 / 20).max(1)) as u32;
@@ -311,7 +386,8 @@ impl Mixer {
                     return;
                 }
                 let seed = self.next_seed();
-                if let Some(v) = material::impact_voice(material, speed, size, sr, seed) {
+                if let Some(v) = material::impact_voice(&body, speed, mass, self.detail(), sr, seed)
+                {
                     self.impact_window.1 += 1;
                     self.play(v, Bus::Structure, Some(place), 1.0, 3.0);
                 }
@@ -384,9 +460,8 @@ impl Mixer {
             Command::Volume { bus, gain } => self.bus_gain[bus.index()] = gain.clamp(0.0, 2.0),
             Command::Master(g) => self.master = g.clamp(0.0, 2.0),
             Command::ResetStructure => {
-                for bed in &mut self.beds {
-                    bed.voice.reset();
-                }
+                self.strains.clear();
+                self.singers.clear();
                 self.shots.retain(|s| s.bus != Bus::Structure);
             }
         }
@@ -469,19 +544,47 @@ impl Mixer {
         let listener = self.listener;
         let bus = self.bus_gain;
 
-        // Stress beds.
-        for bed in &mut self.beds {
+        // Straining members.
+        self.strains.retain_mut(|s| {
+            s.idle += dt;
+            if s.idle > STRAIN_DROP && s.voice.quiet() {
+                return false;
+            }
             self.mono.iter_mut().for_each(|x| *x = 0.0);
-            bed.voice.render(&mut self.mono);
-            bed.channel.gains = spatial(&listener, bed.place.as_ref(), 4.0);
-            bed.channel.mix(
+            s.voice.render(&mut self.mono);
+            s.channel.gains = spatial(&listener, Some(&s.place), 4.0);
+            s.channel.mix(
                 &self.mono,
                 bus[Bus::Structure.index()],
                 sr,
                 &mut self.dry,
                 &mut self.wet,
             );
-        }
+            true
+        });
+
+        // Members singing in the wind; one the game stopped reporting is
+        // out of the wind.
+        self.singers.retain_mut(|s| {
+            s.idle += dt;
+            if s.idle > STRAIN_STALE {
+                s.voice.release();
+                if s.voice.quiet() {
+                    return false;
+                }
+            }
+            self.mono.iter_mut().for_each(|x| *x = 0.0);
+            s.voice.render(&mut self.mono);
+            s.channel.gains = spatial(&listener, Some(&s.place), 4.0);
+            s.channel.mix(
+                &self.mono,
+                bus[Bus::Structure.index()],
+                sr,
+                &mut self.dry,
+                &mut self.wet,
+            );
+            true
+        });
 
         // Rigs, fading out the ones the game stopped updating.
         self.rigs.retain_mut(|r| {
@@ -612,7 +715,7 @@ fn limit(x: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BreakCause, UiSound};
+    use crate::{Body, BreakCause, BreakInfo, MaterialKind, UiSound};
 
     fn peak(buf: &[f32]) -> f32 {
         buf.iter().fold(0.0f32, |m, x| m.max(x.abs()))
@@ -629,30 +732,43 @@ mod tests {
     fn every_command_renders_finite_bounded_audio() {
         let mut m = Mixer::new(48_000.0);
         let place = Place::at([1.0, 1.0, 0.0]);
-        for (i, mat) in MATERIALS.iter().enumerate() {
-            m.handle(Command::Stress {
-                material: *mat,
-                load: 1.2,
-                rate: 0.5,
-                members: 4.0,
-                place,
-            });
+        let materials = [
+            MaterialKind::Steel,
+            MaterialKind::Timber,
+            MaterialKind::Concrete,
+            MaterialKind::Composite,
+        ];
+        for (i, mat) in materials.iter().enumerate() {
+            let body = Body::typical(*mat, 3.0);
+            for (u, d) in [(0.2, 0.2), (1.2, 0.9)] {
+                m.handle(Command::Strain {
+                    id: i as u32,
+                    body,
+                    utilization: u,
+                    damage: d,
+                    place,
+                });
+            }
             m.handle(Command::Damage {
-                material: *mat,
+                body,
                 state: crate::DamageState::Yielded,
-                size: 40.0,
+                energy: 200.0,
                 place,
             });
             m.handle(Command::Break {
-                material: *mat,
-                cause: BreakCause::Brittle,
-                size: 60.0,
+                info: BreakInfo {
+                    body,
+                    cause: BreakCause::Brittle,
+                    at: 0.5,
+                    energy: 800.0,
+                    axial: 0.3,
+                },
                 place,
             });
             m.handle(Command::Impact {
-                material: *mat,
+                body: Body::fragment(*mat, 0.3),
                 speed: 4.0,
-                size: 10.0,
+                mass: 10.0,
                 place,
             });
             m.handle(Command::Rig {
@@ -708,5 +824,82 @@ mod tests {
         assert!(far.send / far.l > near.send / near.l);
         let right = spatial(&l, Some(&Place::at([10.0, 2.0, 10.0])), 3.0);
         assert!(right.r > right.l * 3.0);
+    }
+
+    #[test]
+    fn strain_voices_are_capped_and_dropped_when_stale() {
+        let mut m = Mixer::new(48_000.0);
+        let body = Body::typical(MaterialKind::Timber, 3.0);
+        let place = Place::at([0.0, 1.0, 0.0]);
+        for id in 0..20 {
+            m.handle(Command::Strain {
+                id,
+                body,
+                utilization: 0.5,
+                damage: 0.5,
+                place,
+            });
+        }
+        assert_eq!(m.strains.len(), MAX_STRAIN_VOICES);
+        m.render_seconds(2.5);
+        assert!(m.strains.is_empty());
+        m.handle(Command::Strain {
+            id: 3,
+            body,
+            utilization: 0.5,
+            damage: 0.5,
+            place,
+        });
+        m.handle(Command::ResetStructure);
+        assert!(m.strains.is_empty());
+    }
+
+    /// Worst case the mixer allows: every one-shot slot ringing a break and
+    /// every strain voice working. Run with
+    /// `cargo test --release -p breakit-audio -- --ignored --nocapture cost`.
+    #[test]
+    #[ignore = "timing; run by hand in release"]
+    fn cost_of_a_full_mixer() {
+        let sr = 48_000.0;
+        let mut m = Mixer::new(sr);
+        let place = Place::at([0.0, 1.0, 0.0]);
+        let steel = Body::typical(MaterialKind::Steel, 6.0);
+        let seconds = 4.0;
+        let steps = (seconds / 0.05) as usize;
+        let t = std::time::Instant::now();
+        for step in 0..steps {
+            // Keep all 48 one-shots busy with long-ringing steel breaks.
+            for _ in 0..MAX_ONE_SHOTS / 8 {
+                m.handle(Command::Break {
+                    info: BreakInfo {
+                        body: steel,
+                        cause: BreakCause::Rupture,
+                        at: 0.5,
+                        energy: 1500.0,
+                        axial: 0.5,
+                    },
+                    place,
+                });
+            }
+            for id in 0..MAX_STRAIN_VOICES as u32 {
+                let u = step as f32 / steps as f32;
+                m.handle(Command::Strain {
+                    id,
+                    body: Body::typical(MaterialKind::Timber, 3.0),
+                    utilization: u,
+                    damage: u,
+                    place,
+                });
+            }
+            let out = m.render_seconds(0.05);
+            assert!(out.iter().all(|x| x.is_finite()));
+        }
+        let cost = t.elapsed().as_secs_f32() / seconds;
+        println!(
+            "full mixer: {} one-shots, {:.1}% of one core",
+            m.active_one_shots(),
+            cost * 100.0
+        );
+        assert_eq!(m.active_one_shots(), MAX_ONE_SHOTS);
     }
 }

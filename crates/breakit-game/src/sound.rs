@@ -5,9 +5,10 @@
 //! * Build mode: clicks for placing, deleting, selecting, supports, tools,
 //!   found by diffing the design and the build tool each frame, so build
 //!   code needs no sound calls.
-//! * Simulate mode: one stress bed per material from member utilisation,
-//!   damage onsets, breaks from `DynamicSim::break_events`, and debris ground
-//!   hits from the visual debris world.
+//! * Simulate mode: `breakit_audio::StructureListener` follows the solver
+//!   (members whose load or damage is changing, damage onsets, breaks with
+//!   the elastic energy the member let go of), and debris ground hits come
+//!   from the visual debris world.
 //! * Always: the hall ambience at the lab's anchor positions (from
 //!   `breakit_lab::LabAnchors`), and the camera as the listener.
 //! * Test rigs: give a rig entity a [`RigSound`] and a `Transform`.
@@ -18,16 +19,19 @@
 
 use bevy::app::AppExit;
 use bevy::prelude::*;
+use breakit_audio::listen::wind_tones;
 use breakit_audio::{
-    AmbientKind, AudioHandle, AudioOutput, Command, DamageState, MaterialKind, Place, RigKind,
-    UiSound,
+    AmbientKind, AudioHandle, AudioOutput, Body, Command, MaterialKind, Place, RigKind,
+    StructureListener, UiSound,
 };
+use breakit_core::loads::LoadKind;
+use breakit_core::{Material, Section};
 use breakit_lab::{Anchor, LabAnchors, LabSettings};
 use breakit_render::breakit_mesh::debris::DebrisImpact;
 use breakit_render::breakit_mesh::MaterialKind as MeshMaterial;
 use breakit_render::StructureVisual;
 
-use crate::analysis::{BreakitSet, FrameState, Simulation};
+use crate::analysis::{BreakitSet, Simulation};
 use crate::build::BuildTool;
 use crate::camera::OrbitCamera;
 use crate::design::Design;
@@ -340,135 +344,49 @@ fn leave_test(sound: Res<Sound>) {
 // ---------------------------------------------------------------------------
 // Simulate mode
 
-/// Per-run bookkeeping for structure sounds.
+/// Per-run bookkeeping for structure sounds: the structure the run was
+/// built from and the listener that follows its simulation.
 #[derive(Resource, Default)]
 pub struct StructureSound {
-    seen_breaks: usize,
-    states: Vec<DamageState>,
-    /// Smoothed load per material, for the rise rate.
-    load: [f32; 4],
-}
-
-const MATERIALS: [MaterialKind; 4] = [
-    MaterialKind::Steel,
-    MaterialKind::Timber,
-    MaterialKind::Concrete,
-    MaterialKind::Composite,
-];
-
-fn material_slot(m: MaterialKind) -> usize {
-    MATERIALS.iter().position(|&x| x == m).unwrap_or(0)
-}
-
-/// Member mass in kg.
-fn member_mass(design: &Design, i: usize) -> f32 {
-    let b = &design.beams[i];
-    let len = design.nodes[b.a].distance(design.nodes[b.b]) as f64;
-    (b.kind.material().density * b.kind.section().area * len) as f32
-}
-
-fn member_point(state: &FrameState, design: &Design, i: usize, t: f32) -> Vec3 {
-    let b = &design.beams[i];
-    let (a, c) = match (state.positions.get(b.a), state.positions.get(b.b)) {
-        (Some(a), Some(c)) => (*a, *c),
-        _ => (design.nodes[b.a], design.nodes[b.b]),
-    };
-    a.lerp(c, t)
+    structure: Option<breakit_core::Structure>,
+    listener: StructureListener,
 }
 
 fn structure_sounds(
     time: Res<Time>,
     sound: Res<Sound>,
     design: Res<Design>,
-    state: Res<FrameState>,
     sim: Option<Res<Simulation>>,
     mut st: ResMut<StructureSound>,
 ) {
     let Some(sim) = sim else { return };
-    let sim = sim.sim();
-    let n = design.beams.len();
-    if st.states.len() != n {
-        st.states = vec![DamageState::Intact; n];
-    }
-
-    // Stress beds: the hardest-working member sets the level, the weighted
-    // centroid of the loaded members the position.
-    let mut max_u = [0.0f32; 4];
-    let mut count = [0.0f32; 4];
-    let mut centroid = [Vec3::ZERO; 4];
-    let mut weight = [0.0f32; 4];
-    for i in 0..n {
-        if sim.is_broken(i) {
-            continue;
-        }
-        let m = material_slot(design.beams[i].kind.material().kind);
-        let u = sim.utilization(i) as f32;
-        if !u.is_finite() {
-            continue;
-        }
-        max_u[m] = max_u[m].max(u);
-        if u > 0.5 {
-            count[m] += 1.0;
-        }
-        let w = (u - 0.3).max(0.0);
-        centroid[m] += member_point(&state, &design, i, 0.5) * w;
-        weight[m] += w;
-    }
-    let dt = time.delta_secs().max(1e-3);
-    for (m, &material) in MATERIALS.iter().enumerate() {
-        let previous = st.load[m];
-        let load = previous + (max_u[m] - previous) * (dt / 0.1).min(1.0);
-        st.load[m] = load;
-        let rate = ((load - previous) / dt).max(0.0);
-        let centre = if weight[m] > 0.0 {
-            centroid[m] / weight[m]
-        } else {
-            Vec3::ZERO
-        };
-        sound.send(Command::Stress {
-            material,
-            load,
-            rate,
-            members: count[m],
-            place: Place::at(v(centre)),
-        });
-    }
-
-    // Damage onsets (breaks are reported separately below).
-    for (i, seen) in st.states.iter_mut().enumerate().take(n) {
-        let d = sim.damage(i);
-        if d.state > *seen {
-            *seen = d.state;
-            if d.state != DamageState::Broken {
-                sound.send(Command::Damage {
-                    material: d.kind,
-                    state: d.state,
-                    size: member_mass(&design, i),
-                    place: Place::at(v(member_point(&state, &design, i, 0.5))),
+    let st = &mut *st;
+    // The design cannot change during a run.
+    let structure = st.structure.get_or_insert_with(|| design.to_structure());
+    st.listener.update(
+        sim.sim(),
+        structure,
+        time.delta_secs(),
+        [0.0; 3],
+        |command| sound.send(command),
+    );
+    // Members singing in the wind, while a wind load is blowing.
+    // A test run and the playground's load bench both carry their loads.
+    let loads = match (sim.run(), sim.live()) {
+        (Some(run), _) => run.loads(),
+        (None, Some(live)) => live.loads(),
+        (None, None) => return,
+    };
+    let now = sim.sim().time();
+    for case in &loads.cases {
+        if let LoadKind::Wind(wind) = &case.kind {
+            if case.window.factor(now) > 0.0 {
+                wind_tones(sim.sim(), structure, wind, [0.0; 3], |command| {
+                    sound.send(command)
                 });
             }
         }
     }
-
-    // Breaks.
-    let events = sim.break_events();
-    for e in events.iter().skip(st.seen_breaks) {
-        if e.member >= n {
-            continue;
-        }
-        sound.send(Command::Break {
-            material: design.beams[e.member].kind.material().kind,
-            cause: e.cause,
-            size: member_mass(&design, e.member),
-            place: Place::at(v(member_point(
-                &state,
-                &design,
-                e.member,
-                e.position as f32,
-            ))),
-        });
-    }
-    st.seen_breaks = events.len();
 }
 
 fn core_material(k: MeshMaterial) -> MaterialKind {
@@ -480,29 +398,32 @@ fn core_material(k: MeshMaterial) -> MaterialKind {
     }
 }
 
-/// Rough mass of a debris piece from its bounding radius: pieces are lumpy
-/// and fill about a third of their bounding sphere.
-fn debris_mass(hit: &DebrisImpact, material: MaterialKind) -> f32 {
-    let density = match material {
-        MaterialKind::Steel => 7850.0,
-        MaterialKind::Timber => 420.0,
-        MaterialKind::Concrete => 2400.0,
-        MaterialKind::Composite => 1600.0,
-    };
-    density * 0.33 * 4.19 * hit.radius.powi(3)
+/// The body of a debris piece: a length of a typical member of its
+/// material, as long as the piece is across. A reinforcing bar is a thin
+/// steel rod.
+fn debris_body(hit: &DebrisImpact) -> Body {
+    match hit.part {
+        breakit_render::breakit_mesh::fracture::PiecePart::Rebar => {
+            let mut bar = Body::member(
+                &Material::steel(),
+                &Section::rect(0.016, 0.016),
+                (2.0 * hit.radius).max(0.05) as f64,
+            );
+            bar.ends = breakit_audio::Ends::Free;
+            bar
+        }
+        _ => Body::fragment(core_material(hit.kind), hit.radius),
+    }
 }
 
 fn debris_sounds(sound: Res<Sound>, visual: Option<ResMut<StructureVisual>>) {
     let Some(mut visual) = visual else { return };
     for hit in visual.scene.debris.drain_impacts() {
-        let material = match hit.part {
-            breakit_render::breakit_mesh::fracture::PiecePart::Rebar => MaterialKind::Steel,
-            _ => core_material(hit.kind),
-        };
+        let body = debris_body(&hit);
         sound.send(Command::Impact {
-            material,
+            body,
             speed: hit.speed,
-            size: debris_mass(&hit, material),
+            mass: body.mass(),
             place: Place::at(v(hit.position)),
         });
     }
@@ -577,11 +498,18 @@ mod tests {
     }
 
     #[test]
-    fn member_mass_is_physical() {
-        let d = Design::starter_bridge();
-        let m = member_mass(&d, 0);
-        // A 1 m, 50 mm x 5 mm steel tube is about 5.6 kg per metre.
-        assert!(m > 1.0 && m < 100.0, "{m}");
+    fn debris_bodies_are_physical() {
+        let hit = DebrisImpact {
+            position: Vec3::ZERO,
+            speed: 3.0,
+            radius: 0.5,
+            kind: MeshMaterial::Steel,
+            part: breakit_render::breakit_mesh::fracture::PiecePart::Body,
+        };
+        let body = debris_body(&hit);
+        // A metre of 100 x 5 mm steel tube is about 12 kg.
+        assert!(body.mass() > 5.0 && body.mass() < 25.0, "{}", body.mass());
+        assert_eq!(body.ends, breakit_audio::Ends::Free);
     }
 
     #[test]
