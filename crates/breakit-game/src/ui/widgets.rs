@@ -40,15 +40,43 @@ const KNOWN: [char; 9] = [
     '\u{00b0}',
 ];
 
-/// A group of read-outs on the theme's panel ground (clear in Hairline,
-/// so the type sits on the scene). Keeps clicks off the scene.
-pub fn panel(node: Node) -> impl Bundle {
-    (node, Skin::fill(Swatch::Panel), BlocksPointer)
+/// Inner margin of a [`panel`] whose node sets none.
+pub const PANEL_PADDING: UiRect = UiRect {
+    left: Val::Px(18.0),
+    right: Val::Px(18.0),
+    top: Val::Px(14.0),
+    bottom: Val::Px(14.0),
+};
+
+/// Left plus right [`PANEL_PADDING`], px.
+pub const PANEL_PADDING_X: f32 = 36.0;
+
+/// A group of read-outs on a frosted backdrop (the blurred, darkened
+/// scene, see [`super::frost`]) over the theme's panel ground. Keeps
+/// clicks off the scene.
+pub fn panel(mut node: Node) -> impl Bundle {
+    if node.padding == UiRect::DEFAULT {
+        node.padding = PANEL_PADDING;
+    }
+    (
+        node,
+        Skin::fill(Swatch::Panel),
+        MaterialNode(super::frost::FROST_MATERIAL),
+        BlocksPointer,
+    )
 }
 
 /// Same as [`panel`] in the instrument's colours.
-pub fn instrument(node: Node) -> impl Bundle {
-    (node, Skin::fill(Swatch::Instrument), BlocksPointer)
+pub fn instrument(mut node: Node) -> impl Bundle {
+    if node.padding == UiRect::DEFAULT {
+        node.padding = PANEL_PADDING;
+    }
+    (
+        node,
+        Skin::fill(Swatch::Instrument),
+        MaterialNode(super::frost::FROST_MATERIAL),
+        BlocksPointer,
+    )
 }
 
 /// The head of a sheet: a small accent kicker (ID, revision) over a
@@ -295,30 +323,6 @@ pub fn check_row(p: &mut ChildSpawnerCommands, status: Status, label: &str, valu
             },
         ));
         r.spawn(text(value, TextRole::Body, vc));
-    });
-}
-
-/// The utilisation legend: four thin bands and their limits in one line.
-pub fn ramp_legend(p: &mut ChildSpawnerCommands, width: f32) {
-    p.spawn(row(14.0)).with_children(|r| {
-        r.spawn(Node {
-            width: Val::Px(width),
-            height: Val::Px(3.0),
-            column_gap: Val::Px(2.0),
-            ..default()
-        })
-        .with_children(|bar| {
-            for i in 0u8..4 {
-                bar.spawn((
-                    Node {
-                        flex_grow: 1.0,
-                        ..default()
-                    },
-                    Skin::fill(Swatch::Ramp(i)).square(),
-                ));
-            }
-        });
-        r.spawn(caps("Utilisation 0 / 50 / 80 / 100%", Swatch::Muted));
     });
 }
 

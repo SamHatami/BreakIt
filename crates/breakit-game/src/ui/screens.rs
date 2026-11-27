@@ -835,6 +835,7 @@ pub fn build_report(p: &mut ChildSpawnerCommands, v: &GameView) {
                         t.spawn((
                             Node {
                                 justify_content: JustifyContent::SpaceBetween,
+                                column_gap: Val::Px(10.0),
                                 padding: UiRect::axes(Val::Px(8.0), Val::Px(5.0)),
                                 ..default()
                             },

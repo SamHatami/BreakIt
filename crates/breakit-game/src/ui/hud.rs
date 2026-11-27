@@ -23,7 +23,7 @@ fn view(kind: View, node: Node) -> impl Bundle {
 }
 
 /// Distance of the HUD from the screen edges.
-const EDGE: f32 = 40.0;
+const EDGE: f32 = 24.0;
 
 pub fn spawn_build_hud(mut commands: Commands) {
     commands
@@ -31,17 +31,23 @@ pub fn spawn_build_hud(mut commands: Commands) {
         .with_children(|l| {
             l.spawn(view(View::BuildTags, layer()));
             l.spawn(view(View::BuildFooter, layer()));
-            l.spawn(view(
-                View::BuildSheet,
-                at(Some(EDGE), Some(32.0), None, None),
-            ));
+            // Requirements and the selected member, top right.
+            l.spawn(Node {
+                width: Val::Px(370.0),
+                row_gap: Val::Px(12.0),
+                ..at(None, Some(EDGE), Some(EDGE), None)
+            })
+            .with_children(|c| {
+                c.spawn(view(View::BuildSheet, column(0.0)));
+                c.spawn(view(View::BuildInspector, column(0.0)));
+            });
+            // Cost, mass and the worst member, top, next to the parts.
             l.spawn(view(
                 View::BuildReadouts,
-                at(None, Some(32.0), Some(EDGE), None),
-            ));
-            l.spawn(view(
-                View::BuildInspector,
-                at(None, Some(232.0), Some(EDGE), None),
+                Node {
+                    flex_direction: FlexDirection::Row,
+                    ..at(Some(EDGE + BROWSER_W + 12.0), Some(EDGE), None, None)
+                },
             ));
             l.spawn(view(
                 View::BuildTools,
@@ -51,9 +57,10 @@ pub fn spawn_build_hud(mut commands: Commands) {
                     ..at(Some(0.0), None, Some(0.0), Some(30.0))
                 },
             ));
+            // The parts browser, down the left side.
             l.spawn(view(
                 View::BuildDrawer,
-                at(Some(EDGE), None, None, Some(32.0)),
+                at(Some(EDGE), Some(EDGE), None, None),
             ));
         });
 }
@@ -77,12 +84,13 @@ pub fn spawn_test_hud(mut commands: Commands) {
                 },
             ));
             // Test clock, bottom left.
-            l.spawn(Node {
+            l.spawn(panel(Node {
                 align_items: AlignItems::Baseline,
                 column_gap: Val::Px(10.0),
                 flex_direction: FlexDirection::Row,
-                ..at(Some(EDGE), None, None, Some(96.0))
-            })
+                padding: UiRect::axes(Val::Px(18.0), Val::Px(4.0)),
+                ..at(Some(EDGE), None, None, Some(128.0))
+            }))
             .with_children(|r| {
                 r.spawn((
                     text("00.00", TextRole::MonoLarge, Swatch::InstrumentInk),
@@ -93,18 +101,20 @@ pub fn spawn_test_hud(mut commands: Commands) {
                     TotalText,
                 ));
             });
-            l.spawn(view(
-                View::TestControls,
-                Node {
+            l.spawn((
+                panel(Node {
                     flex_direction: FlexDirection::Row,
                     align_items: AlignItems::Center,
                     column_gap: Val::Px(20.0),
-                    ..at(None, None, Some(EDGE), Some(104.0))
-                },
+                    padding: UiRect::axes(Val::Px(18.0), Val::Px(10.0)),
+                    ..at(None, None, Some(EDGE), Some(128.0))
+                }),
+                View::TestControls,
+                ViewKey::default(),
             ));
             // The timeline: load-case bands over the worst-member trace.
             l.spawn(instrument(Node {
-                height: Val::Px(52.0),
+                height: Val::Px(84.0),
                 flex_direction: FlexDirection::Column,
                 ..at(Some(EDGE), None, Some(EDGE), Some(32.0))
             }))
@@ -139,7 +149,17 @@ pub struct TotalText;
 #[derive(Component, Clone, Copy, Debug)]
 pub enum WorldTag {
     Beam(usize),
+    Node(usize),
+    Point(Vec3),
 }
+
+/// A world tag centred on its point (a problem marker) rather than set
+/// beside it.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct Centred;
+
+/// Size of a problem marker ring, px.
+const MARKER: f32 = 30.0;
 
 // ---------------------------------------------------------------- build
 
@@ -175,14 +195,14 @@ pub fn build_sheet_key(v: &GameView) -> String {
         v.revisions.of(s.id).len(),
         v.state.error.is_some(),
         v.check.violations
-    )
+    ) + &format!(" {}", v.design.revision)
 }
 
 pub fn build_sheet(p: &mut ChildSpawnerCommands, v: &GameView) {
     let s = v.sheets.current();
     let rev = v.revisions.next_letter(s.id);
     p.spawn(panel(Node {
-        width: Val::Px(380.0),
+        width: Val::Percent(100.0),
         flex_direction: FlexDirection::Column,
         ..default()
     }))
@@ -208,26 +228,16 @@ pub fn build_sheet(p: &mut ChildSpawnerCommands, v: &GameView) {
                 ),
             );
             let sc = match &v.state.error {
-                Some(e) => e.clone(),
+                Some(_) => "unstable".to_string(),
                 None => format!("sag {}", mm(v.state.max_displacement)),
             };
             kv(b, "Static check", text(sc, TextRole::Mono, Swatch::Ink));
+            problem_list(b, v);
             return;
         }
-        // What blocks the test, in the scenario's own words.
-        if v.check.violations.is_empty() {
-            check_row(b, Status::Ok, "Meets the sheet's limits", "ready");
-        }
-        for vio in v.check.violations.iter().take(4) {
-            check_row(b, Status::Failed, &vio.to_string(), "");
-        }
-        if v.check.violations.len() > 4 {
-            check_row(
-                b,
-                Status::Failed,
-                &format!("and {} more", v.check.violations.len() - 4),
-                "",
-            );
+        // What blocks the test: what, where and how to fix it.
+        if !problem_list(b, v) {
+            check_row(b, Status::Ok, "Ready to test", "");
         }
         check_row(
             b,
@@ -284,6 +294,96 @@ pub fn build_sheet(p: &mut ChildSpawnerCommands, v: &GameView) {
     });
 }
 
+/// Most problems listed at once; the rest are counted.
+const MAX_PROBLEMS: usize = 3;
+
+/// The numbered problems that block the test, each with where and how to
+/// fix it; their numbers also mark the scene. Returns whether there were
+/// any.
+fn problem_list(b: &mut ChildSpawnerCommands, v: &GameView) -> bool {
+    let all = super::problems::problems(v);
+    if all.is_empty() {
+        return false;
+    }
+    b.spawn((
+        Node {
+            margin: UiRect::bottom(Val::Px(6.0)),
+            ..default()
+        },
+        children![caps(
+            &if all.len() == 1 {
+                "1 thing blocks the test".to_string()
+            } else {
+                format!("{} things block the test", all.len())
+            },
+            Swatch::Fail
+        )],
+    ));
+    for (i, p) in all.iter().take(MAX_PROBLEMS).enumerate() {
+        problem_block(b, i + 1, p);
+    }
+    if all.len() > MAX_PROBLEMS {
+        b.spawn(text(
+            format!("and {} more after these", all.len() - MAX_PROBLEMS),
+            TextRole::Body,
+            Swatch::Muted,
+        ));
+    }
+    rule(b, Swatch::Rule);
+    true
+}
+
+/// One problem: its number (as marked in the scene), headline, where, and
+/// the fix.
+fn problem_block(b: &mut ChildSpawnerCommands, n: usize, p: &super::problems::Problem) {
+    b.spawn(Node {
+        column_gap: Val::Px(10.0),
+        margin: UiRect::bottom(Val::Px(10.0)),
+        ..default()
+    })
+    .with_children(|r| {
+        r.spawn((
+            Node {
+                width: Val::Px(20.0),
+                height: Val::Px(20.0),
+                flex_shrink: 0.0,
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                margin: UiRect::top(Val::Px(1.0)),
+                ..default()
+            },
+            Skin::fill(Swatch::Fail).pill(),
+            children![text(n.to_string(), TextRole::Label, Swatch::OnAccent)],
+        ));
+        r.spawn(Node {
+            flex_direction: FlexDirection::Column,
+            flex_grow: 1.0,
+            flex_shrink: 1.0,
+            row_gap: Val::Px(3.0),
+            ..default()
+        })
+        .with_children(|c| {
+            c.spawn(text(&p.title, TextRole::Heading, Swatch::Fail));
+            c.spawn(text(&p.detail, TextRole::Body, Swatch::Ink));
+            c.spawn(Node {
+                column_gap: Val::Px(6.0),
+                ..default()
+            })
+            .with_children(|f| {
+                f.spawn((
+                    caps("Fix", Swatch::Accent),
+                    Node {
+                        flex_shrink: 0.0,
+                        margin: UiRect::top(Val::Px(2.0)),
+                        ..default()
+                    },
+                ));
+                f.spawn(text(&p.fix, TextRole::Body, Swatch::Muted));
+            });
+        });
+    });
+}
+
 pub fn readouts_key(v: &GameView) -> String {
     let w = worst(v).map(|(i, u)| (i, (u * 100.0).round() as i32));
     format!(
@@ -296,82 +396,103 @@ pub fn readouts_key(v: &GameView) -> String {
     )
 }
 
+/// One read-out in the top strip: a label over a value.
+fn strip_item(
+    p: &mut ChildSpawnerCommands,
+    label: &str,
+    value: impl FnOnce(&mut ChildSpawnerCommands),
+) {
+    p.spawn(column(4.0)).with_children(|c| {
+        c.spawn(caps(label, Swatch::Muted));
+        value(c);
+    });
+}
+
 pub fn build_readouts(p: &mut ChildSpawnerCommands, v: &GameView) {
     let s = v.sheets.current();
     let cost = v.cost();
     p.spawn(panel(Node {
-        width: Val::Px(280.0),
-        flex_direction: FlexDirection::Column,
-        align_items: AlignItems::Stretch,
+        flex_direction: FlexDirection::Row,
+        align_items: AlignItems::FlexStart,
+        column_gap: Val::Px(22.0),
         ..default()
     }))
     .with_children(|b| {
-        b.spawn(Node {
-            justify_content: JustifyContent::FlexEnd,
-            ..default()
-        })
-        .with_child(caps("Cost", Swatch::Muted));
-        b.spawn(Node {
-            justify_content: JustifyContent::FlexEnd,
-            align_items: AlignItems::Baseline,
-            column_gap: Val::Px(8.0),
-            ..default()
-        })
-        .with_children(|r| {
-            let over = s.budget.is_some_and(|b| cost > b);
-            r.spawn(text(
-                money_number(cost),
-                TextRole::Stamp,
+        strip_item(b, "Cost", |c| {
+            c.spawn(Node {
+                align_items: AlignItems::Baseline,
+                column_gap: Val::Px(8.0),
+                ..default()
+            })
+            .with_children(|r| {
+                let over = s.budget.is_some_and(|b| cost > b);
+                r.spawn(text(
+                    money_number(cost),
+                    TextRole::Title,
+                    if over { Swatch::Fail } else { Swatch::Ink },
+                ));
+                if let Some(b) = s.budget {
+                    r.spawn(text(
+                        format!("/ {}", money(b)),
+                        TextRole::Body,
+                        Swatch::Muted,
+                    ));
+                }
+            });
+            if let Some(budget) = s.budget {
+                let fill = if cost > budget {
+                    Swatch::Fail
+                } else {
+                    Swatch::Ink
+                };
+                c.spawn(Node {
+                    width: Val::Px(160.0),
+                    flex_direction: FlexDirection::Column,
+                    ..default()
+                })
+                .with_children(|m| {
+                    meter(m, cost / budget, fill, s.bonus_budget.map(|x| x / budget));
+                });
+                if let Some(bonus) = s.bonus_budget {
+                    c.spawn(text(
+                        format!("full marks under {}", money(bonus)),
+                        TextRole::Label,
+                        Swatch::Muted,
+                    ));
+                }
+            }
+        });
+        strip_item(b, "Mass", |c| {
+            let over = s.def.limits.max_mass.is_some_and(|m| v.mass() as f64 > m);
+            c.spawn(text(
+                format!("{:.0} kg", v.mass()),
+                TextRole::Heading,
                 if over { Swatch::Fail } else { Swatch::Ink },
             ));
-            if let Some(b) = s.budget {
-                r.spawn(text(
-                    format!("/ {}", money(b)),
-                    TextRole::Body,
+            if let Some(m) = s.def.limits.max_mass {
+                c.spawn(text(
+                    format!("of {m:.0} kg"),
+                    TextRole::Label,
                     Swatch::Muted,
                 ));
             }
         });
-        if let Some(budget) = s.budget {
-            let fill = if cost > budget {
-                Swatch::Fail
-            } else {
-                Swatch::Ink
+        strip_item(b, "Worst member", |c| {
+            match worst(v) {
+                Some((i, u)) => c.spawn(tag_bundle(format!("M{} {}", i + 1, pct(u)), u)),
+                None => c.spawn(text("-", TextRole::Body, Swatch::Muted)),
             };
-            meter(b, cost / budget, fill, s.bonus_budget.map(|x| x / budget));
-            if let Some(bonus) = s.bonus_budget {
-                b.spawn(Node {
-                    justify_content: JustifyContent::FlexEnd,
-                    margin: UiRect::bottom(Val::Px(10.0)),
-                    ..default()
-                })
-                .with_child(caps(
-                    &format!("Full marks under {}", money(bonus)),
-                    Swatch::Muted,
-                ));
-            }
-        }
-        kv(
-            b,
-            "Mass",
-            text(format!("{:.0} kg", v.mass()), TextRole::Body, Swatch::Ink),
-        );
-        match worst(v) {
-            Some((i, u)) => kv(
-                b,
-                "Worst member",
-                tag_bundle(format!("M{} {}", i + 1, pct(u)), u),
-            ),
-            None => kv(b, "Worst member", text("-", TextRole::Body, Swatch::Muted)),
-        }
-        let check = match &v.state.error {
-            Some(_) => text("unstable: add supports", TextRole::Body, Swatch::Fail),
-            None if v.design.beams.is_empty() => {
-                text("nothing built", TextRole::Body, Swatch::Muted)
-            }
-            None => text("solved", TextRole::Body, Swatch::Ink),
-        };
-        kv(b, "Static check", check);
+            stress_legend(c);
+        });
+        strip_item(b, "Static check", |c| {
+            c.spawn(match &v.state.error {
+                Some(_) => text("unstable, see list", TextRole::Body, Swatch::Fail),
+                None if v.design.beams.is_empty() => {
+                    text("nothing built", TextRole::Body, Swatch::Muted)
+                }
+                None => text("holds its loads", TextRole::Body, Swatch::Ink),
+            });
+        });
     });
 }
 
@@ -609,33 +730,34 @@ pub fn build_inspector(p: &mut ChildSpawnerCommands, v: &GameView) {
         .iter()
         .map(|j| costs.joints.price(joint_class(*j)) as f32)
         .sum();
-    p.spawn(Node {
-        width: Val::Px(280.0),
+    p.spawn(panel(Node {
+        width: Val::Percent(100.0),
         flex_direction: FlexDirection::Column,
         ..default()
-    })
+    }))
     .with_children(|b| {
-        b.spawn(caps(&format!("Member {}", i + 1), Swatch::Accent));
-        b.spawn((
-            text(kind.designation(), TextRole::Heading, Swatch::Ink),
-            Node {
-                margin: UiRect::top(Val::Px(4.0)),
-                ..default()
-            },
-        ));
-        b.spawn((
-            text(
-                family
-                    .map(|(f, ..)| f.name.as_str())
-                    .unwrap_or(kind.label()),
-                TextRole::Label,
-                Swatch::Muted,
-            ),
-            Node {
-                margin: UiRect::bottom(Val::Px(6.0)),
-                ..default()
-            },
-        ));
+        b.spawn(Node {
+            column_gap: Val::Px(12.0),
+            align_items: AlignItems::Center,
+            margin: UiRect::bottom(Val::Px(6.0)),
+            ..default()
+        })
+        .with_children(|h| {
+            if let Some(icon) = v.icons.get(kind) {
+                h.spawn(part_icon(icon, 52.0));
+            }
+            h.spawn(column(3.0)).with_children(|t| {
+                t.spawn(caps(&format!("Member {}", i + 1), Swatch::Accent));
+                t.spawn(text(kind.designation(), TextRole::Heading, Swatch::Ink));
+                t.spawn(text(
+                    family
+                        .map(|(f, ..)| f.name.as_str())
+                        .unwrap_or(kind.label()),
+                    TextRole::Label,
+                    Swatch::Muted,
+                ));
+            });
+        });
         if let Some((f, size, grade)) = family {
             b.spawn(Node {
                 justify_content: JustifyContent::SpaceBetween,
@@ -741,19 +863,72 @@ pub fn drawer_key(v: &GameView) -> String {
     )
 }
 
+/// A part thumbnail, `size` logical px square.
+fn part_icon(icon: Handle<Image>, size: f32) -> impl Bundle {
+    (
+        Node {
+            width: Val::Px(size),
+            height: Val::Px(size),
+            flex_shrink: 0.0,
+            ..default()
+        },
+        ImageNode::new(icon),
+    )
+}
+
+/// A part's name without its material, which the tab already says:
+/// "Steel tube, small" reads "Tube, small" under the Steel tab.
+fn short_name(name: &str, class: &str) -> String {
+    let rest = name
+        .strip_prefix(class)
+        .map(str::trim_start)
+        .filter(|r| !r.is_empty())
+        .unwrap_or(name);
+    let mut c = rest.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().chain(c).collect(),
+        None => String::new(),
+    }
+}
+
+/// The utilisation colours, short enough for the browser.
+fn stress_legend(p: &mut ChildSpawnerCommands) {
+    p.spawn(row(8.0)).with_children(|r| {
+        r.spawn(caps("Use", Swatch::Muted));
+        for (i, label) in ["0", "50", "80", "100%"].into_iter().enumerate() {
+            r.spawn((
+                Node {
+                    width: Val::Px(14.0),
+                    height: Val::Px(3.0),
+                    ..default()
+                },
+                Skin::fill(Swatch::Ramp(i as u8)).square(),
+            ));
+            r.spawn(text(label, TextRole::Label, Swatch::Muted));
+        }
+    });
+}
+
+/// Width of the parts browser and of one card in its two columns.
+const BROWSER_W: f32 = 320.0;
+const CARD_GAP: f32 = 8.0;
+
 pub fn build_drawer(p: &mut ChildSpawnerCommands, v: &GameView) {
-    // With a member selected, the palette shows and swaps that member's part.
+    // With a member selected, the browser shows and swaps that member's part.
     let current = v.tool.current(&v.design);
     let class = current.material_kind();
     let sel_beam = v.tool.selected_beam.filter(|&i| i < v.design.beams.len());
-    p.spawn(column(10.0)).with_children(|d| {
-        d.spawn(Node {
-            margin: UiRect::bottom(Val::Px(4.0)),
-            ..default()
-        })
-        .with_children(|c| ramp_legend(c, 120.0));
+    let inner = BROWSER_W - PANEL_PADDING_X;
+    let card_w = (inner - CARD_GAP) / 2.0;
+    p.spawn(panel(Node {
+        width: Val::Px(BROWSER_W),
+        flex_direction: FlexDirection::Column,
+        row_gap: Val::Px(10.0),
+        ..default()
+    }))
+    .with_children(|d| {
         // Material tabs, keys 1-4.
-        d.spawn(row(18.0)).with_children(|r| {
+        d.spawn(row(16.0)).with_children(|r| {
             for (n, c) in v.tool.classes().into_iter().enumerate() {
                 let active = c == class;
                 r.spawn((
@@ -764,8 +939,9 @@ pub fn build_drawer(p: &mut ChildSpawnerCommands, v: &GameView) {
                 ))
                 .with_children(|t| {
                     t.spawn(row(6.0)).with_children(|l| {
-                        l.spawn(caps(
+                        l.spawn(text(
                             class_label(c),
+                            TextRole::Body,
                             if active { Swatch::Ink } else { Swatch::Muted },
                         ));
                         l.spawn(caps(&(n + 1).to_string(), Swatch::Muted));
@@ -785,12 +961,13 @@ pub fn build_drawer(p: &mut ChildSpawnerCommands, v: &GameView) {
                 });
             }
         });
-        // The parts of the active material, two columns.
+        // The parts of the active material: cards in two columns.
         d.spawn(Node {
             flex_direction: FlexDirection::Row,
             flex_wrap: FlexWrap::Wrap,
-            width: Val::Px(360.0),
-            row_gap: Val::Px(8.0),
+            width: Val::Px(inner),
+            row_gap: Val::Px(CARD_GAP),
+            column_gap: Val::Px(CARD_GAP),
             ..default()
         })
         .with_children(|g| {
@@ -798,50 +975,51 @@ pub fn build_drawer(p: &mut ChildSpawnerCommands, v: &GameView) {
                 let selected = k.same_section(current);
                 g.spawn((
                     Node {
-                        width: Val::Px(180.0),
-                        flex_direction: FlexDirection::Row,
-                        column_gap: Val::Px(8.0),
+                        width: Val::Px(card_w),
+                        flex_direction: FlexDirection::Column,
+                        align_items: AlignItems::Center,
+                        padding: UiRect::axes(Val::Px(6.0), Val::Px(5.0)),
+                        row_gap: Val::Px(1.0),
                         ..default()
+                    },
+                    if selected {
+                        Skin::boxed(Swatch::Raised, Swatch::Accent, super::theme::Weight::Thin)
+                    } else {
+                        Skin::fill(Swatch::Raised)
                     },
                     super::pointer::Clickable(UiAction::SetMaterial(*k)),
                     BlocksPointer,
-                    Outline::new(Val::Px(1.0), Val::Px(2.0), Color::NONE),
+                    Outline::new(Val::Px(1.0), Val::Px(1.0), Color::NONE),
                 ))
                 .with_children(|card| {
-                    card.spawn((
-                        Node {
-                            width: Val::Px(2.0),
-                            ..default()
-                        },
-                        Skin::fill(if selected {
-                            Swatch::Accent
-                        } else {
-                            Swatch::Clear
-                        })
-                        .square(),
+                    match v.icons.get(*k) {
+                        Some(icon) => {
+                            card.spawn(part_icon(icon, 48.0));
+                        }
+                        None => {
+                            card.spawn(Node {
+                                height: Val::Px(48.0),
+                                ..default()
+                            });
+                        }
+                    }
+                    card.spawn(text(
+                        short_name(k.label(), class_label(class)),
+                        TextRole::Body,
+                        if selected { Swatch::Ink } else { Swatch::Muted },
                     ));
-                    card.spawn(column(2.0)).with_children(|c| {
-                        c.spawn(text(
-                            k.label(),
-                            TextRole::Body,
-                            if selected { Swatch::Ink } else { Swatch::Muted },
-                        ));
-                        c.spawn(text(
-                            format!(
-                                "{}  {:.0} kr/m",
-                                k.designation(),
-                                k.cost_per_metre(&v.sheets.costs)
-                            ),
-                            TextRole::Label,
-                            Swatch::Muted,
-                        ));
-                    });
+                    card.spawn(text(k.designation(), TextRole::Label, Swatch::Muted));
+                    card.spawn(text(
+                        format!("{:.0} kr/m", k.cost_per_metre(&v.sheets.costs)),
+                        TextRole::Label,
+                        Swatch::Muted,
+                    ));
                 });
             }
         });
         let note = match sel_beam {
-            Some(i) => format!("{}  applies to member {}", current.designation(), i + 1),
-            None => format!("next beam  {}", current.designation()),
+            Some(i) => format!("Click a part to change member {}", i + 1),
+            None => format!("Next beam: {}", current.designation()),
         };
         d.spawn(text(note, TextRole::Label, Swatch::Muted));
     });
@@ -923,10 +1101,13 @@ pub fn build_footer(p: &mut ChildSpawnerCommands, v: &GameView) {
 
 pub fn build_tags_key(v: &GameView) -> String {
     format!(
-        "{:?} {:?} {:?}",
+        "{:?} {:?} {:?} {:?} {:?} {}",
         v.state.revision,
         top_members(&v.state),
-        v.pins.pins
+        v.pins.pins,
+        v.check.violations,
+        v.state.error,
+        v.design.revision
     )
 }
 
@@ -947,23 +1128,58 @@ fn top_members(state: &FrameState) -> Vec<(usize, i32)> {
 }
 
 pub fn build_tags(p: &mut ChildSpawnerCommands, v: &GameView) {
-    for (i, u) in top_members(&v.state) {
+    // Numbered rings on whatever blocks the test, matching the list.
+    let problems = super::problems::problems(v);
+    for (n, spot) in super::problems::spots(&problems) {
+        let tag = match spot {
+            super::problems::Spot::Node(i) => WorldTag::Node(i),
+            super::problems::Spot::Beam(i) => WorldTag::Beam(i),
+            super::problems::Spot::Point(x) => WorldTag::Point(x),
+        };
         p.spawn((
             Node {
                 position_type: PositionType::Absolute,
+                width: Val::Px(MARKER),
+                height: Val::Px(MARKER),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
                 ..default()
             },
+            Skin::boxed(Swatch::Clear, Swatch::Fail, super::theme::Weight::Thin).pill(),
+            Outline::new(Val::Px(1.0), Val::Px(0.0), Color::srgba(0.0, 0.0, 0.0, 0.5)),
+            tag,
+            Centred,
+            children![(
+                Node {
+                    width: Val::Px(18.0),
+                    height: Val::Px(18.0),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                Skin::fill(Swatch::Fail).pill(),
+                children![text(n.to_string(), TextRole::Label, Swatch::OnAccent)],
+            )],
+        ));
+    }
+    for (i, u) in top_members(&v.state) {
+        p.spawn((
+            panel(Node {
+                position_type: PositionType::Absolute,
+                padding: UiRect::axes(Val::Px(10.0), Val::Px(4.0)),
+                ..default()
+            }),
             WorldTag::Beam(i),
             children![member_tag(format!("{}  {}%", i + 1, u), u as f32 / 100.0)],
         ));
     }
     for (i, label) in &v.pins.pins {
         p.spawn((
-            Node {
+            panel(Node {
                 position_type: PositionType::Absolute,
-                padding: UiRect::axes(Val::Px(6.0), Val::Px(1.0)),
+                padding: UiRect::axes(Val::Px(10.0), Val::Px(4.0)),
                 ..default()
-            },
+            }),
             WorldTag::Beam(*i),
             Children::spawn_one(text(label.clone(), TextRole::Body, Swatch::Fail)),
         ));
@@ -1034,6 +1250,9 @@ pub fn test_sheet(p: &mut ChildSpawnerCommands, v: &GameView) {
 
 pub fn test_log(p: &mut ChildSpawnerCommands, v: &GameView) {
     let s = v.sheets.current();
+    if v.record.events.is_empty() {
+        return;
+    }
     p.spawn(panel(Node {
         width: Val::Px(320.0),
         flex_direction: FlexDirection::Column,
@@ -1088,14 +1307,22 @@ pub fn test_banner(p: &mut ChildSpawnerCommands, v: &GameView) {
         None
     };
     let Some((head, tail)) = msg else { return };
-    p.spawn(caps(head, Swatch::Accent));
-    p.spawn((
-        text(tail, TextRole::Label, Swatch::Muted),
-        Node {
-            margin: UiRect::top(Val::Px(4.0)),
-            ..default()
-        },
-    ));
+    p.spawn(panel(Node {
+        flex_direction: FlexDirection::Column,
+        align_items: AlignItems::Center,
+        padding: UiRect::axes(Val::Px(22.0), Val::Px(10.0)),
+        ..default()
+    }))
+    .with_children(|b| {
+        b.spawn(caps(head, Swatch::Accent));
+        b.spawn((
+            text(tail, TextRole::Label, Swatch::Muted),
+            Node {
+                margin: UiRect::top(Val::Px(4.0)),
+                ..default()
+            },
+        ));
+    });
 }
 
 /// A text control in the test bar: label and key, accent when on.
@@ -1157,13 +1384,14 @@ pub fn test_tags(p: &mut ChildSpawnerCommands, v: &GameView) {
         .map(|b| b.kind.label())
         .unwrap_or("member");
     p.spawn((
-        Node {
+        panel(Node {
             position_type: PositionType::Absolute,
             flex_direction: FlexDirection::Column,
             row_gap: Val::Px(2.0),
-            width: Val::Px(260.0),
+            width: Val::Px(280.0),
+            padding: UiRect::axes(Val::Px(14.0), Val::Px(10.0)),
             ..default()
-        },
+        }),
         WorldTag::Beam(m),
     ))
     .with_children(|c| {
@@ -1338,23 +1566,30 @@ pub fn place_world_tags(
     camera: Query<(&Camera, &GlobalTransform), With<OrbitCamera>>,
     design: Res<Design>,
     state: Res<FrameState>,
-    mut tags: Query<(&WorldTag, &mut Node, &mut Visibility)>,
+    mut tags: Query<(&WorldTag, &mut Node, &mut Visibility, Has<Centred>)>,
 ) {
     let Ok((camera, tf)) = camera.single() else {
         return;
     };
     let pos = |n: usize| state.positions.get(n).or(design.nodes.get(n)).copied();
-    for (tag, mut node, mut vis) in &mut tags {
+    for (tag, mut node, mut vis, centred) in &mut tags {
         let world = match *tag {
             WorldTag::Beam(b) => design
                 .beams
                 .get(b)
                 .and_then(|m| Some((pos(m.a)? + pos(m.b)?) * 0.5)),
+            WorldTag::Node(n) => pos(n),
+            WorldTag::Point(p) => Some(p),
         };
         match world.and_then(|w| camera.world_to_viewport(tf, w).ok()) {
             Some(px) => {
-                node.left = Val::Px(px.x + 14.0);
-                node.top = Val::Px(px.y - 30.0);
+                let (dx, dy) = if centred {
+                    (-0.5 * MARKER, -0.5 * MARKER)
+                } else {
+                    (14.0, -30.0)
+                };
+                node.left = Val::Px(px.x + dx);
+                node.top = Val::Px(px.y + dy);
                 *vis = Visibility::Inherited;
             }
             None => *vis = Visibility::Hidden,
