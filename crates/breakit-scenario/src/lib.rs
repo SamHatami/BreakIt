@@ -48,6 +48,10 @@ pub const BUILTIN: &[(&str, &str)] = &[
         "flood_jetty.ron",
         include_str!("../scenarios/flood_jetty.ron"),
     ),
+    (
+        "pontoon_footbridge.ron",
+        include_str!("../scenarios/pontoon_footbridge.ron"),
+    ),
 ];
 
 /// Parses every built-in scenario. Panics on a malformed file, which the

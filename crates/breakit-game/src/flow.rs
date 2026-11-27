@@ -24,6 +24,9 @@ pub enum Screen {
     Test,
     /// The test report, over the frozen scene.
     Report,
+    /// The playground's free run: live loads, no scoring (see
+    /// `playground`).
+    Playground,
 }
 
 impl ComputedStates for Mode {
@@ -31,7 +34,7 @@ impl ComputedStates for Mode {
 
     fn compute(s: Screen) -> Option<Self> {
         Some(match s {
-            Screen::Test | Screen::Report => Mode::Simulate,
+            Screen::Test | Screen::Report | Screen::Playground => Mode::Simulate,
             _ => Mode::Build,
         })
     }
@@ -93,6 +96,8 @@ pub enum UiAction {
     SimFaster,
     ToggleHeatmap,
     CycleTheme,
+    /// The playground's bench, time controls and overlays.
+    Playground(crate::playground::PlayAction),
 }
 
 /// One tested revision of a sheet.
@@ -242,7 +247,7 @@ fn sync_table(
     let rig = sheets.current().rig;
     if *shown != Some(rig) {
         *shown = Some(rig);
-        *table = breakit_lab::PlayTable::builtin(rig.table());
+        *table = crate::water::play_table(rig.table());
     }
 }
 
@@ -364,6 +369,8 @@ pub fn keyboard_actions(
                 }
             }
         }
+        // The playground reads its own keys (`playground::keyboard`).
+        Screen::Playground => {}
         Screen::Report => {
             let map = [
                 (K::KeyR, UiAction::Revise),
@@ -448,7 +455,11 @@ fn apply_flow_actions(
             }
             (UiAction::RunTest, Screen::Build) => {
                 // The build HUD lists what blocks the test.
-                if !design.beams.is_empty() && !check.blocks_test() {
+                if sheets.current().playground {
+                    if !design.beams.is_empty() {
+                        next.set(Screen::Playground);
+                    }
+                } else if !design.beams.is_empty() && !check.blocks_test() {
                     next.set(Screen::Test);
                 }
             }
@@ -594,5 +605,6 @@ mod tests {
         assert_eq!(Mode::compute(Screen::Build), Some(Mode::Build));
         assert_eq!(Mode::compute(Screen::Test), Some(Mode::Simulate));
         assert_eq!(Mode::compute(Screen::Report), Some(Mode::Simulate));
+        assert_eq!(Mode::compute(Screen::Playground), Some(Mode::Simulate));
     }
 }

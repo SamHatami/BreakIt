@@ -10,7 +10,7 @@
 
 use bevy::math::Vec3;
 use bevy::prelude::Resource;
-use breakit_core::NodeLoad;
+use breakit_core::{NodeLoad, NodeSpring};
 use breakit_scenario as bs;
 use breakit_scenario::{check_limits, Bill, Binding, CostModel, PlayMode, Violation};
 
@@ -25,16 +25,18 @@ pub use breakit_scenario::Report;
 pub enum Rig {
     Bridges,
     Towers,
+    Water,
     Sandbox,
 }
 
 impl Rig {
-    pub const ALL: [Rig; 3] = [Rig::Bridges, Rig::Towers, Rig::Sandbox];
+    pub const ALL: [Rig; 4] = [Rig::Bridges, Rig::Towers, Rig::Water, Rig::Sandbox];
 
     pub fn label(self) -> &'static str {
         match self {
             Rig::Bridges => "Bridges",
             Rig::Towers => "Towers",
+            Rig::Water => "Water",
             Rig::Sandbox => "Sandbox",
         }
     }
@@ -44,6 +46,7 @@ impl Rig {
         match self {
             Rig::Bridges => 0,
             Rig::Towers => 3,
+            Rig::Water => 2,
             Rig::Sandbox => 1,
         }
     }
@@ -51,6 +54,7 @@ impl Rig {
     fn from_group(group: &str) -> Self {
         match group {
             "Towers" => Rig::Towers,
+            "Water" => Rig::Water,
             _ => Rig::Bridges,
         }
     }
@@ -92,6 +96,9 @@ pub struct Scenario {
     pub allowed: Vec<BeamKind>,
     /// Free play: the player places supports and loads, no limits.
     pub sandbox: bool,
+    /// The playground: a sandbox whose run is the free load bench
+    /// instead of the sheet's test.
+    pub playground: bool,
 }
 
 fn v3(p: [f64; 3]) -> Vec3 {
@@ -231,6 +238,7 @@ impl Scenario {
             sag_limit,
             allowed,
             sandbox,
+            playground: false,
             mode,
             def,
         }
@@ -239,6 +247,9 @@ impl Scenario {
     /// What the sheet loads, for the register: payloads, else the
     /// heaviest event.
     pub fn load_summary(&self) -> String {
+        if self.playground {
+            return "anything, live".into();
+        }
         if self.sandbox {
             return "your own".into();
         }
@@ -396,7 +407,19 @@ impl Scenario {
                 }
             }
         }
+        // Still water: buoyancy at the built position (its springs are in
+        // `static_springs`).
+        out.extend(Binding::static_support(&self.def, &s).0);
         out
+    }
+
+    /// Elastic supports for build mode's static check: the water-plane
+    /// stiffness of floats, so a structure resting on pontoons solves.
+    pub fn static_springs(&self, design: &Design) -> Vec<NodeSpring> {
+        if design.beams.is_empty() {
+            return Vec::new();
+        }
+        Binding::static_support(&self.def, &design.to_structure()).1
     }
 }
 
@@ -551,8 +574,8 @@ impl Sheets {
     }
 }
 
-/// The built-in scenarios as sheets, then a sandbox bench on the first
-/// bridge.
+/// The built-in scenarios as sheets, then the playground and a sandbox
+/// bench on the first bridge.
 pub fn catalogue() -> Vec<Scenario> {
     let defs = bs::builtin();
     let mut out: Vec<Scenario> = defs
@@ -561,6 +584,11 @@ pub fn catalogue() -> Vec<Scenario> {
         .map(|d| Scenario::new(d, PlayMode::Challenge))
         .collect();
     if let Some(first) = defs.into_iter().next() {
+        let mut playground = Scenario::new(first.clone(), PlayMode::Sandbox);
+        playground.id = "PG";
+        playground.title = "Playground".into();
+        playground.playground = true;
+        out.push(playground);
         out.push(Scenario::new(first, PlayMode::Sandbox));
     }
     out
@@ -581,6 +609,8 @@ mod tests {
         assert!(all.iter().any(|s| s.rig == Rig::Bridges));
         assert!(all.iter().any(|s| s.rig == Rig::Towers));
         assert!(all.last().unwrap().sandbox);
+        let pg = all.iter().find(|s| s.playground).unwrap();
+        assert!(pg.sandbox && pg.budget.is_none() && pg.rig == Rig::Sandbox);
     }
 
     #[test]

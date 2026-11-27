@@ -32,6 +32,30 @@ pub trait TableInsert: Send + Sync + 'static {
     fn contact_boxes(&self, half: Vec2) -> Vec<(Vec3, Vec3)> {
         vec![slab(-half, half, 0.0)]
     }
+    /// The water this insert holds, for whoever simulates it. `None` (the
+    /// default) for a dry table.
+    fn water(&self, _half: Vec2) -> Option<TableWater> {
+        None
+    }
+}
+
+/// A body of water on the table, world units: where it is and how deep, so
+/// a water simulation can be set up without this crate knowing about it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TableWater {
+    /// Low corner of the basin (x, z).
+    pub min: Vec2,
+    /// High corner of the basin (x, z).
+    pub max: Vec2,
+    /// Bed level, y.
+    pub bed: f32,
+    /// Still water level, y.
+    pub level: f32,
+    /// A beach at the high-x end: where its toe is (x) and its slope (rise
+    /// over run).
+    pub beach: Option<(f32, f32)>,
+    /// True if a wave paddle stands at the low-x end.
+    pub paddle: bool,
 }
 
 /// A block of basin fill from the basin floor up to `top`.
@@ -49,6 +73,9 @@ pub struct PlayTable {
     /// Playing surface size, world units (x by z).
     pub size: Vec2,
     pub insert: Arc<dyn TableInsert>,
+    /// Draw the insert's water as a still surface (the default). False
+    /// when something else draws it, such as a water simulation.
+    pub still_water: bool,
 }
 
 impl Default for PlayTable {
@@ -62,7 +89,20 @@ impl PlayTable {
         Self {
             size: Vec2::new(28.0, 16.0),
             insert: Arc::new(insert),
+            still_water: true,
         }
+    }
+
+    /// The same table without its still water surface, for when the water
+    /// is simulated and drawn by something else.
+    pub fn without_still_water(mut self) -> Self {
+        self.still_water = false;
+        self
+    }
+
+    /// The water the insert holds, if any (see [`TableInsert::water`]).
+    pub fn water(&self) -> Option<TableWater> {
+        self.insert.water(self.size * 0.5)
     }
 
     /// The table's solid ground for contact, world units.
@@ -86,6 +126,11 @@ pub struct TableTop<'a> {
     /// Half size of the basin opening, x and z.
     pub half: Vec2,
     pub out: &'a mut Scenery,
+    /// False when the water is drawn elsewhere: leave the water surface out.
+    pub still_water: bool,
+    /// What rides the shake platform: drawn apart from the rest so the
+    /// shake rig can move it (see `rigs::shake`). Empty for most inserts.
+    pub platform: Scenery,
 }
 
 impl TableTop<'_> {
@@ -171,15 +216,25 @@ impl TableTop<'_> {
 
 /// Builds the whole table: frame, legs down to `floor_y`, and the insert.
 pub fn build(table: &PlayTable, floor_y: f32) -> Scenery {
+    let (mut out, platform) = build_parts(table, floor_y);
+    out.merge(platform);
+    out
+}
+
+/// The table as what stands still and what rides the shake platform.
+pub fn build_parts(table: &PlayTable, floor_y: f32) -> (Scenery, Scenery) {
     let mut out = Scenery::default();
     let half = table.size * 0.5;
     frame(&mut out, half, floor_y);
     let mut top = TableTop {
         half,
         out: &mut out,
+        still_water: table.still_water,
+        platform: Scenery::default(),
     };
     table.insert.build(&mut top);
-    out
+    let platform = top.platform;
+    (out, platform)
 }
 
 fn frame(s: &mut Scenery, half: Vec2, floor_y: f32) {
@@ -324,6 +379,18 @@ impl TableInsert for Ravine {
         ]
     }
 
+    fn water(&self, h: Vec2) -> Option<TableWater> {
+        let g = self.gap * 0.5;
+        Some(TableWater {
+            min: Vec2::new(-g, -h.y),
+            max: Vec2::new(g, h.y),
+            bed: -self.depth,
+            level: -self.depth + 0.06,
+            beach: None,
+            paddle: false,
+        })
+    }
+
     fn build(&self, top: &mut TableTop) {
         let h = top.half;
         let g = self.gap * 0.5;
@@ -337,6 +404,9 @@ impl TableInsert for Ravine {
         top.contour_bank(-g, -h.y, h.y, floor, 1.0, 11);
         top.contour_bank(g, -h.y, h.y, floor, -1.0, 12);
         let w = g * 0.45;
+        if !top.still_water {
+            return;
+        }
         top.out.m(Mat::Water).quad([
             Vec3::new(-w, floor + 0.06, -h.y),
             Vec3::new(-w, floor + 0.06, h.y),
@@ -354,7 +424,13 @@ pub struct Flume {
     pub depth: f32,
     /// Water surface below the playing surface.
     pub freeboard: f32,
+    /// An absorber beach at the +x end: where its toe is (x) and its slope
+    /// (rise over run). Waves shoal, break and run up on it.
+    pub beach: Option<(f32, f32)>,
 }
+
+/// How far the paddle housing reaches into the channel from the -x end.
+const PADDLE_HOUSING: f32 = 0.4;
 
 impl Default for Flume {
     fn default() -> Self {
@@ -362,6 +438,7 @@ impl Default for Flume {
             width: 6.0,
             depth: 3.2,
             freeboard: 1.0,
+            beach: None,
         }
     }
 }
@@ -373,11 +450,35 @@ impl TableInsert for Flume {
 
     fn contact_boxes(&self, h: Vec2) -> Vec<(Vec3, Vec3)> {
         let w = self.width * 0.5;
-        vec![
+        let mut boxes = vec![
             slab(Vec2::new(-h.x, -h.y), Vec2::new(h.x, -w), 0.0),
             slab(Vec2::new(-h.x, w), Vec2::new(h.x, h.y), 0.0),
             slab(Vec2::new(-h.x, -w), Vec2::new(h.x, w), -self.depth),
-        ]
+        ];
+        // The beach as steps, each as high as the slope's middle there.
+        if let Some((toe, slope)) = self.beach {
+            let step = 0.25;
+            let mut x = toe;
+            while x < h.x {
+                let x1 = (x + step).min(h.x);
+                let top = (-self.depth + (0.5 * (x + x1) - toe) * slope).min(0.0);
+                boxes.push(slab(Vec2::new(x, -w), Vec2::new(x1, w), top));
+                x = x1;
+            }
+        }
+        boxes
+    }
+
+    fn water(&self, h: Vec2) -> Option<TableWater> {
+        let w = self.width * 0.5;
+        Some(TableWater {
+            min: Vec2::new(-h.x + PADDLE_HOUSING, -w),
+            max: Vec2::new(h.x, w),
+            bed: -self.depth,
+            level: -self.freeboard,
+            beach: self.beach,
+            paddle: true,
+        })
     }
 
     fn build(&self, top: &mut TableTop) {
@@ -397,8 +498,28 @@ impl TableInsert for Flume {
             let (c, d) = (Vec3::new(h.x, 0.0, z), Vec3::new(-h.x, 0.0, z));
             top.out.m(Mat::Glass).quad([a, b, c, d]);
         }
+        if let Some((toe, slope)) = self.beach {
+            // The slope up to the playing surface, then level to the end.
+            let crest = (toe + self.depth / slope).min(h.x);
+            let crest_y = floor + (crest - toe) * slope;
+            top.out.m(Mat::Concrete).quad([
+                Vec3::new(toe, floor, -w),
+                Vec3::new(toe, floor, w),
+                Vec3::new(crest, crest_y, w),
+                Vec3::new(crest, crest_y, -w),
+            ]);
+            if crest < h.x {
+                top.out
+                    .m(Mat::Concrete)
+                    .aabb(Vec3::new(crest, floor, -w), Vec3::new(h.x, crest_y, w));
+            }
+        }
         let wl = -self.freeboard;
-        let n = (h.x * 2.0 / 0.5) as i32;
+        let n = if top.still_water {
+            (h.x * 2.0 / 0.5) as i32
+        } else {
+            0
+        };
         for k in 0..n {
             let x0 = -h.x + k as f32 * 0.5;
             let x1 = x0 + 0.5;
@@ -410,10 +531,11 @@ impl TableInsert for Flume {
                 Vec3::new(x1, y(x1), -w),
             ]);
         }
-        // A paddle housing at the -x end.
+        // A bulkhead at the -x end, behind the paddle (`rigs::paddle`), whose
+        // plate rests with its face at -h.x + 0.4.
         top.out
             .m(Mat::MachineBlue)
-            .aabb(Vec3::new(-h.x, wl - 0.5, -w), Vec3::new(-h.x + 0.4, 0.6, w));
+            .aabb(Vec3::new(-h.x, wl - 0.5, -w), Vec3::new(-h.x + 0.2, 0.6, w));
     }
 }
 
@@ -444,20 +566,26 @@ impl TableInsert for ShakeTable {
         top.surface(Vec2::new(-h.x, o), Vec2::new(h.x, h.y), 0.0);
         top.surface(Vec2::new(-h.x, -o), Vec2::new(-o, o), 0.0);
         top.surface(Vec2::new(o, -o), Vec2::new(h.x, o), 0.0);
-        // Pit and platform.
+        // Pit, and the platform that rides the table motion.
         top.out
             .m(Mat::TableDark)
             .aabb(Vec3::new(-o, -BASIN_DEPTH, -o), Vec3::new(o, -1.0, o));
-        top.out
+        let mut plat = TableTop {
+            half: top.half,
+            out: &mut top.platform,
+            still_water: top.still_water,
+            platform: Scenery::default(),
+        };
+        plat.out
             .m(Mat::MachineBlue)
             .aabb(Vec3::new(-p, -0.6, -p), Vec3::new(p, 0.0, p));
-        top.grid(Vec2::splat(-p), Vec2::splat(p), 0.0);
+        plat.grid(Vec2::splat(-p), Vec2::splat(p), 0.0);
         // Bolt holes on a 1 m pitch.
         let mut x = -p + 0.5;
         while x < p {
             let mut z = -p + 0.5;
             while z < p {
-                top.out.m(Mat::TableDark).disc(
+                plat.out.m(Mat::TableDark).disc(
                     Vec3::new(x + 0.25, 0.006, z + 0.25),
                     Vec3::Y,
                     0.07,
@@ -467,10 +595,10 @@ impl TableInsert for ShakeTable {
             }
             x += 1.0;
         }
-        // Actuator rods under the edges.
+        // Bearing pads under the edges.
         for (dx, dz) in [(1.0f32, 0.0f32), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
             let c = Vec3::new(dx * (p - 0.4), -0.6, dz * (p - 0.4));
-            top.out
+            top.platform
                 .m(Mat::Stainless)
                 .cylinder(c, c - Vec3::Y * 0.4, 0.12, 10, false);
         }

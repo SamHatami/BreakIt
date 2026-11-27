@@ -1,0 +1,18 @@
+[package]
+name = "breakit-playground"
+version = "0.1.0"
+description = "BreakIt playground: free load bench on breakit-core (live load settings, member end forces and reactions, probes, saved setups). No engine dependency."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+breakit-core = { path = "../breakit-core", features = ["serde"] }
+breakit-parts = { path = "../breakit-parts" }
+ron = "0.12"
+serde = { version = "1", features = ["derive"] }
+
+[lints]
+workspace = true

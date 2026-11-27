@@ -1,0 +1,58 @@
+// Test sheet F-02: a floating footbridge across the flume.
+//
+// Only the near bank takes a mooring: two pins that hold the end in place
+// but let it swing. The far bank is soft and takes nothing, so the bridge
+// has to float. Pontoons lift what they displace less what they weigh;
+// waves along the flume pitch them, a crowd walks on.
+(
+    id: "pontoon_footbridge",
+    sheet: "F-02",
+    group: "Water",
+    title: "Floating footbridge",
+    brief: "Carry a footpath 6.3 m across the flume to the far bank, which can take no load: the bridge has to float. It is moored by two pins on the near bank at x = ±0.75 m. A crowd of 2 kN per metre walks on while a current runs and 0.4 m waves roll along the flume (+x). Still water is 1 m below the path. Pontoons (large: about 200 kg of spare lift per metre fully under) float; any sealed tube does. The path needs a node at least every 1.5 m and must not sink more than 30 cm.",
+    limits: (
+        volume: (min: (-2.5, -2.0, -3.6), max: (2.5, 0.6, 2.9)),
+        budget: Some(300000.0),
+        max_mass: Some(6000.0),
+        materials: None,
+    ),
+    anchors: [
+        (name: "W", position: (-0.75, 0.0, -3.5), kind: Pinned),
+        (name: "E", position: (0.75, 0.0, -3.5), kind: Pinned),
+    ],
+    deck: Some((
+        from: (0.0, 0.0, -3.5),
+        to: (0.0, 0.0, 2.8),
+        width: 0.9,
+        height: 0.25,
+        max_gap: 1.5,
+    )),
+    events: [
+        // Full from the start: the bridge must float while its weight comes on.
+        Water(
+            name: "Waves 0.4 m",
+            start: -1.0,
+            ramp: 0.0,
+            bed: -3.2,
+            level: -1.0,
+            current: (0.6, 0.0, 0.0),
+            wave: Some(Regular(height: 0.4, period: 2.5, direction: (1.0, 0.0, 0.0))),
+        ),
+        DeckLoad(name: "Crowd 2 kN/m", start: 1.0, ramp: 3.0, per_metre: 2000.0),
+    ],
+    duration: 12.0,
+    settle: 1.0,
+    collapse: (displacement: 0.6, max_broken_fraction: 0.25),
+    overload: None,
+    objectives: [
+        DeckDeflection(limit: 0.3),
+        NoBreaks,
+    ],
+    scoring: (
+        target_cost: 200000.0,
+        target_mass: 3200.0,
+        margin_band: (1.25, 2.0),
+        weights: (cost: 0.3, mass: 0.15, margin: 0.25, objectives: 0.3),
+        stars: (0.6, 0.85),
+    ),
+)

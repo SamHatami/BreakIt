@@ -1,0 +1,19 @@
+[package]
+name = "breakit-water-gpu"
+version = "0.1.0"
+description = "BreakIt water on the GPU: the breakit-water solver as wgpu compute passes, read back into the CPU solver so everything that reads the water is unchanged."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+breakit-water = { path = "../breakit-water" }
+bytemuck = "1"
+wgpu = { version = "30", default-features = false, features = ["std", "wgsl", "dx12", "metal", "vulkan"] }
+
+[dev-dependencies]
+futures-lite = "2"
+
+[lints]
+workspace = true

@@ -12,6 +12,8 @@ engineering models of the real thing. All of it is Bevy-free and lives in
 | Model vehicles | `traffic.rs` | Lanes resolved from a line in the scenario to the player's deck nodes, axle loads split between nodes, quarter-car suspension per axle (bounce, lift-off), braking force and load transfer, vehicles fall through gaps |
 | Crash / dropped object | `impact.rs` | Rigid impactor with a padded contact against member surfaces (capsules of half the section depth), split to the end nodes, integrated inside the frame and applied as the frame-averaged force (impulse conserved), contact events for sound and visuals |
 
+Members float by the share of their section under the local surface; closed tubes displace their outline until damaged, broken pieces keep their buoyancy and drag (`docs/water.md`, "Floating, flooding and debris"). A water case can take its kinematics from the simulated water instead of the analytic waves: set `Water::field` (trait `WaterField`); see `docs/water.md`.
+
 ## Using it
 
 ```rust
@@ -50,8 +52,8 @@ loop {
 - No wave slamming, diffraction or breaking; no added mass on the structure's
   own acceleration; vehicles are moving sprung masses, not bodies with pitch.
 - Cost on a 1,680-member lattice tower (`cargo run --release --example
-  loads_bench`): wind with gusts and shielding 0.9 ms/frame, waves 0.3 ms,
-  quake 0.005 ms, against ~16 ms for the solver.
+  loads_bench`, 4 cores): wind with gusts, shedding and shielding 0.35
+  ms/frame, waves 0.3 ms, quake 0.004 ms, against ~10 ms for the solver.
 
 ## Wind dynamics (`loads/wind/`)
 
@@ -73,9 +75,35 @@ dynamic pressure, shedding frequency, lift and lock-in, and
 `WindRig::tones` lists the loudest Aeolian tones (frequency, strength,
 member).
 
-Cost on the 1,680-member tower (`cargo run --release --example
-loads_bench`, 4 cores): 0.67 ms/frame with turbulence, shedding and
-galloping (1.3 ms on one thread), 0.36 ms for drag and shielding alone.
+**Cost and the hot-path rules.** Wind is a hot path (`CONTRIBUTING.md`):
+
+- The turbulence sum over modes is a SIMD kernel (`turbulence.rs`) with its
+  own vector cosine (Cody-Waite reduction, Taylor polynomial to r²⁴, within
+  2e-12 of `f64::cos`); the scalar level is the reference. 5x faster than
+  scalar on AVX2 (gate: 2x).
+- Members and node gusts run on the rayon pool through
+  `dynamics::pool::ordered_chunks` (the calling thread works too, so a
+  sleeping pool costs nothing) from `wind::PARALLEL_MIN_MEMBERS` (768)
+  members, with each chunk writing only its own members and forces added in
+  member order: bit-identical on any thread count
+  (`tests/loads_wind_exec.rs`, and the gate). `Wind::set_execution` picks
+  the SIMD level and the threshold (`usize::MAX` = one thread).
+- The member loop itself is scalar: per member it is a branchy mix of
+  section type, Reynolds number, galloping and the wake oscillator. Drag
+  uses two-point Gauss along the member (exact for a cubic), shape-only
+  coefficients are cached at prepare, and the shielding grid uses a cheap
+  hash (it is rebuilt every 0.25 s).
+
+Measured on the 4-core cloud machine with the solver stepping between
+frames (median frame of `LoadSet::apply`, before → after this pass):
+
+| Structure | Steady wind, 4 threads | Steady, 1 thread | Gusts, 4 threads | Gusts, 1 thread |
+| --- | --- | --- | --- | --- |
+| tower 5x5x12 (1,272 members) | 0.23 → 0.20 ms | 0.46 → 0.30 ms | 0.44 → 0.24 ms | 1.02 → 0.40 ms |
+| bridge 60 panels (2,172 members) | 0.39 → 0.31 ms | 0.74 → 0.57 ms | 1.07 → 0.41 ms | 2.65 → 0.70 ms |
+
+Threads broke even at about 500 members and did not pay below; members
+cost about 0.25 µs each on one thread.
 
 **Solver damping.** The implicit integrator adds numerical damping of about
 ζ ≈ ω h / 2 per substep `h`: about 2 % at 2 Hz with the default 4

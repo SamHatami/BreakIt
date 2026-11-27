@@ -7,7 +7,7 @@ use nalgebra::{SMatrix, SVector};
 
 use crate::frame::member_axes;
 use crate::joint::bending_stiffness;
-use crate::{NodeLoad, Structure, Vec3};
+use crate::{NodeLoad, NodeSpring, Structure, Vec3};
 
 type Mat12 = SMatrix<f64, 12, 12>;
 type Vec12 = SVector<f64, 12>;
@@ -121,6 +121,17 @@ pub fn transformation(s: &Structure, m: usize) -> Mat12 {
 
 /// Solve K·u = f for the given nodal loads (sparse Cholesky).
 pub fn solve_static(s: &Structure, loads: &[NodeLoad]) -> Result<StaticResult, SolveError> {
+    solve_static_with_springs(s, loads, &[])
+}
+
+/// [`solve_static`] with elastic supports added to the stiffness (for
+/// buoyancy in the build-mode check: a structure on floats has no fixed
+/// support it needs).
+pub fn solve_static_with_springs(
+    s: &Structure,
+    loads: &[NodeLoad],
+    springs: &[NodeSpring],
+) -> Result<StaticResult, SolveError> {
     use faer::linalg::solvers::Solve;
     use faer::sparse::{SparseColMat, Triplet};
     use faer::{Mat, Side};
@@ -146,6 +157,16 @@ pub fn solve_static(s: &Structure, loads: &[NodeLoad]) -> Result<StaticResult, S
             }
         }
         ke_global.push((kl, t));
+    }
+    for sp in springs {
+        for i in 0..3 {
+            let k = sp.stiffness[i];
+            if k > 0.0 {
+                let d = sp.node * 6 + i;
+                diag[d] += k;
+                entries.push((d, d, k));
+            }
+        }
     }
     for l in loads {
         for i in 0..3 {

@@ -337,3 +337,161 @@ fn column_in_current_settles_to_static_deflection() {
     assert!(rel_err(drag, 0.5 * RHO * 1.0 * 0.1 * 2.0 * 4.0) < 1e-3);
     assert!(rel_err(dd, e) < 0.02);
 }
+
+/// A free horizontal member along x with its axis at `y`.
+fn log(y: f64, mat: &Material, sec: &Section) -> Structure {
+    let mut s = Structure::new();
+    s.add_line(Vec3::new(-1.0, y, 0.0), Vec3::new(1.0, y, 0.0), 2, mat, sec);
+    s
+}
+
+#[test]
+fn buoyancy_grows_smoothly_as_a_horizontal_tube_sinks_in() {
+    // Water surface at y = 1; a tube of radius 0.05, 2 m long.
+    let (ro, len) = (0.05, 2.0);
+    let full = RHO * G * PI * ro * ro * len;
+    let lift = |rise: f64| {
+        let s = log(1.0 - rise, &Material::steel(), &tube());
+        total_force(&s, Water::current(1.0, Vec3::zeros())).y
+    };
+    assert_eq!(lift(-ro), 0.0);
+    assert!(rel_err(lift(0.0), 0.5 * full) < 1e-12);
+    assert!(rel_err(lift(ro), full) < 1e-12);
+    assert!(rel_err(lift(3.0 * ro), full) < 1e-12);
+    // Half a radius in: the circle segment below the chord.
+    let t: f64 = 0.5;
+    let segment = ((-t).acos() + t * (1.0 - t * t).sqrt()) / PI;
+    assert!(rel_err(lift(0.5 * ro), segment * full) < 1e-12);
+}
+
+#[test]
+fn a_timber_log_floats_at_its_draft() {
+    let (b, level) = (0.2, 1.0);
+    let timber = Material::timber();
+    let s = log(level + 0.05, &timber, &Section::rect(b, b));
+    let mut loads = instant(Water::current(level, Vec3::zeros()));
+    loads.prepare(&s);
+    let mut sim = DynamicSim::new(
+        &s,
+        SimConfig {
+            plasticity: false,
+            ..Default::default()
+        },
+    );
+    for _ in 0..(8.0 * 60.0) as usize {
+        loads.step(&s, &mut sim, 1.0 / 60.0);
+    }
+    // Archimedes: the wet share of the section is the density ratio.
+    let wet = timber.density / RHO;
+    let expected = level - (wet - 0.5) * b;
+    for n in 0..3 {
+        let y = sim.position(n).y;
+        println!("node {n}: axis at {y}, expected {expected}");
+        assert!((y - expected).abs() < 0.005);
+        let v = sim.velocity(n).norm();
+        assert!(v < 0.02, "still bobbing at {v} m/s");
+    }
+}
+
+#[test]
+fn a_damaged_or_open_tube_floods() {
+    // A wide thin tube floats when sealed and sinks when the water is let in.
+    let sec = Section::tube(0.3, 0.004);
+    let s = log(0.5, &Material::steel(), &sec);
+    let weight = 7850.0 * sec.area * 2.0 * G;
+    let sealed = total_force(&s, Water::current(1.0, Vec3::zeros())).y;
+    let open = total_force(
+        &s,
+        Water {
+            sealed: false,
+            ..Water::current(1.0, Vec3::zeros())
+        },
+    )
+    .y;
+    println!("weight {weight}, lift sealed {sealed}, open {open}");
+    assert!(sealed > 2.0 * weight);
+    assert!(open < 0.2 * weight);
+}
+
+#[test]
+fn broken_timber_floats() {
+    // A stick under water, torn apart by a pull on its free end: the
+    // pieces come up and float instead of falling through the water.
+    let (b, len, level) = (0.03, 2.0, 1.0);
+    let mut s = Structure::new();
+    let ids = s.add_line(
+        Vec3::new(0.0, 0.3, 0.0),
+        Vec3::new(len, 0.3, 0.0),
+        2,
+        &Material::timber(),
+        &Section::rect(b, b),
+    );
+    s.add_support(Support::fixed(ids[0]));
+    let mut loads = instant(Water::current(level, Vec3::zeros()));
+    loads.static_loads = vec![NodeLoad::force(ids[2], Vec3::new(2.0e5, 0.0, 0.0))];
+    loads.prepare(&s);
+    let mut sim = DynamicSim::new(&s, SimConfig::default());
+    let dt = 1.0 / 240.0;
+    let mut steps = 0;
+    while sim.break_events().is_empty() {
+        loads.step(&s, &mut sim, dt);
+        steps += 1;
+        assert!(steps < 240, "the stick should have snapped");
+    }
+    loads.static_loads.clear();
+    for _ in 0..(10.0 / dt) as usize {
+        loads.step(&s, &mut sim, dt);
+    }
+    let broken: Vec<bool> = (0..2).map(|m| sim.is_broken(m)).collect();
+    let y = sim.position(ids[2]).y;
+    println!("broken {broken:?}, free end at y = {y}");
+    assert!((y - level).abs() < 0.05, "the free end should float: {y}");
+}
+
+#[test]
+fn static_support_is_archimedes_and_the_water_plane() {
+    // A raft: two tubes of radius 0.4 m, 3 m long, axis 0.2 m under the
+    // surface at y = 1.
+    let (ro, len, level) = (0.4, 3.0, 1.0);
+    let sec = Section::tube(ro, 0.01);
+    let mut s = Structure::new();
+    for z in [-1.0, 1.0] {
+        s.add_line(
+            Vec3::new(0.0, level - 0.2, z),
+            Vec3::new(len, level - 0.2, z),
+            2,
+            &Material::steel(),
+            &sec,
+        );
+    }
+    let (loads, springs) = Water::current(level, Vec3::zeros()).static_support(&s, 0.0);
+    let lift: f64 = loads.iter().map(|l| l.force.y).sum();
+    let k: f64 = springs.iter().map(|k| k.stiffness.y).sum();
+    let t: f64 = 0.5;
+    let segment = ((-t).acos() + t * (1.0 - t * t).sqrt()) / PI;
+    let chord = 2.0 * ro * (1.0 - t * t).sqrt();
+    let (lift_e, k_e) = (
+        RHO * G * 2.0 * len * PI * ro * ro * segment,
+        RHO * G * 2.0 * len * chord,
+    );
+    println!("lift {lift} vs {lift_e}, stiffness {k} vs {k_e}");
+    assert!(rel_err(lift, lift_e) < 1e-12 && rel_err(k, k_e) < 1e-12);
+    assert_eq!((loads.len(), springs.len()), (6, 6));
+    assert!(springs
+        .iter()
+        .all(|k| k.stiffness.x == 0.0 && k.stiffness.z == 0.0));
+
+    // A vertical pile through the surface: lift of its wet length, and the
+    // stiffness of its cross-section as a water plane. Fully under water:
+    // lift, no stiffness.
+    let (s, _) = column(2.0, 4, &tube());
+    let area = PI * 0.05 * 0.05;
+    let (loads, springs) = Water::current(1.3, Vec3::zeros()).static_support(&s, 0.0);
+    let lift: f64 = loads.iter().map(|l| l.force.y).sum();
+    let k: f64 = springs.iter().map(|k| k.stiffness.y).sum();
+    println!("pile lift {lift}, stiffness {k}");
+    assert!(rel_err(lift, RHO * G * area * 1.3) < 1e-9);
+    assert!(rel_err(k, RHO * G * area) < 1e-9);
+    let (_, springs) = Water::current(5.0, Vec3::zeros()).static_support(&s, 0.0);
+    assert!(springs.is_empty());
+}

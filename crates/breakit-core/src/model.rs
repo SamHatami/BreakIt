@@ -61,6 +61,15 @@ impl NodeLoad {
     }
 }
 
+/// A linear spring from a node to the ground, per world axis (N/m): what
+/// holds the node up when it rests on something that gives way in
+/// proportion, such as water under a float.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NodeSpring {
+    pub node: usize,
+    pub stiffness: Vec3,
+}
+
 /// A 3D frame: nodes, members and supports.
 #[derive(Clone, Debug, Default)]
 pub struct Structure {

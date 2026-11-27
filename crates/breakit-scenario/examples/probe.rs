@@ -8,7 +8,7 @@ use breakit_scenario::{builtin, evaluate, CostModel, PlayMode};
 
 #[path = "../tests/common/mod.rs"]
 mod common;
-use common::{jetty, mast, platform, sign_tower, warren};
+use common::{jetty, mast, platform, pontoon_bridge, sign_tower, warren};
 
 fn main() {
     let scenarios = builtin();
@@ -50,6 +50,46 @@ fn main() {
         ("jetty 100x10 unbraced", 4, jetty(0.1, 0.01, false)),
         ("jetty 60x5 unbraced", 4, jetty(0.06, 0.005, false)),
         ("jetty 50x5 unbraced", 4, jetty(0.05, 0.005, false)),
+        (
+            "pontoon L x3, frame 50x4",
+            5,
+            pontoon_bridge(0.05, 0.004, 0.4065, 0.016, &[2, 4, 6], 1.1),
+        ),
+        (
+            "pontoon L x2, frame 50x4",
+            5,
+            pontoon_bridge(0.05, 0.004, 0.4065, 0.016, &[3, 6], 1.1),
+        ),
+        (
+            "pontoon S x3, frame 50x4",
+            5,
+            pontoon_bridge(0.05, 0.004, 0.2032, 0.008, &[2, 4, 6], 1.0),
+        ),
+        (
+            "pontoon L x2, frame 40x4",
+            5,
+            pontoon_bridge(0.04, 0.004, 0.4065, 0.016, &[3, 6], 1.1),
+        ),
+        (
+            "pontoon L x2 mid, frame 50x4",
+            5,
+            pontoon_bridge(0.05, 0.004, 0.4065, 0.016, &[2, 5], 1.1),
+        ),
+        (
+            "pontoon L x2, frame 30x3",
+            5,
+            pontoon_bridge(0.03, 0.003, 0.4065, 0.016, &[3, 6], 1.1),
+        ),
+        (
+            "pontoon L x3, frame 30x3",
+            5,
+            pontoon_bridge(0.03, 0.003, 0.4065, 0.016, &[2, 4, 6], 1.1),
+        ),
+        (
+            "no pontoons, frame 80x8",
+            5,
+            pontoon_bridge(0.08, 0.008, 0.4, 0.01, &[], 1.0),
+        ),
     ];
     let only = std::env::args().nth(1);
     for (name, k, s) in cases {

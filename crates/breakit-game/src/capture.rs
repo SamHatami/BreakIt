@@ -8,6 +8,7 @@
 //! `BREAKIT_THEME=<n>` starts with theme preset n, for comparing
 //! looks. `BREAKIT_TRUSS=steel` builds the web in steel instead of timber;
 //! `BREAKIT_TRUSS=weak` lays a bare timber plank instead, which breaks.
+//! `BREAKIT_SHEET=F-01` walks the flume sheet with a jetty instead.
 
 use std::path::PathBuf;
 
@@ -105,7 +106,8 @@ fn capture_script(
         // Shaders compile on the first frames.
         0 if waited >= 90 => {
             // The first bridge sheet; select it in case another is open.
-            let i = sheets.all.iter().position(|s| s.id == "B-01").unwrap_or(0);
+            let id = std::env::var("BREAKIT_SHEET").unwrap_or_else(|_| "B-01".into());
+            let i = sheets.all.iter().position(|s| s.id == id).unwrap_or(0);
             actions.write(UiAction::SelectSheet(i));
             advance(&mut s);
         }
@@ -133,7 +135,9 @@ fn capture_script(
                     BeamKind::part("timber-joist"),
                 ),
             };
-            if std::env::var("BREAKIT_TRUSS").as_deref() == Ok("weak") {
+            if std::env::var("BREAKIT_SHEET").as_deref() == Ok("F-01") {
+                build_jetty(&mut design, chord);
+            } else if std::env::var("BREAKIT_TRUSS").as_deref() == Ok("weak") {
                 build_plank(&mut design);
             } else {
                 build_truss(&mut design, chord, web);
@@ -150,7 +154,7 @@ fn capture_script(
             advance(&mut s);
         }
         7 => {
-            let t = sim.map(|s| s.run().time()).unwrap_or(0.0);
+            let t = sim.map(|s| s.time()).unwrap_or(0.0);
             let after_break = rec.first_break.is_some_and(|b| t > b as f64 + 0.15);
             if *screen.get() == Screen::Test && (after_break || t > 7.0) {
                 shot(&mut commands, "4-test.png");
@@ -210,4 +214,27 @@ fn build_plank(d: &mut Design) {
     for w in nodes.windows(2) {
         d.add_beam(w[0], w[1], BeamKind::part("timber-joist"));
     }
+}
+
+/// A jetty for sheet F-01: four legs from the footings on the flume bed
+/// to a deck frame under the pump house's feet.
+fn build_jetty(d: &mut Design, kind: BeamKind) {
+    let corners = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
+    let feet: Vec<usize> = corners
+        .iter()
+        .map(|&(x, z)| d.add_node(Vec3::new(x, 1.0, 0.5 * z)))
+        .collect();
+    let mid: Vec<usize> = corners
+        .iter()
+        .map(|&(x, z)| d.add_node(Vec3::new(1.25 * x, -1.1, z)))
+        .collect();
+    for (i, &(x, z)) in corners.iter().enumerate() {
+        let base = d.add_node(Vec3::new(1.5 * x, -3.2, 1.5 * z));
+        d.add_beam(base, mid[i], kind);
+        d.add_beam(mid[i], feet[i], kind);
+        d.add_beam(feet[i], feet[(i + 1) % 4], kind);
+        d.add_beam(mid[i], mid[(i + 1) % 4], kind);
+        d.add_beam(mid[i], feet[(i + 1) % 4], kind);
+    }
+    d.add_beam(feet[0], feet[2], kind);
 }

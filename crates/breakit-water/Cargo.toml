@@ -1,0 +1,14 @@
+[package]
+name = "breakit-water"
+version = "0.1.0"
+description = "BreakIt water: a real-time non-hydrostatic shallow-water solver for the wave flume and floods (paddle waves, shoaling, breaking, run-up, inundation) that feeds the core load model. No engine dependency."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+breakit-core = { path = "../breakit-core" }
+
+[lints]
+workspace = true

@@ -31,12 +31,14 @@ pub mod contact;
 pub mod damage;
 pub mod dynamics;
 pub mod frame;
+mod jacobi;
 pub mod joint;
 pub mod linsolve;
 pub mod loads;
 pub mod material;
 pub mod model;
 pub mod section;
+pub mod simd;
 pub mod statics;
 
 pub use contact::{Block, ContactEvent, Ground};
@@ -45,9 +47,10 @@ pub use dynamics::{BreakCause, BreakEvent, DynamicSim, SimConfig, Solver, Solver
 pub use joint::{Joint, JointKind};
 pub use loads::{LoadCase, LoadKind, LoadSet, RigState, Window};
 pub use material::{ConcreteClass, Material, MaterialKind, SteelGrade, TimberClass};
-pub use model::{Member, NodeLoad, Structure, Support};
+pub use model::{Member, NodeLoad, NodeSpring, Structure, Support};
 pub use section::{Section, Shape};
-pub use statics::{solve_static, MemberForces, StaticResult};
+pub use simd::SimdLevel;
+pub use statics::{solve_static, solve_static_with_springs, MemberForces, StaticResult};
 
 /// nalgebra vector type used across the crate.
 pub type Vec3 = nalgebra::Vector3<f64>;

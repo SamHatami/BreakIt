@@ -2099,6 +2099,7 @@ version = "0.1.0"
 dependencies = [
  "faer",
  "nalgebra",
+ "pulp",
  "rayon",
  "serde",
 ]
@@ -2112,8 +2113,13 @@ dependencies = [
  "breakit-core",
  "breakit-lab",
  "breakit-parts",
+ "breakit-playground",
  "breakit-render",
  "breakit-scenario",
+ "breakit-water",
+ "breakit-water-gpu",
+ "breakit-water-render",
+ "wgpu",
 ]
 
 [[package]]
@@ -2143,6 +2149,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "breakit-playground"
+version = "0.1.0"
+dependencies = [
+ "breakit-core",
+ "breakit-parts",
+ "ron",
+ "serde",
+]
+
+[[package]]
 name = "breakit-render"
 version = "0.1.0"
 dependencies = [
@@ -2158,6 +2174,33 @@ dependencies = [
  "breakit-core",
  "ron",
  "serde",
+]
+
+[[package]]
+name = "breakit-water"
+version = "0.1.0"
+dependencies = [
+ "breakit-core",
+]
+
+[[package]]
+name = "breakit-water-gpu"
+version = "0.1.0"
+dependencies = [
+ "breakit-water",
+ "bytemuck",
+ "futures-lite",
+ "wgpu",
+]
+
+[[package]]
+name = "breakit-water-render"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "breakit-core",
+ "breakit-lab",
+ "breakit-water",
 ]
 
 [[package]]
@@ -6615,6 +6658,7 @@ dependencies = [
  "smallvec",
  "static_assertions",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
  "wgpu-core",
  "wgpu-hal",

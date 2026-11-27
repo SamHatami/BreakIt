@@ -188,7 +188,91 @@ Frames, `linear_tolerance` 1e-4, mean ms per frame elastic / collapse (collapse 
 
 On the bridges assembly is now the largest part of a frame (bridge 60: 3.0 of 5.5 ms elastic). What is left in the solver: the triangular solves on bridge 120 are bound by memory (a 3.9 MB factor), where a single-precision copy of the factor for preconditioning would help; supernodes would be needed to beat faer on dense factors.
 
+## SIMD and threads as a rule (`src/simd.rs`, `src/jacobi.rs`)
+
+Hot paths now follow one rule (`CONTRIBUTING.md`, "Hot paths"): written once over `pulp::Simd`, dispatched at start-up to AVX2+FMA or NEON, with the scalar build of the same source as the reference (`SimdLevel::Scalar`, `BREAKIT_SIMD=scalar`). The crate has no `unsafe` left; the block Cholesky kernels moved from hand-rolled `#[target_feature]` calls to the same dispatch, unchanged in speed.
+
+Block-Jacobi CG was rewritten for it (it used nalgebra 6x6 types on the baseline instruction set):
+
+- Node vectors are padded from 6 to 8 single-precision entries, one AVX register. Blocks stay 36 entries; a column is read as one 8-entry register overlapping the next column, and the two extra lanes meet the zero padding or are dropped.
+- Products run row by row: each node lists its coupling blocks, stored once and read transposed from one end. A row writes only its own node, so rows can run on any number of threads. Storing a transposed copy made products cheaper (six fused multiply-adds instead of six dot products) and won 10 to 30% at 1,300 members, but the matrix of the 3,900-member tower then left the 2 MB L2 cache and that solve got 20% slower, so there is one copy.
+- The three passes of an iteration are fused (product with p·Ap; update of x and r with the preconditioner and both dot products; new direction) and work on chunks of 32 nodes. Each chunk reduces its own partial sums, added in chunk order, so the result is bit-identical on any number of threads.
+- Node-block inverses use the fixed-size 6x6 Cholesky kernel of `blockchol.rs` instead of nalgebra's.
+
+Solve time per frame, one thread, same session (ms): tower 5x5x12 2.5 to 2.9 before, 1.3 to 1.6 after; tower 8x8x16 7.3 to 8.5 before, 4.3 to 5.4 after. Against the scalar reference the native build is 2.2 times faster on the block Cholesky factorisation and 1.2 times on a block-Jacobi solve (its scalar build already gets SSE2 from the compiler, and the transposed products need horizontal sums; that kernel has room left).
+
+Threads: a parallel call from outside rayon's pool hands the job over and blocks, every call. With three passes per CG iteration that made the threaded solve twice as slow as the serial one at any thread count, and is the likely reason threaded assembly never gained more than 15% before. The solve now enters the pool once. Measured on a quiet 4-core cloud machine, one solve on 1 / 2 / 4 threads: 1,377 nodes 0.45 / 0.35 / 0.38 ms, 5,625 nodes 2.2 / 1.6 / 1.3 ms, 13,671 nodes 7.1 / 3.9 / 2.8 ms. Threads are on from 4,096 nodes; below that the gain did not hold up under load.
+
+`examples/gate.rs` runs in CI: the native level must dispatch to SIMD, each kernel must beat the scalar reference by a set factor, threaded solves must be bit-identical and not slower where threads are on by default, and short fixed runs must stay within budgets of solves, CG iterations and factorisations. Timings on shared runners are too noisy for absolute limits, which is why the gate uses same-run ratios and work counters.
+
+### Element assembly (`src/dynamics/assemble.rs`, `src/dynamics/pool.rs`)
+
+Where a beam's assembly time went before (ns per beam, one thread): geometry and strains 30 to 55, material response about 50, the six gradients about 55, building the 12x12 block and forces about 125, scattering it into the matrix 60 to 140. So the block build and the scatter were the targets, not the geometry; a structure-of-arrays batch of the geometry was not worth writing.
+
+- The block K = Σ k g gᵀ and the forces are a `pulp` kernel, dispatched once per chunk of 64 beams. The scalar level gives the old sums bit for bit.
+- On one thread each beam is added to the matrix as soon as it is computed, instead of storing every block first.
+- `add_block` of both engines has a fast path for members whose 12 DOFs are all unknowns.
+- `SimConfig.simd` runs the whole simulation on one level; the default is `SimdLevel::from_env()`.
+- Threads: `DynamicSim::step` enters the pool once per frame. Inside, `ordered_chunks` lets the calling thread work through the chunks itself while pool workers take chunks off the same counter as they wake, and the calling thread scatters finished chunks in beam order. It never waits for a sleeping worker, and the result is the single-thread result bit for bit (a test runs a 2,300-member collapse on 1, 2 and 4 threads). The old parallel step check summed in a different order than the serial one; both now sum the same fixed chunks.
+- Threads are on from 2,048 members (`parallel_min_members`), one helper per 1,024 members for assembly and per 2,048 for the step check. `usize::MAX` keeps everything, the linear solver included, on the calling thread.
+
+Assembly per frame, ms, same session (before is the previous section's code): 
+
+| Structure (members) | before, 1 thread | after, 1 thread | after, 2 threads | after, 4 threads |
+| --- | --- | --- | --- | --- |
+| tower 5x5x12 (1,272) | 1.5 to 1.6 | 1.1 | 1.1 (threads off) | 1.1 (threads off) |
+| bridge 60 (2,172) | 3.0 to 3.3 | 2.5 | 1.9 | 1.5 |
+| tower 8x8x16 (3,856) | 5.2 | 3.5 to 3.7 | 2.3 to 2.7 | 1.8 to 2.1 |
+| bridge 120 (5,776) | 8.7 to 9.5 | 6.6 to 7.2 | 4.0 to 4.5 | 3.5 to 4.1 |
+
+Whole frames on 1 / 4 threads: bridge 60 6.1 / 5.6 ms elastic, tower 8x8x16 11.9 / 10.4, bridge 120 16.1 / 12.6 to 15.0 (elastic) and 20.2 / 16.2 (collapse). Against the scalar reference the native assembly is 1.15 to 1.2 times faster; the material response is scalar and the scatter is memory traffic.
+
+What caps the thread gain now: waking a worker still costs the calling thread tens of microseconds per loop, and `update_material` and the linear solve of bridges are serial. Tried and dropped: an algebraic `eigen2` (no faster than `atan2`), a parallel gather scatter, computing a wave of beams ahead of the scatter (slowed the factorisation by a quarter), plain `par_chunks_mut`.
+
+### The material update reuses the step check
+
+The step check (`objective`) already evaluates every live member's response at the accepted state, and the end-of-substep material update evaluated the same thing again. The check now keeps each member's length and response, and the update commits those when the check was the last thing to look at the state and the viscoplastic ratio is the same (`checked_for`); otherwise it computes as before. The numbers are the same bit for bit, so the serial `update_material` pass is gone from an ordinary substep. Whole frames, 4 threads: tower 5x5x12 about 3.4 ms, bridge 60 4.7 (was 5.6), tower 8x8x16 9.4, bridge 120 11.8 elastic and 14.4 in collapse (was 16.2).
+
+Measured shares of other owners' code on a standing structure: ground contact 1 to 5% of a frame; a steady wind `LoadSet` about 10% (0.35 ms of 3.5 on tower 5x5x12, 0.6 of 5.7 on bridge 60), so the load models now count as a hot path.
+
+### Block Cholesky in parts (`src/blockchol.rs`)
+
+A profile of a bridge 120 frame after the above (ms, one frame, elastic / hard collapse): assembly 5.2 / 5.2, triangular solves about 4.5 / little, factorisation 0.5 / 7.9, material commit 2.8 / 2.6, step check 1.7 / 1.6, the product with the matrix 1.4 / 0.1, node loops 1.9 / 1.7. The factorisation and the solves were the largest serial pieces.
+
+A left-looking factorisation is a chain: every column waits for earlier ones. So the node graph is cut first. `dissect` takes levels of a breadth-first search from one end of the structure, picks the narrowest level near each equal share as a separator, and orders each part by minimum degree with its separators in the graph as a clique, so the ordering leaves the nodes next to a separator for last. Parts then couple only through the separators, which are ordered last:
+
+- Factorisation: each part factorises its own columns and computes what they take off the separators' matrix into a buffer of its own; the separators are factorised afterwards on the calling thread, taking the buffers in part order.
+- Triangular solves and the product with the matrix: the same shape, with a small buffer per part for the separator rows.
+- The split is chosen from the structure alone (the cheapest of 2, 4 or 8 parts of at least 1,024 nodes on an assumed four cores, if it costs at most 25% more block products than no split), never from the machine. Results are therefore the same bit for bit on any number of threads, and a test and the gate check that.
+
+On a bridge a separator is 4 nodes. Two parts cost nothing extra; four parts cost 15% more block products because a middle part carries two separators. A 3D grid has no small separator (78 nodes for two parts of tower 8x8x16) and stays whole below 2,048 nodes.
+
+| Factorisation, ms | whole | parts | 1 thread | 2 threads | 4 threads |
+| --- | --- | --- | --- | --- | --- |
+| bridge 60 (2,416 nodes) | 0.61 | 2 | 0.58 | 0.32 | 0.33 |
+| bridge 120 (4,816 nodes) | 1.30 | 4 | 1.32 | 0.68 | 0.48 |
+
+One CG iteration on the stale factor (two triangular solves and a product) only goes from 0.57 to 0.44 ms on bridge 120. Each of its three threaded sections is about 0.1 ms of work, and by the time a sleeping pool worker has woken the calling thread has done most of it. Keeping helpers awake through a whole solve is the next step.
+
+Tried and dropped: the material commit on threads. Once it reuses the step check's responses it is 0.25 ms per substep on bridge 120 (about 45 ns a member), and chunks of it on the pool came out no faster, and slower on bridge 60 (0.70 against 0.47 ms a frame), for the same reason as above.
+
+### Islands (`src/dynamics/direct.rs`)
+
+Pieces that no live member ties together share no unknowns, so each large one now has a linear system of its own (a `Group`): two structures on the table from the start, or a part that has broken off.
+
+- Groups are found with a union-find over the live members, at the start and after a substep that broke something. A piece needs `SimConfig::island_min_nodes` nodes (default 256) to get its own system; smaller debris stays in the system it came from, because a new system costs its symbolic analysis (about a millisecond per thousand nodes; the systems of a break-up are built side by side).
+- A substep assembles every group, solves the groups' systems side by side, and runs the step check per group. A group whose step fails is shortened and linearised again alone; the others are finished.
+- Each group picks its own linear backend, and a long piece is still split into parts as above.
+- One structure in one piece is one group over all members in order, and takes exactly the path it took before, bit for bit. Tests check that islands move as one system does (two towers; two towers whose tie snaps) and that threads do not change a bit.
+
+What it buys, measured in the same run (ms per frame, 4-core machine): two towers 5x5x12 on one table 6.5 as one system, 5.4 as islands; two towers 8x8x16 23 against 18; two bridges 60 between 5 and 25% less. A single bridge that snaps in the middle shows no clear change: its factorisation was already running in parts on all cores, and the retries of the two halves mostly coincide. After a break-up the collapse takes a different, equally valid course than it did as one system, because each piece now accepts or shortens its own step.
+
+Linear-solver counters are summed over the groups, so two islands count two solves per substep, and the times of solves that ran side by side add up to more than the wall time.
+
+Not done yet: AVX-512 (`pulp` 0.21 needs nightly for it), putting islands that have come to rest to sleep, and SIMD or threads in the load models' member loops. Helpers that spin through a whole solve would make the short sections scale, at the price of three cores kept busy for a third of every frame; not done for that reason. NEON is compiled from the same source but has only been run on x86-64 so far.
+
 ## Next
 
-1. Speed: on bridges assembly is now the largest part of a frame (about half), so that is the next thing to cut; the remaining collapse spikes are step-check retries, each paying an assembly and a factorisation. Bridge 120's solves are memory-bound (a single-precision copy of the factor for preconditioning is untried); threads need re-measuring on a desktop CPU. Large 3D grids (tower 8x8x16) are limited by fill in the factorisation; a nested-dissection ordering or a looser `linear_tolerance` (1e-4 gave the same displacements and break counts in the bench) are the next levers there.
+1. Speed: on bridges assembly is now the largest part of a frame (about half), so that is the next thing to cut; the remaining collapse spikes are step-check retries, each paying an assembly and a factorisation. Bridge 120's solves are memory-bound (a single-precision copy of the factor for preconditioning is untried); Large 3D grids (tower 8x8x16) are limited by fill in the factorisation; a nested-dissection ordering or a looser `linear_tolerance` (1e-4 gave the same displacements and break counts in the bench) are the next levers there.
 2. Done: sparse static solve; axial-bending interaction Mp,N = Mp (1 - n²). Open: biaxial interaction, plastic torsion.
+3. Numerical damping: the loads thread measured ζ ≈ ωh/2 from implicit Euler (2.2% at 2 Hz with 4 substeps, 0.84% with 16), several times real steel's 0.2 to 0.5% above about 1 Hz. It mutes wind lock-in, galloping and quake resonance at default settings. Candidates: BDF2, or generalised-α with a little high-frequency dissipation.

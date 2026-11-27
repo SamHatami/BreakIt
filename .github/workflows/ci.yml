@@ -44,10 +44,16 @@ jobs:
       - run: >-
           cargo clippy --locked --all-targets --no-default-features
           -p breakit-core -p breakit-mesh -p breakit-parts -p breakit-scenario -p breakit-audio
+          -p breakit-playground -p breakit-water
           -- -D warnings
       - run: >-
           cargo test --locked --release --no-default-features
           -p breakit-core -p breakit-mesh -p breakit-parts -p breakit-scenario -p breakit-audio
+          -p breakit-playground -p breakit-water
+      # Hot-path gate (CONTRIBUTING.md, "Hot paths"): SIMD is dispatched and
+      # faster than the scalar reference, threads keep the answer and do not
+      # lose where they are on, solver work stays within budget.
+      - run: cargo run --locked --release --no-default-features -p breakit-core --example gate
 
   # The Bevy crates are checked and tested in two jobs, on two runners: clippy
   # and rustdoc only need metadata builds, tests need full builds, and doing
@@ -99,12 +105,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libudev-dev libwayland-dev libxkbcommon-dev libasound2-dev pkg-config
+            libudev-dev libwayland-dev libxkbcommon-dev libasound2-dev pkg-config \
+            mesa-vulkan-drivers
+      # mesa-vulkan-drivers is a software Vulkan adapter: with it the GPU
+      # water is compared with the CPU solver here (docs/water.md).
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: game
       # One full build of every target, reused by the tests. The engine-free
       # crates already ran in release above; debug here keeps the Bevy build small.
-      - run: cargo build --locked --all-targets -p breakit-game -p breakit-render -p breakit-lab
-      - run: cargo test --locked -p breakit-game -p breakit-render -p breakit-lab
+      - run: cargo build --locked --all-targets -p breakit-game -p breakit-render -p breakit-lab -p breakit-water-render -p breakit-water-gpu
+      - run: cargo test --locked -p breakit-game -p breakit-render -p breakit-lab -p breakit-water-render -p breakit-water-gpu
       - run: df -h /

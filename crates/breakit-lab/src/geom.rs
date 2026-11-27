@@ -254,6 +254,29 @@ impl MeshBuf {
         self.indices.extend(other.indices.iter().map(|i| i + base));
     }
 
+    /// Appends `other`, placed by `at` (rotation and translation).
+    pub fn append_transformed(
+        &mut self,
+        other: &MeshBuf,
+        at: &bevy::transform::components::Transform,
+    ) {
+        let base = self.base();
+        self.positions.extend(
+            other
+                .positions
+                .iter()
+                .map(|p| at.transform_point(Vec3::from_array(*p)).to_array()),
+        );
+        self.normals.extend(
+            other
+                .normals
+                .iter()
+                .map(|n| (at.rotation * Vec3::from_array(*n)).to_array()),
+        );
+        self.uvs.extend_from_slice(&other.uvs);
+        self.indices.extend(other.indices.iter().map(|i| i + base));
+    }
+
     pub fn into_mesh(self) -> Mesh {
         Mesh::new(
             PrimitiveTopology::TriangleList,

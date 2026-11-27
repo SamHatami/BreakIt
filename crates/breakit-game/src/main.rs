@@ -18,13 +18,16 @@ mod flow;
 mod guides;
 mod history;
 mod perf;
+mod playground;
 mod release;
 mod render;
+mod rigs;
 mod scenario;
 mod sound;
 mod testrun;
 mod ui;
 mod visuals;
+mod water;
 
 use bevy::prelude::*;
 use breakit_lab::{LabPlugin, PlayTable};
@@ -62,12 +65,15 @@ fn main() {
             analysis::AnalysisPlugin,
             testrun::TestRunPlugin,
             render::FrameRenderPlugin,
+            rigs::RigsPlugin,
             visuals::VisualsPlugin,
             ui::GameUiPlugin,
             capture::CapturePlugin,
             guides::GuidesPlugin,
             perf::PerfPlugin,
+            playground::PlaygroundPlugin,
             sound::SoundPlugin,
+            water::WaterPlugin,
         ))
         .add_systems(Update, cycle_table.run_if(in_state(flow::Screen::Build)))
         .run();
@@ -82,6 +88,6 @@ fn cycle_table(
 ) {
     if keys.just_pressed(KeyCode::KeyT) {
         *index += 1;
-        *table = PlayTable::builtin(*index);
+        *table = water::play_table(*index);
     }
 }

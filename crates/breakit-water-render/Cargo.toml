@@ -1,0 +1,21 @@
+[package]
+name = "breakit-water-render"
+version = "0.1.0"
+description = "Bevy renderer for BreakIt water: the simulated surface with refraction, depth colour, reflections, caustics, foam and spray."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+breakit-water = { path = "../breakit-water" }
+# Same pin as breakit-game; upgrade all Bevy crates together.
+bevy = { version = "=0.20.1", default-features = false, features = ["3d", "ui"] }
+
+[dev-dependencies]
+breakit-core = { path = "../breakit-core" }
+breakit-lab = { path = "../breakit-lab" }
+
+[lints]
+workspace = true

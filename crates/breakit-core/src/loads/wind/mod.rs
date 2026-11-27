@@ -60,12 +60,10 @@ pub mod turbulence;
 
 use std::collections::HashMap;
 
-use rayon::prelude::*;
-
 use super::rng::Rng;
 use super::View;
 use crate::section::Shape;
-use crate::{Structure, Vec3};
+use crate::{SimdLevel, Structure, Vec3};
 use shedding::WakeOscillator;
 use turbulence::TurbulenceField;
 
@@ -177,8 +175,91 @@ fn default_modes() -> usize {
     DEFAULT_MODES
 }
 
+/// How [`Wind::apply`] runs: instruction set and threads. Kept by
+/// [`Wind::prepare`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Execution {
+    /// Instruction set of the turbulence kernel. Default
+    /// [`SimdLevel::from_env`]; [`SimdLevel::Scalar`] is the reference.
+    pub simd: SimdLevel,
+    /// Structures with at least this many members evaluate members and
+    /// turbulence on the rayon pool. The answer is the same on any thread
+    /// count, bit for bit. `usize::MAX` keeps it on the calling thread.
+    ///
+    /// The default is [`PARALLEL_MIN_MEMBERS`].
+    pub parallel_min_members: usize,
+}
+
+/// Default of [`Execution::parallel_min_members`]. On the 4-core cloud
+/// machine, with the solver stepping between frames, threads broke even at
+/// about 500 members and took a third off from 1,300 (see `docs/loads.md`).
+pub const PARALLEL_MIN_MEMBERS: usize = 768;
+
+/// Two-point Gauss-Legendre points on [0, 1] (equal weights 1/2).
+const GAUSS2: [f64; 2] = [0.211_324_865_405_187_1, 0.788_675_134_594_812_9];
+
+/// Hashes a shielding cell: two multiplies, against SipHash's dozens. The
+/// keys are small grid indices from our own geometry, not untrusted input.
+#[derive(Default)]
+struct CellHasher(u64);
+
+impl std::hash::Hasher for CellHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(b as u64);
+        }
+    }
+    fn write_i64(&mut self, v: i64) {
+        self.write_u64(v as u64);
+    }
+    fn write_u64(&mut self, v: u64) {
+        self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+}
+
+type CellMap<V> = HashMap<(i64, i64), V, std::hash::BuildHasherDefault<CellHasher>>;
+
+/// Members per parallel work item: a few microseconds of work each.
+const MEMBER_CHUNK: usize = 32;
+/// Nodes per parallel turbulence work item.
+const NODE_CHUNK: usize = 16;
+
+impl Default for Execution {
+    fn default() -> Self {
+        Self {
+            simd: SimdLevel::from_env(),
+            parallel_min_members: PARALLEL_MIN_MEMBERS,
+        }
+    }
+}
+
+/// The wind frame: along the wind, across it (horizontal) and up.
+#[derive(Clone, Copy, Debug)]
+struct Basis {
+    d: Vec3,
+    across: Vec3,
+    up: Vec3,
+}
+
+/// Section coefficients that depend only on the member's shape, cached at
+/// prepare.
+#[derive(Clone, Copy, Debug, Default)]
+struct SectionCoef {
+    /// Rectangles: drag coefficients for flow along local y and z.
+    rect_cy: f64,
+    rect_cz: f64,
+    /// Rectangles: drag on the face met by flow along y and along z, and
+    /// the galloping factor (0 = none) for each.
+    gallop_y: (f64, f64),
+    gallop_z: (f64, f64),
+}
+
 #[derive(Clone, Debug, Default)]
 struct WindState {
+    exec: Option<Execution>,
     field: Option<TurbulenceField>,
     /// Point where the rig reports the wind: upstream edge, mid height.
     reference: Vec3,
@@ -187,6 +268,8 @@ struct WindState {
     shield_time: f64,
     shield_broken: usize,
     members: Vec<MemberState>,
+    /// Gust at each node this frame (scratch kept between frames).
+    gust_nodes: Vec<Vec3>,
     /// Resolved panels, in `panels` order.
     panels: Vec<Result<panels::PanelState, panels::PanelError>>,
     last_t: Option<f64>,
@@ -195,6 +278,7 @@ struct WindState {
 #[derive(Clone, Debug, Default)]
 struct MemberState {
     wake: WakeOscillator,
+    coef: SectionCoef,
     /// Midpoint velocity last frame, m/s.
     prev_v: Option<Vec3>,
     /// Running mean of the squared cross-wind velocity, m²/s².
@@ -280,18 +364,38 @@ impl Wind {
     }
 
     fn dir(&self) -> Vec3 {
+        self.basis().d
+    }
+
+    /// Along the wind, and the plane normal to it: across (horizontal) and
+    /// up.
+    fn basis(&self) -> Basis {
         let d = Vec3::new(self.direction.x, 0.0, self.direction.z);
-        if d.norm() > 1e-12 {
+        let d = if d.norm() > 1e-12 {
             d.normalize()
         } else {
             Vec3::x()
+        };
+        Basis {
+            d,
+            across: Vec3::y().cross(&d).normalize(),
+            up: Vec3::y(),
         }
     }
 
-    /// Basis of the plane normal to the wind: across (horizontal) and up.
     fn cross_basis(&self) -> (Vec3, Vec3) {
-        let d = self.dir();
-        (Vec3::y().cross(&d).normalize(), Vec3::y())
+        let b = self.basis();
+        (b.across, b.up)
+    }
+
+    /// How [`Self::apply`] runs.
+    pub fn execution(&self) -> Execution {
+        self.state.exec.unwrap_or_default()
+    }
+
+    /// Set the instruction set and thread threshold of [`Self::apply`].
+    pub fn set_execution(&mut self, exec: Execution) {
+        self.state.exec = Some(exec);
     }
 
     /// Build the turbulence field and per-member state for structure `s`.
@@ -318,16 +422,21 @@ impl Wind {
             )
         });
         let mut rng = Rng::new(self.gusts.as_ref().map_or(7, |g| g.seed ^ 0x5eed));
-        let members = (0..s.members.len())
-            .map(|_| MemberState {
+        let geometry = super::Geometry::new(s);
+        let members = geometry
+            .members
+            .iter()
+            .map(|g| MemberState {
                 // Shedding starts at random phases: members are not
                 // correlated until motion couples them.
                 wake: WakeOscillator::with_phase(std::f64::consts::TAU * rng.uniform(), 1.0),
+                coef: section_coef(g),
                 ..Default::default()
             })
             .collect();
         let panels = self.panels.iter().map(|p| p.resolve(s)).collect();
         *self.state = WindState {
+            exec: self.state.exec,
             field,
             reference,
             members,
@@ -342,6 +451,10 @@ impl Wind {
     }
 
     pub fn profile_factor(&self, p: Vec3) -> f64 {
+        self.profile_at(&self.basis(), p)
+    }
+
+    fn profile_at(&self, basis: &Basis, p: Vec3) -> f64 {
         let h = p.y - self.ground;
         if h <= 0.0 {
             return 0.0;
@@ -365,7 +478,7 @@ impl Wind {
                 half_height,
                 edge,
             } => {
-                let (across, up) = self.cross_basis();
+                let (across, up) = (basis.across, basis.up);
                 let r = p - center;
                 let top_hat = |x: f64, half: f64| {
                     let e = edge.max(1e-9);
@@ -385,43 +498,41 @@ impl Wind {
 
     /// Mean wind velocity at `p` with window ramp `ramp`, m/s.
     pub fn mean_velocity(&self, p: Vec3, ramp: f64) -> Vec3 {
-        self.dir() * (self.speed * ramp * self.profile_factor(p))
+        let b = self.basis();
+        self.mean_at(&b, p, ramp)
     }
 
-    /// Scale of the turbulence at `p`: zero below the ground and outside the
-    /// fan jet, full where the mean wind is at least half its reference.
-    fn gust_scale(&self, p: Vec3) -> f64 {
-        (self.profile_factor(p) / 0.5).min(1.0)
+    fn mean_at(&self, b: &Basis, p: Vec3, ramp: f64) -> Vec3 {
+        b.d * (self.speed * ramp * self.profile_at(b, p))
     }
 
-    /// Turbulent fluctuation at `p` (m/s, world axes), without the height
-    /// and jet scaling.
-    fn fluctuation(&self, p: Vec3, t: f64, ramp: f64) -> Vec3 {
+    /// Turbulent fluctuation at `p` (m/s, world axes), scaled with the
+    /// profile: zero below the ground and outside the fan jet, full where
+    /// the mean wind is at least half its reference.
+    fn gust_at(&self, b: &Basis, level: SimdLevel, p: Vec3, t: f64, ramp: f64) -> Vec3 {
         let (Some(f), Some(g)) = (&self.state.field, &self.gusts) else {
             return Vec3::zeros();
         };
-        let d = self.dir();
-        let (across, up) = self.cross_basis();
+        let gs = (self.profile_at(b, p) / 0.5).min(1.0);
+        if gs == 0.0 {
+            return Vec3::zeros();
+        }
         let xi = Vec3::new(
-            p.dot(&d) - self.speed.max(0.5) * t,
-            p.dot(&across),
-            p.dot(&up),
+            p.dot(&b.d) - self.speed.max(0.5) * t,
+            p.dot(&b.across),
+            p.dot(&b.up),
         );
-        let u = f.sample(xi, t);
-        let sigma = g.intensity * self.speed * ramp;
-        (d * u.x + across * (0.75 * u.y) + up * (0.5 * u.z)) * sigma
+        let u = f.sample_with(level, xi, t);
+        let sigma = g.intensity * self.speed * ramp * gs;
+        (b.d * u.x + b.across * (0.75 * u.y) + b.up * (0.5 * u.z)) * sigma
     }
 
     /// Wind velocity at `p`, `t` seconds after the case started, with the
     /// window ramp `ramp` (0..1): mean plus turbulence. For smoke streamers,
     /// tufts and payloads too.
     pub fn velocity(&self, p: Vec3, t: f64, ramp: f64) -> Vec3 {
-        let gs = self.gust_scale(p);
-        let mean = self.mean_velocity(p, ramp);
-        if gs == 0.0 {
-            return mean;
-        }
-        mean + self.fluctuation(p, t, ramp) * gs
+        let b = self.basis();
+        self.mean_at(&b, p, ramp) + self.gust_at(&b, self.execution().simd, p, t, ramp)
     }
 
     fn update_shielding(&mut self, v: &View) {
@@ -467,7 +578,7 @@ impl Wind {
             xa.total_cmp(&xb)
         });
         // Per cell: velocity deficit, where it was left, its recovery length.
-        let mut cells: HashMap<(i64, i64), (f64, f64, f64)> = HashMap::new();
+        let mut cells: CellMap<(f64, f64, f64)> = CellMap::default();
         let mut marks: Vec<((i64, i64), f64, f64)> = Vec::new();
         for (m, mn, w) in &items {
             let along = (mn.xb - mn.xa).dot(&across).hypot((mn.xb - mn.xa).dot(&up));
@@ -522,42 +633,83 @@ impl Wind {
             }
             return;
         }
-        // Turbulence at every node, in parallel. Members interpolate between
-        // their ends: they are short against the eddies that carry the
-        // energy (the integral length scale is tens of metres).
-        let nn = v.structure.nodes.len();
-        let gust_nodes: Vec<Vec3> = if self.state.field.is_some() {
-            let me = &*self;
-            (0..nn)
-                .into_par_iter()
-                .map(|n| {
-                    let p = v.sim.position(n);
-                    me.fluctuation(p, t, ramp) * me.gust_scale(p)
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
         self.update_shielding(v);
+        let exec = self.execution();
+        let parallel = nm >= exec.parallel_min_members && rayon::current_num_threads() > 1;
         let mut members = std::mem::take(&mut self.state.members);
+        let mut gust_nodes = std::mem::take(&mut self.state.gust_nodes);
+        let me = &*self;
+        let basis = self.basis();
+        let threads = if parallel {
+            rayon::current_num_threads()
+        } else {
+            1
+        };
+        // Turbulence at every node. Members interpolate between their ends:
+        // they are short against the eddies that carry the energy (the
+        // integral length scale is tens of metres).
+        let nn = v.structure.nodes.len();
+        gust_nodes.clear();
+        if me.state.field.is_some() {
+            gust_nodes.resize(nn, Vec3::zeros());
+            let gust = |n0: usize, chunk: &mut [Vec3]| {
+                for (i, g) in chunk.iter_mut().enumerate() {
+                    *g = me.gust_at(&basis, exec.simd, v.sim.position(n0 + i), t, ramp);
+                }
+            };
+            if threads > 1 {
+                let mut slots: Vec<_> = gust_nodes.chunks_mut(NODE_CHUNK).collect();
+                let helpers = (slots.len() / 4).min(threads - 1);
+                crate::dynamics::pool::ordered_chunks(
+                    &mut slots,
+                    helpers,
+                    |c, chunk| gust(c * NODE_CHUNK, chunk),
+                    |_, _| {},
+                );
+            } else {
+                gust(0, &mut gust_nodes);
+            }
+        }
         let frame = Frame {
-            t,
+            basis,
             ramp,
             scale,
             dt,
             gust_nodes: &gust_nodes,
         };
-        let me = &*self;
-        let forces: Vec<(usize, usize, Vec3, Vec3)> = members
-            .par_iter_mut()
-            .enumerate()
-            .map(|(m, ms)| me.member_frame(v, &frame, m, ms))
-            .collect();
-        self.state.members = members;
-        for (a, b, fa, fb) in forces {
-            out[a] += fa;
-            out[b] += fb;
+        // Each member's end forces, added in member order on this thread,
+        // so the result does not depend on the threads.
+        let member = |m0: usize, chunk: &mut [MemberState], forces: &mut Vec<_>| {
+            forces.clear();
+            for (i, ms) in chunk.iter_mut().enumerate() {
+                forces.push(me.member_frame(v, &frame, m0 + i, ms));
+            }
+        };
+        let add = |forces: &[(usize, usize, Vec3, Vec3)], out: &mut [Vec3]| {
+            for &(a, b, fa, fb) in forces {
+                out[a] += fa;
+                out[b] += fb;
+            }
+        };
+        if threads > 1 {
+            let mut slots: Vec<_> = members
+                .chunks_mut(MEMBER_CHUNK)
+                .map(|c| (c, Vec::with_capacity(MEMBER_CHUNK)))
+                .collect();
+            let helpers = (slots.len() / 4).min(threads - 1);
+            crate::dynamics::pool::ordered_chunks(
+                &mut slots,
+                helpers,
+                |c, (chunk, forces)| member(c * MEMBER_CHUNK, chunk, forces),
+                |_, (_, forces)| add(forces, out),
+            );
+        } else {
+            let mut forces = Vec::with_capacity(nm);
+            member(0, &mut members, &mut forces);
+            add(&forces, out);
         }
+        self.state.members = members;
+        self.state.gust_nodes = gust_nodes;
         let mut states = std::mem::take(&mut self.state.panels);
         for (spec, st) in self.panels.iter().zip(states.iter_mut()) {
             if let Ok(st) = st {
@@ -599,19 +751,20 @@ impl Wind {
         };
         let wind_at = |s: f64| {
             let (p, _) = mn.at(s);
-            self.mean_velocity(p, fr.ramp) + gust(s)
+            self.mean_at(&fr.basis, p, fr.ramp) + gust(s)
         };
 
-        // Drag (and galloping) at four points along the member.
-        let n = 4;
-        let ds = mn.length / n as f64;
+        // Drag (and galloping) by two-point Gauss quadrature along the
+        // member: exact while the force per length times the lumping weight
+        // is a cubic, which it is for a uniform wind on a member moving
+        // rigidly until the normal flow changes sign.
+        let ds = 0.5 * mn.length;
         let (mut fa, mut fb) = (Vec3::zeros(), Vec3::zeros());
-        for i in 0..n {
-            let s = (i as f64 + 0.5) / n as f64;
+        for s in GAUSS2 {
             let (_, vs) = mn.at(s);
             let rel = wind_at(s) - vs;
             let vn = rel - mn.x * mn.x.dot(&rel);
-            let f = self.section_force(&mn, g, vn) * (rho * psi * fr.scale * ds);
+            let f = self.section_force(&mn, g, &ms.coef, vn) * (rho * psi * fr.scale * ds);
             fa += f * (1.0 - s);
             fb += f * s;
         }
@@ -692,37 +845,47 @@ impl Wind {
 
     /// Quasi-steady force per unit length over ρ for relative normal flow
     /// `vn`: drag by section, plus galloping for rectangles.
-    fn section_force(&self, mn: &super::MemberNow, g: &super::MemberGeometry, vn: Vec3) -> Vec3 {
+    fn section_force(
+        &self,
+        mn: &super::MemberNow,
+        g: &super::MemberGeometry,
+        coef: &SectionCoef,
+        vn: Vec3,
+    ) -> Vec3 {
         let s = vn.norm();
         if s < 1e-9 {
             return Vec3::zeros();
         }
         let (vy, vz) = (vn.dot(&mn.y), vn.dot(&mn.z));
-        let (cy, cz) = drag_coefficients(&g.shape, g.depth_y, g.depth_z, s);
+        let (cy, cz) = match g.shape {
+            Shape::Tube { ro, .. } => {
+                let c = cylinder_drag(s * 2.0 * ro / AIR_VISCOSITY);
+                (c, c)
+            }
+            Shape::Rect { .. } => (coef.rect_cy, coef.rect_cz),
+        };
         let drag = (mn.y * (cy * g.depth_z * vy) + mn.z * (cz * g.depth_y * vz)) * (0.5 * s);
         if !self.galloping || !matches!(g.shape, Shape::Rect { .. }) {
             return drag;
         }
         // Main flow axis, the face it meets, and the angle of attack.
-        let (main, cross, v_main, v_cross, d, b) = if vy.abs() >= vz.abs() {
-            (mn.y, mn.z, vy, vz, g.depth_y, g.depth_z)
+        let (main, cross, v_main, v_cross, b, (cd, factor)) = if vy.abs() >= vz.abs() {
+            (mn.y, mn.z, vy, vz, g.depth_z, coef.gallop_y)
         } else {
-            (mn.z, mn.y, vz, vy, g.depth_z, g.depth_y)
+            (mn.z, mn.y, vz, vy, g.depth_y, coef.gallop_z)
         };
-        let tan_a = v_cross.abs() / v_main.abs().max(1e-12);
-        let alpha = tan_a.atan();
-        if alpha >= GALLOPING_BLEND {
-            return drag;
-        }
-        let factor = checks::galloping_factor(&g.shape, d, b).map_or(0.0, |a| a / 1.2);
         if factor <= 0.0 {
             return drag;
         }
+        let tan_a = v_cross.abs() / v_main.abs().max(1e-12);
+        if tan_a >= GALLOPING_BLEND.tan() {
+            return drag;
+        }
+        let alpha = tan_a.atan();
         // Quasi-steady: drag along the main axis on the face b, and the
         // cross-wind coefficient (positive = against the cross flow, i.e.
         // with the member's motion that caused it).
         let q = 0.5 * s * s;
-        let cd = rect_drag(d / b);
         let cfy = factor * galloping_coefficient(tan_a);
         let qs = main * (q * b * cd * v_main.signum()) - cross * (q * b * cfy * v_cross.signum());
         let w = 1.0 - super::smooth_ramp(alpha - GALLOPING_ZERO, GALLOPING_BLEND - GALLOPING_ZERO);
@@ -777,13 +940,30 @@ impl Wind {
     }
 }
 
+/// Shape-only coefficients of member `g` ([`SectionCoef`]).
+fn section_coef(g: &super::MemberGeometry) -> SectionCoef {
+    match g.shape {
+        Shape::Tube { .. } => SectionCoef::default(),
+        Shape::Rect { .. } => {
+            let (rect_cy, rect_cz) = drag_coefficients(&g.shape, g.depth_y, g.depth_z, 0.0);
+            // Flow along y meets the face of width depth_z, depth_y deep.
+            let gallop = |d: f64, b: f64| {
+                let factor = checks::galloping_factor(&g.shape, d, b).map_or(0.0, |a| a / 1.2);
+                (rect_drag(d / b), factor)
+            };
+            SectionCoef {
+                rect_cy,
+                rect_cz,
+                gallop_y: gallop(g.depth_y, g.depth_z),
+                gallop_z: gallop(g.depth_z, g.depth_y),
+            }
+        }
+    }
+}
+
 /// Per-frame inputs shared by every member.
 struct Frame<'a> {
-    #[expect(
-        dead_code,
-        reason = "kept for symmetry with the case time used by panels"
-    )]
-    t: f64,
+    basis: Basis,
     ramp: f64,
     scale: f64,
     dt: f64,
