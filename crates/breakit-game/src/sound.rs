@@ -371,12 +371,17 @@ fn structure_sounds(
         |command| sound.send(command),
     );
     // Members singing in the wind, while a wind load is blowing.
-    let run = sim.run();
-    let now = run.sim().time();
-    for case in &run.loads().cases {
+    // A test run and the playground's load bench both carry their loads.
+    let loads = match (sim.run(), sim.live()) {
+        (Some(run), _) => run.loads(),
+        (None, Some(live)) => live.loads(),
+        (None, None) => return,
+    };
+    let now = sim.sim().time();
+    for case in &loads.cases {
         if let LoadKind::Wind(wind) = &case.kind {
             if case.window.factor(now) > 0.0 {
-                wind_tones(run.sim(), structure, wind, [0.0; 3], |command| {
+                wind_tones(sim.sim(), structure, wind, [0.0; 3], |command| {
                     sound.send(command)
                 });
             }
