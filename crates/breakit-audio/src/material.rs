@@ -430,17 +430,31 @@ pub fn break_voice(info: &BreakInfo, detail: f32, sr: f32, seed: u32) -> Option<
         axial: axial.sqrt().max(0.15),
     };
     let modes = budget(BREAK_MODES, detail);
+    // Steel pulled apart is computed from end to end: the load let go rings
+    // the two halves, which lose their ring to the joints they hang from.
+    let computed = material == MaterialKind::Steel && matches!(cause, BreakCause::Rupture);
+    let held = |piece: &Body, drive: Drive, seed: u32| {
+        if computed {
+            let eta = joint_loss(material);
+            let mut modes = piece.modes(drive, modes, seed);
+            for m in &mut modes {
+                m.decay += std::f32::consts::PI * m.freq * eta;
+            }
+            modes
+        } else {
+            seated(piece, drive, modes, seed)
+        }
+    };
     let mut banks = vec![
-        Bank::new(&seated(&pa, drive, modes, seed), sr),
+        Bank::new(&held(&pa, drive, seed), sr),
         Bank::new(
-            &seated(
+            &held(
                 &pb,
                 if connection {
                     Drive { at: 0.04, ..drive }
                 } else {
                     drive
                 },
-                modes,
                 seed ^ 0xB,
             ),
             sr,
@@ -453,8 +467,14 @@ pub fn break_voice(info: &BreakInfo, detail: f32, sr: f32, seed: u32) -> Option<
 
     match cause {
         // Steel in tension: necking is silent, then the last ligament
-        // shears through in a fraction of a millisecond. The halves recoil
-        // and the wave rattles each joint as it bounces.
+        // shears through in a fraction of a millisecond and the halves
+        // recoil. The wave that bounces along each half is its axial modes,
+        // already in the banks.
+        BreakCause::Rupture if computed => {
+            s.release(0.0, 0.25e-3, A, 0.8, 1.0);
+            s.release(0.0, 0.25e-3, B, 0.8, 0.0);
+            s.release(0.0, 1.5e-3, FLOOR, 0.15, 0.0);
+        }
         BreakCause::Rupture => {
             s.release(0.0, 0.25e-3, A, 0.8, 1.0);
             s.release(0.0, 0.25e-3, B, 0.8, 0.0);
@@ -611,6 +631,7 @@ pub fn break_voice(info: &BreakInfo, detail: f32, sr: f32, seed: u32) -> Option<
     let size = s.size;
     let _ = m;
     match cause {
+        BreakCause::Rupture if computed => {}
         BreakCause::Rupture => {
             s.event(0.0, Timbre::SteelSnap, size, 1.0, A);
         }
@@ -801,10 +822,10 @@ pub fn impact_voice(
         },
         detail,
     );
-    // A loose steel piece is a free bar and rings as one: its own modes and
+    // A loose steel or timber piece is a free bar and rings as one: its own modes and
     // the contact pulse are the whole sound, nothing recorded. The other
     // materials land with a recorded knock.
-    let rings = material == MaterialKind::Steel;
+    let rings = matches!(material, MaterialKind::Steel | MaterialKind::Timber);
     let ringing = |drive: Drive, budget: usize, seed: u32| {
         if rings {
             piece.modes(drive, budget, seed)
